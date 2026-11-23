@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Felldl 默认能力：核心 IPC、事件订阅、对话框选择目录、打开文件与通知",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:window:default",
+    "core:webview:default",
+    "core:path:default",
+    "dialog:default",
+    "opener:default",
+    "notification:default"
+  ]
+}

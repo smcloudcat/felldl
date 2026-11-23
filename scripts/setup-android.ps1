@@ -13,6 +13,22 @@ if (-not (Test-Path $sdk)) {
 }
 Write-Host "[OK] Android SDK: $sdk" -ForegroundColor Green
 
+# 0) JDK 检查：Gradle/AGP 需要 JDK 17+
+$javaExe = Join-Path $env:JAVA_HOME "bin\java.exe"
+if (-not $env:JAVA_HOME -or -not (Test-Path $javaExe)) {
+    Write-Host "[!] JAVA_HOME 未设置或无效：$env:JAVA_HOME" -ForegroundColor Yellow
+    Write-Host "    Android 构建需要 JDK 17+，请设置 JAVA_HOME 指向 JDK 17/21/22 目录。" -ForegroundColor Yellow
+} else {
+    $verLine = (& $javaExe -version 2>&1 | Select-Object -First 1) -join ""
+    Write-Host "[OK] JDK: $verLine" -ForegroundColor Green
+    if ($verLine -match '"(1\.)?(\d+)') {
+        $major = [int]$Matches[2]
+        if ($major -lt 17) {
+            Write-Host "[!] 当前 JDK 版本过低（$major），Gradle 需要 17+，构建可能失败。" -ForegroundColor Red
+        }
+    }
+}
+
 # 1) 安装 SDK 组件（platform 35 / build-tools / NDK / CMake / platform-tools）
 $cmdlineTools = Get-ChildItem (Join-Path $sdk "cmdline-tools") -Directory -ErrorAction SilentlyContinue |
     Sort-Object Name | Select-Object -Last 1
@@ -20,6 +36,11 @@ $sdkmanager = $null
 if ($cmdlineTools) {
     $cand = Join-Path $cmdlineTools.FullName "bin\sdkmanager.bat"
     if (Test-Path $cand) { $sdkmanager = $cand }
+}
+if (-not $sdkmanager) {
+    Write-Host "[!] 未找到 cmdline-tools（sdkmanager）" -ForegroundColor Yellow
+    Write-Host "    请下载安装： https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip" -ForegroundColor Yellow
+    Write-Host "    解压到 $sdk\cmdline-tools\latest，再重跑本脚本。" -ForegroundColor Yellow
 }
 
 function Install-SdkComponent([string]$id, [string]$label) {
@@ -45,12 +66,20 @@ function Install-SdkComponent([string]$id, [string]$label) {
     else { Write-Host "[!] $label 安装失败，请手动安装：$id" -ForegroundColor Red }
 }
 
-# NDK 版本由 Tauri 2 决定，这里用 26.x（兼容 Tauri 2.x）
+# NDK 版本：27.2 LTS（Tauri 2.x 实测可用）
+$NDK_VERSION = "27.2.12479018"
 Install-SdkComponent "platforms;android-35" "Android 35 SDK"
 Install-SdkComponent "build-tools;35.0.0" "Build Tools 35"
-Install-SdkComponent "ndk;26.3.11579264" "NDK 26.3"
+Install-SdkComponent "ndk;$NDK_VERSION" "NDK $NDK_VERSION"
 Install-SdkComponent "cmake;3.22.1" "CMake 3.22"
 Install-SdkComponent "platform-tools" "Platform Tools"
+
+$ndkPath = Join-Path $sdk "ndk\$NDK_VERSION"
+if (Test-Path $ndkPath) {
+    $env:NDK_HOME = $ndkPath
+    Write-Host "[OK] NDK_HOME=$ndkPath（仅当前会话生效）" -ForegroundColor Green
+    Write-Host "    如需永久生效： setx NDK_HOME `"$ndkPath`"" -ForegroundColor DarkGray
+}
 
 # 2) Rust 交叉编译目标
 Write-Host "[..] 安装 Rust Android targets ..." -ForegroundColor Yellow

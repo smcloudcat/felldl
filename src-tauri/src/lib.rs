@@ -6,10 +6,14 @@
 use felldl_core::api;
 use felldl_core::{AddTaskRequest, Engine, EngineEvent, Settings, Task};
 use std::sync::Arc;
+use tauri::{Emitter, Manager, State};
+
+// 托盘与菜单是桌面专属 API，移动端不存在
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, State, WindowEvent,
+    WindowEvent,
 };
 
 struct AppState {
@@ -167,23 +171,33 @@ async fn show_in_folder(path: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let (tx, rx) = std::sync::mpsc::channel();
-    app.dialog().file().pick_folder(move |p| {
-        let _ = tx.send(p);
-    });
-    // 阻塞等待用户选择（在 async 命令里用 spawn_blocking 避免卡 runtime）
-    let picked = tokio::task::spawn_blocking(move || rx.recv().ok().flatten())
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(picked.map(|p| p.to_string()))
+    // 桌面对话框支持选择目录
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        use tauri_plugin_dialog::DialogExt;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.dialog().file().pick_folder(move |p| {
+            let _ = tx.send(p);
+        });
+        // 阻塞等待用户选择（在 async 命令里用 spawn_blocking 避免卡 runtime）
+        let picked = tokio::task::spawn_blocking(move || rx.recv().ok().flatten())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(picked.map(|p| p.to_string()))
+    }
+    // 移动端 dialog 插件没有目录选择 API：返回 None，前端回落到系统默认下载目录
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = app;
+        Ok(None)
+    }
 }
 
-fn open_path(path: &str) -> Result<(), String> {
+fn open_path(_path: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("cmd")
-            .args(["/C", "start", "", path])
+            .args(["/C", "start", "", _path])
             .spawn()
             .map_err(|e| e.to_string())?;
         return Ok(());
@@ -191,7 +205,7 @@ fn open_path(path: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         std::process::Command::new("open")
-            .arg(path)
+            .arg(_path)
             .spawn()
             .map_err(|e| e.to_string())?;
         return Ok(());
@@ -199,7 +213,7 @@ fn open_path(path: &str) -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
     {
         std::process::Command::new("xdg-open")
-            .arg(path)
+            .arg(_path)
             .spawn()
             .map_err(|e| e.to_string())?;
         return Ok(());
@@ -238,7 +252,13 @@ fn reveal_path(path: &str) -> Result<(), String> {
 
 // ───────────────────────── 启动 ─────────────────────────
 
+/// 应用入口。
+///
+/// 桌面端由 `main.rs` 调用；移动端通过 `mobile_entry_point` 宏生成 JNI 入口，
+/// 由 Android 的 MainActivity 直接调用（**这一行属性不能删**，否则 APK 启动崩溃）。
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -305,6 +325,7 @@ pub fn run() {
                 }
             });
 
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             setup_tray(&handle)?;
             Ok(())
         })
@@ -357,6 +378,7 @@ fn notify_done(app: &tauri::AppHandle, task: &Task) {
         .show();
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let pause_all = MenuItem::with_id(app, "pause_all", "全部暂停", true, None::<&str>)?;

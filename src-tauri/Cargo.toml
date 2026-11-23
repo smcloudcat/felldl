@@ -9,6 +9,10 @@ description = "Felldl - 多线程下载加速器"
 name = "felldl_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# 生产构建启用：把前端资源内嵌进二进制，不再回退到 devUrl(localhost:1420)
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

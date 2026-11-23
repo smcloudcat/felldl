@@ -44,6 +44,9 @@ export default function App() {
   const [showNew, setShowNew] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [initError, setInitError] = useState<string | null>(null);
+  const [slowHint, setSlowHint] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const toastId = useRef(0);
 
   const toast = useCallback((msg: string, kind: "ok" | "error" = "ok") => {
@@ -54,17 +57,34 @@ export default function App() {
 
   // ── 初始化 ──
   useEffect(() => {
+    let alive = true;
+    // 兜底提示：低端机冷启动 WebView 可能超过 10s，这里只提示"较慢"、不判失败
+    const timer = setTimeout(() => {
+      if (alive) setSlowHint(true);
+    }, 20000);
     (async () => {
       try {
         const [ts, s] = await Promise.all([api.listTasks(), api.getSettings()]);
+        if (!alive) return;
+        clearTimeout(timer);
         setTasks(ts);
         setSettings(s);
+        setInitError(null);
+        setSlowHint(false);
       } catch (e) {
+        if (!alive) return;
+        clearTimeout(timer);
         console.error("初始化失败", e);
+        setInitError(String(e));
+        setSlowHint(false);
         toast("初始化失败，请检查后端服务", "error");
       }
     })();
-  }, [toast]);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [toast, reloadKey]);
 
   // ── 订阅引擎事件 ──
   useEffect(() => {
@@ -253,8 +273,26 @@ export default function App() {
   if (!settings) {
     return (
       <div className="app">
-        <div style={{ margin: "auto", color: "var(--text-mute)", fontSize: 13 }}>
-          正在启动引擎…
+        <div className="boot-screen">
+          <div className="boot-title">{initError ? "引擎启动失败" : "正在启动引擎…"}</div>
+          {slowHint && !initError && (
+            <div className="boot-hint">启动较慢，仍在等待后端响应…</div>
+          )}
+          {initError && (
+            <>
+              <div className="boot-error">{initError}</div>
+              <button
+                className="btn btn-primary"
+                onClick={() => {
+                  setInitError(null);
+                  setSlowHint(false);
+                  setReloadKey((k) => k + 1);
+                }}
+              >
+                重试
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
@@ -367,7 +405,7 @@ export default function App() {
                   </button>
                 )}
                 <button
-                  className="btn btn-primary mobile-fab"
+                  className="btn btn-primary header-new-btn"
                   onClick={() => setShowNew(true)}
                   title="新建下载 (Ctrl+N)"
                 >
@@ -405,6 +443,19 @@ export default function App() {
           )}
         </div>
       </main>
+
+      {/* 移动端浮动新建按钮：必须放在 .header 之外，
+          否则会被 header 的 backdrop-filter 变成包含块而错位 */}
+      {view === "downloads" && (
+        <button
+          className="btn btn-primary mobile-fab"
+          onClick={() => setShowNew(true)}
+          aria-label="新建下载"
+          title="新建下载"
+        >
+          <IconPlus />
+        </button>
+      )}
 
       {showNew && (
         <NewTaskDialog

@@ -1192,6 +1192,11 @@ textarea {
   display: none;
 }
 
+/* 移动端浮动按钮：桌面隐藏，移动端见下方媒体查询 */
+.mobile-fab {
+  display: none;
+}
+
 @media (max-width: 820px) {
   :root {
     --sidebar-w: 0px;
@@ -1285,6 +1290,7 @@ textarea {
     height: 64px;
   }
   .btn-primary.mobile-fab {
+    display: inline-flex;
     position: fixed;
     right: 16px;
     bottom: max(20px, env(safe-area-inset-bottom));
@@ -1292,8 +1298,13 @@ textarea {
     width: 54px;
     height: 54px;
     padding: 0;
+    align-items: center;
+    justify-content: center;
     border-radius: 50%;
     box-shadow: 0 10px 30px -4px rgba(14, 165, 233, 0.55);
+  }
+  .header-new-btn {
+    display: none;
   }
   .btn-primary.mobile-fab span {
     display: none;
@@ -1328,4 +1339,36 @@ textarea {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ── 启动引导屏（引擎初始化 / 失败重试） ── */
+.boot-screen {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px;
+  max-width: 440px;
+  text-align: center;
+}
+.boot-title {
+  font-size: 13px;
+  color: var(--text-mute);
+  letter-spacing: 0.2px;
+}
+.boot-error {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--accent-danger);
+  background: color-mix(in srgb, var(--accent-danger) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent-danger) 22%, transparent);
+  border-radius: 10px;
+  padding: 10px 12px;
+  word-break: break-word;
+}
+.boot-hint {
+  font-size: 12px;
+  color: var(--text-mute);
+  opacity: 0.85;
 }

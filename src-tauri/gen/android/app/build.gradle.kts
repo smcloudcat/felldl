@@ -15,13 +15,25 @@ val tauriProperties = Properties().apply {
 }
 
 android {
-    compileSdk = 35
+    compileSdk = 36
     namespace = "com.felldl.app"
+    signingConfigs {
+        create("release") {
+            // 自签密钥（开发/自用）：如需上架请替换为自己的正式签名
+            val ks = rootProject.file("keystore/felldl-release.jks")
+            if (ks.exists()) {
+                storeFile = ks
+                storePassword = "felldl123"
+                keyAlias = "felldl"
+                keyPassword = "felldl123"
+            }
+        }
+    }
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "com.felldl.app"
         minSdk = 24
-        targetSdk = 35
+        targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }
@@ -39,6 +51,10 @@ android {
             }
         }
         getByName("release") {
+            val ks = rootProject.file("keystore/felldl-release.jks")
+            if (ks.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             optimization {
                enable = true
             }

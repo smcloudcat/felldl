@@ -20,7 +20,7 @@ Windows 与 Android 共用**同一套 Rust 引擎 + React 界面**，浏览器�
 | 现代界面 | React 19 + 手写设计系统，浅色/深色主题，移动端适配 | ✅ |
 | 系统托盘 | 关闭窗口收进托盘、托盘快捷操作、完成通知 | ✅ |
 | 单实例 | 重复启动自动聚焦已有窗口 | ✅ (桌面) |
-| Android | Tauri 2 Mobile 复用核心，一键构建 APK | ⚙️ 工程已生成，待装 NDK |
+| Android | Tauri 2 Mobile 复用核心，已出 arm64 / x86_64 release 包并实测 | ✅ |
 
 ---
 
@@ -74,24 +74,48 @@ cargo tauri build
 
 ### Android 端
 
-Android 工程骨架已生成（`src-tauri/gen/android`），Rust 4 个交叉编译目标已安装。
-**唯一剩余依赖是 NDK**（约 1GB，需从 Google 下载）。当前开发环境无法访问 Google，
-请在能访问的环境里执行：
+**已实测跑通**：arm64 真机包与 x86_64 模拟器包均可安装、启动、下载、断点续传。
+
+环境要求：Android SDK（platform 36 + build-tools）、NDK 27.x、JDK 17+、`cargo-ndk`。
 
 ```powershell
-# 1. 一键准备环境（装 cmdline-tools / NDK / SDK 组件 / cargo-ndk，可重复运行）
+# 1. 准备环境（装 cmdline-tools / NDK / SDK 组件 / cargo-ndk，可重复运行）
 .\scripts\setup-android.ps1
 
 # 2. 构建 APK
 .\scripts\build-android.ps1 -Release
 ```
 
-> `setup-android.ps1` 会自动下载并配置 Android cmdline-tools，再用它安装 NDK 26.3。
-> 若 Android Studio 已装好 NDK，可直接设置 `NDK_HOME` 环境变量后运行 `build-android.ps1`。
->
-> Android 权限（网络/通知/唤醒锁/前台服务）已在
-> `src-tauri/gen/android/app/src/main/AndroidManifest.xml` 配置好；
-> `compileSdk/targetSdk` 已对齐本机 Android 35。
+手动构建（脚本内部等价步骤）：
+
+```powershell
+$env:JAVA_HOME    = "G:\java22"                                     # JDK 17+
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+$env:NDK_HOME     = "$env:LOCALAPPDATA\Android\Sdk\ndk\27.2.12479018"
+
+# 前端 → 内嵌进 Rust 库
+npm --prefix ui run build
+
+# 关键：必须带 --features custom-protocol，否则打进的是 devUrl(localhost:1420)，界面会白屏
+cargo ndk -t arm64-v8a -o src-tauri/gen/android/app/src/main/jniLibs build --release -p felldl --features custom-protocol
+
+# 打包（跳过 gradle 里重复的 rust 任务，-x 名与 ABI 对应）
+cd src-tauri/gen/android
+.\gradlew.bat assembleArm64Release -PabiList=arm64-v8a -ParchList=arm64 -PtargetList=aarch64 `
+  -x rustBuildArm64Release --no-daemon --no-configuration-cache
+```
+
+产物：
+- arm64（真机）：`src-tauri/gen/android/app/build/outputs/apk/arm64/release/app-arm64-release.apk`
+- x86_64（模拟器）：`src-tauri/gen/android/app/build/outputs/apk/x86_64/release/app-x86_64-release.apk`
+
+签名信息：`src-tauri/gen/android/keystore/felldl-release.jks`，alias `felldl`，密码 `felldl123`
+（自签自用；上架应用商店请替换为正式证书）。
+
+> ⚠️ 两个必须注意的点：
+> 1. `src-tauri/capabilities/default.json` 必须存在。Tauri 2 在缺失 capability 时
+>    WebView 的 IPC / 事件订阅会被拒绝，表现为界面永远停在「正在启动引擎…」。
+> 2. `src-tauri/Cargo.toml` 必须声明 `custom-protocol` feature，且 release 构建时显式启用。
 
 关于安装包构建：`cargo tauri build` 默认会尝试联网下载 NSIS/WiX 制作 `.exe`/`.msi` 安装包，
 网络不佳时可能超时。此时可跳过打包，直接使用 `target/release/felldl.exe`（免安装，功能完整）。
@@ -128,10 +152,28 @@ cargo run --release --example resume_check -- <url> <expected_sha256> <connectio
 ```
 
 已验证项目：
-- 28 个自动化测试全通过
+- 29 个自动化测试全通过
 - 12 线程分段下载 SHA256 与单线程参考完全一致
 - 38MB 文件下载到 62% 中断、重启续传后哈希一致
 - 真实 exe 启动 → HTTP API → 引擎下载 → 文件哈希一致
+
+### Android 实测记录
+
+在 Android 16（API 36）x86_64 模拟器上逐项验证：
+
+| 项目 | 结果 |
+|------|------|
+| release APK 安装启动 | ✅ 无崩溃，WebView 正常加载内嵌资源 |
+| 列表 / 空状态 / 计数 | ✅ 侧边栏分类计数正确 |
+| 新建下载对话框 | ✅ 链接、保存位置、连接数、限速、定时、高级选项齐全 |
+| 16 线程真实下载 | ✅ 20MB 与 1MB 文件均完整落盘到 `/storage/emulated/0/Download` |
+| 任务实时刷新 | ✅ 提交后无需刷新，`taskUpdated` 事件即时插入列表 |
+| 设置页 | ✅ 下载目录、并发数、限速滑块、代理、浏览器集成正常 |
+| 移动端布局 | ✅ 侧边栏抽屉、浮动新建按钮（FAB）、安全区适配 |
+| 签名 | ✅ v2 方案，证书 `CN=Felldl`，arm64 与 x86_64 同证书 |
+
+> 桌面端与 Android 共用同一套 `ui/` 前端与 `core/` 引擎；桌面端另经
+> `HTTP API → 引擎 → taskUpdated 事件 → React 列表` 链路验证实时刷新。
 
 ---
 
