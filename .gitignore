@@ -1,0 +1,17 @@
+# Rust
+target/
+*.log
+
+# Node
+ui/node_modules/
+ui/dist/
+ui/*.tsbuildinfo
+
+# 测试产物
+_test*/
+_shots/
+_resume/
+
+# 临时
+*.tmp
+.DS_Store

@@ -1,0 +1,690 @@
+//! 集成测试：本地起一个支持 Range 的 HTTP 服务器，验证
+//!   1. 多线程分段下载内容正确（逐字节比对）
+//!   2. 暂停 → 恢复续传不丢数据、不重复
+//!   3. 不支持 Range 的服务器也能正确下载
+//!   4. 限速生效
+//!   5. 404 / 鉴权失败等错误路径
+
+use felldl_core::{AddTaskRequest, Engine, TaskState};
+use std::io::Write;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+
+/// 生成确定性伪随机内容，避免压缩/全零掩盖错位
+fn make_payload(len: usize) -> Vec<u8> {
+    let mut v = Vec::with_capacity(len);
+    let mut x: u32 = 0x1234_5678;
+    for _ in 0..len {
+        x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+        v.push((x >> 16) as u8);
+    }
+    v
+}
+
+struct TestServer {
+    addr: SocketAddr,
+    /// 已服务的 Range 请求数
+    pub range_hits: Arc<AtomicU64>,
+    pub total_hits: Arc<AtomicU64>,
+}
+
+/// 极简 HTTP 服务器，支持 Range / 不支持 Range 两种模式
+async fn spawn_server(body: Vec<u8>, support_range: bool) -> TestServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let range_hits = Arc::new(AtomicU64::new(0));
+    let total_hits = Arc::new(AtomicU64::new(0));
+    let rh = range_hits.clone();
+    let th = total_hits.clone();
+    let body = Arc::new(body);
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            let rh = rh.clone();
+            let th = th.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                th.fetch_add(1, Ordering::Relaxed);
+                let lower = req.to_lowercase();
+
+                // 路径 /deny 返回 403，/missing 返回 404
+                if lower.starts_with("get /deny") {
+                    let _ = sock
+                        .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                    return;
+                }
+                if lower.starts_with("get /missing") {
+                    let _ = sock
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                        .await;
+                    return;
+                }
+
+                let total = body.len() as u64;
+                let mut range: Option<(u64, u64)> = None;
+                for line in req.lines() {
+                    let ll = line.to_lowercase();
+                    if ll.starts_with("range:") {
+                        let v = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                        if let Some(spec) = v.strip_prefix("bytes=") {
+                            let spec = spec.trim();
+                            if let Some((a, b)) = spec.split_once('-') {
+                                let start = a.trim().parse::<u64>().unwrap_or(0);
+                                let end = if b.trim().is_empty() {
+                                    total.saturating_sub(1)
+                                } else {
+                                    b.trim().parse::<u64>().unwrap_or(total - 1)
+                                };
+                                range = Some((start, end.min(total - 1)));
+                            }
+                        }
+                    }
+                }
+
+                if support_range {
+                    if let Some((s, e)) = range {
+                        rh.fetch_add(1, Ordering::Relaxed);
+                        if s >= total {
+                            let _ = sock
+                                .write_all(
+                                    format!(
+                                        "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{total}\r\nContent-Length: 0\r\n\r\n"
+                                    )
+                                    .as_bytes(),
+                                )
+                                .await;
+                            return;
+                        }
+                        let slice = &body[s as usize..=(e as usize)];
+                        let head = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nETag: \"abc123\"\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                            slice.len(), s, e, total
+                        );
+                        let _ = sock.write_all(head.as_bytes()).await;
+                        let _ = sock.write_all(slice).await;
+                        let _ = sock.flush().await;
+                        return;
+                    }
+                }
+                // 忽略 Range，返回整包 200
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nAccept-Ranges: {}\r\nConnection: close\r\n\r\n",
+                    total,
+                    if support_range { "bytes" } else { "none" }
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                // 分块写出，模拟真实网络
+                for chunk in body.chunks(16 * 1024) {
+                    if sock.write_all(chunk).await.is_err() {
+                        return;
+                    }
+                }
+                let _ = sock.flush().await;
+            });
+        }
+    });
+
+    TestServer {
+        addr,
+        range_hits,
+        total_hits,
+    }
+}
+
+fn temp_root(tag: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!(
+        "felldl-it-{tag}-{}-{}",
+        std::process::id(),
+        felldl_core::model::now_ms()
+    ));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+async fn wait_done(engine: &Arc<Engine>, id: &str, timeout: Duration) -> felldl_core::Task {
+    let start = std::time::Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let t = engine.get(id).expect("任务应存在");
+        if matches!(t.state, TaskState::Completed | TaskState::Error) {
+            return t;
+        }
+        if start.elapsed() > timeout {
+            panic!("下载超时，最终状态: {:?}, 进度 {}/{:?}", t.state, t.downloaded, t.size);
+        }
+    }
+}
+
+fn new_engine(root: &std::path::Path) -> Arc<Engine> {
+    Engine::new(root).expect("引擎初始化失败")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn segmented_download_is_byte_exact() {
+    let payload = make_payload(3 * 1024 * 1024 + 12345);
+    let srv = spawn_server(payload.clone(), true).await;
+    let root = temp_root("exact");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    let url = format!("http://{}/file.bin", srv.addr);
+    let id = engine
+        .add(AddTaskRequest {
+            url,
+            save_dir: Some(out.to_string_lossy().to_string()),
+            file_name: None,
+            connections: Some(8),
+            speed_limit: None,
+            scheduled_at: None,
+            referer: None,
+            cookie: None,
+            headers: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let t = wait_done(&engine, &id, Duration::from_secs(60)).await;
+    assert_eq!(t.state, TaskState::Completed, "错误: {:?}", t.error);
+    assert_eq!(t.size, Some(payload.len() as u64));
+    assert_eq!(t.downloaded, payload.len() as u64);
+
+    let got = std::fs::read(&t.save_path).unwrap();
+    assert_eq!(got.len(), payload.len(), "文件长度不符");
+    assert!(got == payload, "内容不一致（分片写入错位）");
+    // 确实用了多段
+    assert!(t.segments.len() >= 2, "应分成多段，实际 {}", t.segments.len());
+    assert!(
+        srv.range_hits.load(Ordering::Relaxed) >= 2,
+        "服务器应收到多个 Range 请求"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_then_resume_continues_correctly() {
+    // 4MB，限速让它有足够时间被暂停
+    let payload = make_payload(4 * 1024 * 1024);
+    let srv = spawn_server(payload.clone(), true).await;
+    let root = temp_root("resume");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    let url = format!("http://{}/big.bin", srv.addr);
+    let id = engine
+        .add(AddTaskRequest {
+            url,
+            save_dir: Some(out.to_string_lossy().to_string()),
+            file_name: None,
+            connections: Some(4),
+            speed_limit: Some(400 * 1024), // 400KB/s → 约 10s 下完
+            scheduled_at: None,
+            referer: None,
+            cookie: None,
+            headers: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    // 等它真正开始并有进度
+    let mut waited = 0;
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let t = engine.get(&id).unwrap();
+        if t.downloaded > 300 * 1024 || waited > 100 {
+            break;
+        }
+        waited += 1;
+    }
+    let before = engine.get(&id).unwrap().downloaded;
+    assert!(before > 0, "暂停前应已有进度");
+
+    engine.pause(&id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let paused = engine.get(&id).unwrap();
+    assert_eq!(paused.state, TaskState::Paused);
+    let paused_at = paused.downloaded;
+    assert!(paused_at >= before, "暂停后进度不应回退");
+
+    // 恢复
+    engine.resume(&id).await.unwrap();
+    let t = wait_done(&engine, &id, Duration::from_secs(90)).await;
+    assert_eq!(t.state, TaskState::Completed, "错误: {:?}", t.error);
+
+    let got = std::fs::read(&t.save_path).unwrap();
+    assert_eq!(got.len(), payload.len());
+    assert!(got == payload, "续传后内容不一致");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_range_server_falls_back_single_stream() {
+    let payload = make_payload(700 * 1024 + 7);
+    let srv = spawn_server(payload.clone(), false).await;
+    let root = temp_root("norange");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    let url = format!("http://{}/plain.bin", srv.addr);
+    let id = engine
+        .add(AddTaskRequest {
+            url,
+            save_dir: Some(out.to_string_lossy().to_string()),
+            file_name: None,
+            connections: Some(16),
+            speed_limit: None,
+            scheduled_at: None,
+            referer: None,
+            cookie: None,
+            headers: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let t = wait_done(&engine, &id, Duration::from_secs(60)).await;
+    assert_eq!(t.state, TaskState::Completed, "错误: {:?}", t.error);
+    let got = std::fs::read(&t.save_path).unwrap();
+    assert!(got == payload, "单流下载内容不一致");
+    assert_eq!(t.connections, 16);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn speed_limit_actually_slows() {
+    let payload = make_payload(1024 * 1024); // 1MB
+    let srv = spawn_server(payload.clone(), true).await;
+    let root = temp_root("limit");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    // 必须在添加任务前设定限速，否则任务可能在设限前就跑完了
+    let mut s = engine.settings();
+    s.global_speed_limit = 256 * 1024; // 256KB/s → 1MB 至少 3 秒
+    engine.update_settings(s).unwrap();
+
+    let url = format!("http://{}/s.bin", srv.addr);
+    let t0 = std::time::Instant::now();
+    let id = engine
+        .add(AddTaskRequest {
+            url,
+            save_dir: Some(out.to_string_lossy().to_string()),
+            file_name: None,
+            connections: Some(2),
+            speed_limit: None,
+            scheduled_at: None,
+            referer: None,
+            cookie: None,
+            headers: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let t = wait_done(&engine, &id, Duration::from_secs(120)).await;
+    let el = t0.elapsed().as_secs_f64();
+    assert_eq!(t.state, TaskState::Completed, "错误: {:?}", t.error);
+    assert!(el > 2.5, "限速未生效，用时仅 {el:.2}s");
+    assert!(std::fs::read(&t.save_path).unwrap() == payload);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn error_paths_are_reported() {
+    let payload = make_payload(1024);
+    let srv = spawn_server(payload, true).await;
+    let root = temp_root("err");
+    let engine = new_engine(&root);
+
+    for (path, expect_kw) in [("/deny", "403"), ("/missing", "404")] {
+        let url = format!("http://{}{}", srv.addr, path);
+        let id = engine
+            .add(AddTaskRequest {
+                url,
+                save_dir: Some(root.join("out").to_string_lossy().to_string()),
+                file_name: None,
+                connections: Some(4),
+                speed_limit: None,
+                scheduled_at: None,
+                referer: None,
+                cookie: None,
+                headers: Default::default(),
+            })
+            .await
+            .unwrap();
+        let t = engine.get(&id).unwrap();
+        assert_eq!(t.state, TaskState::Error, "{path} 应为错误态");
+        let msg = t.error.clone().unwrap_or_default();
+        assert!(msg.contains(expect_kw), "{path} 错误信息应包含 {expect_kw}，实际: {msg}");
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scheduled_task_waits_then_runs() {
+    let payload = make_payload(200 * 1024);
+    let srv = spawn_server(payload.clone(), true).await;
+    let root = temp_root("sched");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    let url = format!("http://{}/sched.bin", srv.addr);
+    let fire_at = felldl_core::model::now_ms() + 1500;
+    let id = engine
+        .add(AddTaskRequest {
+            url,
+            save_dir: Some(out.to_string_lossy().to_string()),
+            file_name: None,
+            connections: Some(4),
+            speed_limit: None,
+            scheduled_at: Some(fire_at),
+            referer: None,
+            cookie: None,
+            headers: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    // 200ms 后应仍是 Scheduled
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(engine.get(&id).unwrap().state, TaskState::Scheduled);
+
+    let t = wait_done(&engine, &id, Duration::from_secs(30)).await;
+    assert_eq!(t.state, TaskState::Completed, "错误: {:?}", t.error);
+    assert!(std::fs::read(&t.save_path).unwrap() == payload);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_limit_queues_extra_tasks() {
+    let payload = make_payload(300 * 1024);
+    let srv = spawn_server(payload.clone(), true).await;
+    let root = temp_root("conc");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    let mut s = engine.settings();
+    s.max_concurrent_tasks = 1; // 同时只跑 1 个
+    s.global_speed_limit = 150 * 1024;
+    engine.update_settings(s).unwrap();
+
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        let url = format!("http://{}/c{}.bin", srv.addr, i);
+        let id = engine
+            .add(AddTaskRequest {
+                url,
+                save_dir: Some(out.to_string_lossy().to_string()),
+                file_name: Some(format!("c{i}.bin")),
+                connections: Some(2),
+                speed_limit: None,
+                scheduled_at: None,
+                referer: None,
+                cookie: None,
+                headers: Default::default(),
+            })
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+
+    // 全部最终都应完成（排队机制工作）
+    let start = std::time::Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let all: Vec<_> = ids.iter().map(|id| engine.get(id).unwrap()).collect();
+        if all.iter().all(|t| t.state == TaskState::Completed) {
+            break;
+        }
+        if all.iter().any(|t| t.state == TaskState::Error) {
+            panic!("有任务出错: {:?}", all.iter().map(|t| t.error.clone()).collect::<Vec<_>>());
+        }
+        assert!(start.elapsed() < Duration::from_secs(90), "排队任务未完成");
+    }
+    for t in ids.iter().map(|id| engine.get(id).unwrap()) {
+        assert!(std::fs::read(&t.save_path).unwrap() == payload);
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_after_process_restart() {
+    let payload = make_payload(2 * 1024 * 1024);
+    let srv = spawn_server(payload.clone(), true).await;
+    let root = temp_root("restart");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let id_stored;
+    {
+        let engine = new_engine(&root);
+        let url = format!("http://{}/r.bin", srv.addr);
+        let id = engine
+            .add(AddTaskRequest {
+                url,
+                save_dir: Some(out.to_string_lossy().to_string()),
+                file_name: None,
+                connections: Some(4),
+                speed_limit: Some(300 * 1024),
+                scheduled_at: None,
+                referer: None,
+                cookie: None,
+                headers: Default::default(),
+            })
+            .await
+            .unwrap();
+        id_stored = id.clone();
+        // 等有进度
+        loop {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            if engine.get(&id).unwrap().downloaded > 200 * 1024 {
+                break;
+            }
+        }
+        engine.pause(&id).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    } // engine drop —— 模拟进程退出
+
+    // 新引擎从磁盘恢复
+    let engine2 = new_engine(&root);
+    let t = engine2.get(&id_stored).expect("任务应从磁盘恢复");
+    assert_eq!(t.state, TaskState::Paused, "重启后应回落为暂停");
+    let resumed_from = t.downloaded;
+    assert!(resumed_from > 0, "重启后应保留已下载进度");
+    assert!(!t.segments.is_empty(), "重启后应保留分片信息");
+
+    engine2.resume(&id_stored).await.unwrap();
+    let t = wait_done(&engine2, &id_stored, Duration::from_secs(120)).await;
+    assert_eq!(t.state, TaskState::Completed, "错误: {:?}", t.error);
+    let got = std::fs::read(&t.save_path).unwrap();
+    assert!(got == payload, "跨进程续传内容不一致");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ── 服务器：连接中途断开，用于验证重试续拉不重复 ──
+
+/// 前 `fail_after` 字节后强制断开连接（模拟网络抖动）
+async fn spawn_flaky_server(body: Vec<u8>, fail_after_bytes: usize) -> SocketAddr {
+    use std::sync::atomic::AtomicUsize;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = Arc::new(body);
+    let served = Arc::new(AtomicUsize::new(0));
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            let served = served.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let total = body.len() as u64;
+
+                let mut start = 0u64;
+                let mut end = total.saturating_sub(1);
+                for line in req.lines() {
+                    let ll = line.to_lowercase();
+                    if ll.starts_with("range:") {
+                        let v = line.split(':').nth(1).unwrap_or("").trim();
+                        if let Some(spec) = v.strip_prefix("bytes=") {
+                            if let Some((a, b)) = spec.split_once('-') {
+                                start = a.trim().parse().unwrap_or(0);
+                                end = if b.trim().is_empty() {
+                                    total - 1
+                                } else {
+                                    b.trim().parse().unwrap_or(total - 1)
+                                };
+                            }
+                        }
+                    }
+                }
+                end = end.min(total - 1);
+                if start >= total {
+                    return;
+                }
+                let slice = &body[start as usize..=(end as usize)];
+                let head = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                    slice.len(), start, end, total
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+
+                // 每个连接只吐一部分数据就断开，迫使客户端重连续拉
+                let send_now = slice.len().min(fail_after_bytes);
+                let already = served.load(Ordering::Relaxed);
+                let cut = if already == 0 && slice.len() > send_now {
+                    send_now
+                } else {
+                    slice.len()
+                };
+                let _ = sock.write_all(&slice[..cut]).await;
+                let _ = sock.flush().await;
+                served.fetch_add(1, Ordering::Relaxed);
+                // 主动断开
+                drop(sock);
+            });
+        }
+    });
+    addr
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn retry_after_connection_drop_does_not_duplicate() {
+    let payload = make_payload(900 * 1024);
+    let addr = spawn_flaky_server(payload.clone(), 90 * 1024).await;
+    let root = temp_root("flaky");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    let url = format!("http://{}/flaky.bin", addr);
+    let id = engine
+        .add(AddTaskRequest {
+            url,
+            save_dir: Some(out.to_string_lossy().to_string()),
+            file_name: Some("flaky.bin".into()),
+            connections: Some(4),
+            speed_limit: None,
+            scheduled_at: None,
+            referer: None,
+            cookie: None,
+            headers: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let t = wait_done(&engine, &id, Duration::from_secs(90)).await;
+    assert_eq!(t.state, TaskState::Completed, "错误: {:?}", t.error);
+
+    // 进度必须精确等于文件大小，不能因重试而虚高
+    assert_eq!(
+        t.downloaded,
+        payload.len() as u64,
+        "重试导致下载计数重复累加"
+    );
+    let got = std::fs::read(&t.save_path).unwrap();
+    assert_eq!(got.len(), payload.len());
+    assert!(got == payload, "断线重试后内容不一致");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scheduled_task_starts_on_time() {
+    let payload = make_payload(512 * 1024);
+    let srv = spawn_server(payload.clone(), true).await;
+    let root = temp_root("scheduled");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    // 设置为 1.5 秒后开始
+    let when = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 1500) as i64;
+
+    let id = engine
+        .add(AddTaskRequest {
+            url: format!("http://{}/s.bin", srv.addr),
+            save_dir: Some(out.to_string_lossy().to_string()),
+            file_name: Some("scheduled.bin".into()),
+            connections: Some(4),
+            speed_limit: None,
+            scheduled_at: Some(when),
+            referer: None,
+            cookie: None,
+            headers: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    // 刚添加时应处于 Scheduled，且未开始下载
+    let t0 = engine.snapshot().into_iter().find(|t| t.id == id).unwrap();
+    assert_eq!(t0.state, TaskState::Scheduled, "定时未生效");
+
+    // 到期后应在数秒内自动开始并完成
+    let t = wait_done(&engine, &id, Duration::from_secs(60)).await;
+    assert_eq!(t.state, TaskState::Completed, "定时任务未自动开始: {:?}", t.error);
+    assert_eq!(std::fs::read(&t.save_path).unwrap(), payload);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// 避免 unused warning
+#[allow(dead_code)]
+fn _touch(_: &mut dyn Write) {}

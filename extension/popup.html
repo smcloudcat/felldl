@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Felldl 下载接管</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 340px;
+      font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      background: #f7f9fc;
+      color: #1e293b;
+      font-size: 13px;
+    }
+    .head {
+      display: flex; align-items: center; gap: 10px;
+      padding: 16px 18px 12px;
+      background: linear-gradient(135deg, #0ea5e9, #14b8a6);
+      color: #fff;
+    }
+    .head img { width: 34px; height: 34px; border-radius: 9px; }
+    .head h1 { font-size: 15px; font-weight: 700; }
+    .head p { font-size: 11px; opacity: .9; margin-top: 2px; }
+    .status {
+      display: flex; align-items: center; gap: 8px;
+      margin: 14px 18px 6px; padding: 10px 12px;
+      border-radius: 9px; background: #fff;
+      border: 1px solid #e2e8f0;
+    }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #94a3b8; flex: none; }
+    .dot.on { background: #22c55e; box-shadow: 0 0 0 3px #dcfce7; }
+    .dot.off { background: #ef4444; }
+    .status-text { flex: 1; font-weight: 600; }
+    .status-sub { font-size: 11px; color: #64748b; font-weight: 400; }
+    .sec { padding: 10px 18px; }
+    .row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+    .row label { font-weight: 600; color: #334155; }
+    .switch {
+      position: relative; width: 40px; height: 22px;
+      background: #cbd5e1; border-radius: 11px; cursor: pointer; transition: .2s;
+    }
+    .switch.on { background: #0ea5e9; }
+    .switch::after {
+      content: ""; position: absolute; top: 2px; left: 2px;
+      width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: .2s;
+    }
+    .switch.on::after { left: 20px; }
+    .field { margin-bottom: 10px; }
+    .field label { display: block; font-size: 11.5px; color: #64748b; margin-bottom: 4px; font-weight: 600; }
+    input[type=text], input[type=number] {
+      width: 100%; padding: 8px 10px; border: 1px solid #cbd5e1;
+      border-radius: 7px; font-size: 12.5px; outline: none; font-family: inherit;
+    }
+    input:focus { border-color: #0ea5e9; box-shadow: 0 0 0 3px #e0f2fe; }
+    .hint { font-size: 10.5px; color: #94a3b8; margin-top: 3px; line-height: 1.5; }
+    .save {
+      display: block; width: calc(100% - 36px); margin: 6px 18px 16px;
+      padding: 10px; border: none; border-radius: 8px; cursor: pointer;
+      background: linear-gradient(135deg, #0ea5e9, #14b8a6);
+      color: #fff; font-size: 13px; font-weight: 700;
+    }
+    .save:hover { filter: brightness(1.06); }
+    .toast {
+      position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+      background: #1e293b; color: #fff; padding: 6px 14px; border-radius: 6px;
+      font-size: 11.5px; opacity: 0; transition: .25s; pointer-events: none;
+    }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div class="head">
+    <img src="icons/icon128.png" alt="Felldl" />
+    <div>
+      <h1>Felldl 下载接管</h1>
+      <p>浏览器下载自动转交多线程引擎</p>
+    </div>
+  </div>
+
+  <div class="status" id="statusBox">
+    <span class="dot" id="statusDot"></span>
+    <div>
+      <div class="status-text" id="statusText">检测中…</div>
+      <div class="status-sub" id="statusSub"></div>
+    </div>
+  </div>
+
+  <div class="sec">
+    <div class="row">
+      <label>接管浏览器下载</label>
+      <div class="switch" id="enabledSw"></div>
+    </div>
+    <div class="field">
+      <label>API 端口</label>
+      <input type="number" id="port" min="1" max="65535" value="8899" />
+    </div>
+    <div class="field">
+      <label>访问 Token</label>
+      <input type="text" id="token" placeholder="在 Felldl 设置页复制" />
+      <div class="hint">打开 Felldl → 设置 → 浏览器集成，复制端口与 Token 填到这里。</div>
+    </div>
+    <div class="field">
+      <label>只接管这些域名（可选，逗号分隔）</label>
+      <input type="text" id="allowDomains" placeholder="留空 = 接管全部下载" />
+    </div>
+    <div class="field">
+      <label>跳过这些扩展名（可选）</label>
+      <input type="text" id="skipExts" placeholder="例: html,doc,pdf" />
+    </div>
+  </div>
+
+  <button class="save" id="saveBtn">保存设置</button>
+  <div class="toast" id="toast"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

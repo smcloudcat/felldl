@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Felldl 下载接管",
+  "version": "1.0.0",
+  "description": "把浏览器的下载任务自动转交给 Felldl 多线程下载器，享受分段加速与断点续传。",
+  "permissions": [
+    "downloads",
+    "storage",
+    "cookies",
+    "notifications"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "Felldl 下载接管"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "options_ui": {
+    "page": "popup.html",
+    "open_in_tab": true
+  }
+}
