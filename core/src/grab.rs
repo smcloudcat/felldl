@@ -13,7 +13,7 @@ use crate::model::*;
 use crate::util::sanitize_name;
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::Client;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -377,6 +377,151 @@ pub async fn analyze_page_with_body(
     ))
 }
 
+// ───────────────────────── 离线化：HTML 引用重写 ─────────────────────────
+
+/// 同名资源加序号：`a.png` → `a_2.png`
+fn dedup_name(name: &str, i: usize) -> String {
+    let p = Path::new(name);
+    match (p.file_stem().and_then(|s| s.to_str()), p.extension().and_then(|s| s.to_str())) {
+        (Some(stem), Some(ext)) => format!("{stem}_{i}.{ext}"),
+        _ => format!("{name}_{i}"),
+    }
+}
+
+/// 把 HTML 中指向「已保存到本地」的资源 / 页面引用改写为相对路径，
+/// 保存下来的站点可以直接离线打开，不再依赖网络。
+///
+/// 覆盖 `src` / `href` / `poster` / `data-src` 等属性引号值与
+/// 内联样式里的 `url(...)`、`srcset` 列表；未命中的引用原样保留。
+fn rewrite_html_refs(html: &str, base: &reqwest::Url, map: &HashMap<String, String>) -> String {
+    if map.is_empty() {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    loop {
+        let qpos = match rest.find(['"', '\'']) {
+            Some(p) => p,
+            None => {
+                out.push_str(rest);
+                break;
+            }
+        };
+        let q = rest.as_bytes()[qpos] as char;
+        let (head, tail) = rest.split_at(qpos + 1);
+        out.push_str(head);
+        let end = match tail.find(q) {
+            Some(e) => e,
+            None => {
+                out.push_str(tail);
+                break;
+            }
+        };
+        let val = &tail[..end];
+        match rewrite_ref_value(val, base, map) {
+            Some(nv) => out.push_str(&nv),
+            None => out.push_str(val),
+        }
+        out.push(q);
+        rest = &tail[end + 1..];
+    }
+    out
+}
+
+fn rewrite_ref_value(
+    val: &str,
+    base: &reqwest::Url,
+    map: &HashMap<String, String>,
+) -> Option<String> {
+    let v = val.trim();
+    if v.is_empty() || v.len() > 2048 {
+        return None;
+    }
+    // 内联样式 / CSS 里的 url(...)（可能嵌在 "background-image:url(x)" 中）
+    if v.contains("url(") {
+        let mut seg = String::with_capacity(v.len());
+        let mut rest = v;
+        let mut changed = false;
+        while let Some(p) = rest.find("url(") {
+            seg.push_str(&rest[..p + 4]);
+            let after = &rest[p + 4..];
+            match after.find(')') {
+                Some(e) => {
+                    let inner = after[..e].trim().trim_matches(['"', '\'']);
+                    match rewrite_one_ref(inner, base, map) {
+                        Some(n) => {
+                            seg.push_str(&n);
+                            changed = true;
+                        }
+                        None => seg.push_str(&after[..e]),
+                    }
+                    seg.push(')');
+                    rest = &after[e + 1..];
+                }
+                None => {
+                    seg.push_str(after);
+                    rest = "";
+                }
+            }
+        }
+        seg.push_str(rest);
+        return changed.then_some(seg);
+    }
+    // srcset：逗号分隔的「地址 描述符」
+    if v.contains(',') && v.contains(char::is_whitespace) {
+        let mut changed = false;
+        let parts: Vec<String> = v
+            .split(',')
+            .map(|part| {
+                let p = part.trim();
+                let mut it = p.split_whitespace();
+                match (it.next(), it.next()) {
+                    (Some(u), desc) => {
+                        let tail = desc.map(|d| format!(" {d}")).unwrap_or_default();
+                        match rewrite_one_ref(u, base, map) {
+                            Some(n) => {
+                                changed = true;
+                                format!("{n}{tail}")
+                            }
+                            None => p.to_string(),
+                        }
+                    }
+                    _ => p.to_string(),
+                }
+            })
+            .collect();
+        return changed.then(|| parts.join(", "));
+    }
+    rewrite_one_ref(v, base, map)
+}
+
+/// 单个引用 → 本地相对路径（带原 #fragment）
+fn rewrite_one_ref(raw: &str, base: &reqwest::Url, map: &HashMap<String, String>) -> Option<String> {
+    let r = raw.trim();
+    if r.is_empty()
+        || r.starts_with('#')
+        || r.starts_with("data:")
+        || r.starts_with("javascript:")
+        || r.starts_with("mailto:")
+        || r.starts_with("blob:")
+    {
+        return None;
+    }
+    let (path, frag) = match r.split_once('#') {
+        Some((a, b)) => (a, Some(b)),
+        None => (r, None),
+    };
+    let u = base.join(path).ok()?;
+    let key = u.to_string();
+    let hit = map
+        .get(&key)
+        .or_else(|| map.get(key.trim_end_matches('/')))?;
+    Some(match frag {
+        Some(f) if !f.is_empty() => format!("{hit}#{f}"),
+        _ => hit.clone(),
+    })
+}
+
 // ───────────────────────── 整站抓取 ─────────────────────────
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -492,7 +637,7 @@ impl Engine {
                 break;
             }
             // 一次抓取同时拿到正文与引用列表（旧实现为保存 HTML 又重复请求了一次）
-            let (analysis, html) = match analyze_page_with_body(&client, &AnalyzeRequest {
+            let (analysis, mut html) = match analyze_page_with_body(&client, &AnalyzeRequest {
                 url: url.clone(),
                 referer: req.referer.clone(),
                 cookie: None,
@@ -512,9 +657,10 @@ impl Engine {
             if let Some(parent) = html_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            std::fs::write(&html_path, &html).with_context(|| format!("写入 {}", html_path.display()))?;
-            saved += 1;
-            pages_done.store(saved as u64, Ordering::Relaxed);
+
+            // 引用映射：绝对 URL → 本地文件名（离线化用）
+            let mut url_map: HashMap<String, String> = HashMap::new();
+            let mut used_names: HashSet<String> = HashSet::new();
 
             // 静态资源 → 下载引擎（跨页面去重 + 限并发建任务，避免一页几十个资源串行探测）
             if req.include_assets {
@@ -527,6 +673,20 @@ impl Engine {
                     if res.kind == "hls" {
                         continue;
                     }
+                    // 落盘文件名（同页内同名不同资源时加序号）
+                    let mut name = sanitize_name(&res.name);
+                    if !used_names.insert(name.clone()) {
+                        let mut i = 2;
+                        loop {
+                            let cand = dedup_name(&name, i);
+                            if used_names.insert(cand.clone()) {
+                                name = cand;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    url_map.insert(res.url.clone(), name.clone());
                     // 同一资源在多个页面出现时只下一次
                     if !visited_assets.insert(res.url.clone()) {
                         continue;
@@ -534,7 +694,7 @@ impl Engine {
                     batch.push(AddTaskRequest {
                         url: res.url.clone(),
                         save_dir: Some(asset_dir.clone()),
-                        file_name: Some(res.name.clone()),
+                        file_name: Some(name),
                         connections: Some(4),
                         referer: Some(url.clone()),
                         ..Default::default()
@@ -550,6 +710,22 @@ impl Engine {
                     })
                     .await;
             }
+
+            // 页面链接同样改成本地扁平文件名（页面与 HTML 同目录保存，名字由 URL 唯一确定）
+            for link in &analysis.links {
+                if let Ok(u) = reqwest::Url::parse(link) {
+                    let local = sanitize_name(&url_to_rel_path(&u));
+                    url_map.insert(link.clone(), local);
+                }
+            }
+            if !url_map.is_empty() {
+                if let Ok(page_base) = reqwest::Url::parse(&analysis.url) {
+                    html = rewrite_html_refs(&html, &page_base, &url_map);
+                }
+            }
+            std::fs::write(&html_path, &html).with_context(|| format!("写入 {}", html_path.display()))?;
+            saved += 1;
+            pages_done.store(saved as u64, Ordering::Relaxed);
 
             // 同域页面递归
             if depth + 1 < req.max_depth {
@@ -752,6 +928,38 @@ mod tests {
         assert_eq!(url_to_rel_path(&u), "site.com/blog/post.html");
         let u = reqwest::Url::parse("https://site.com/blog").unwrap();
         assert_eq!(url_to_rel_path(&u), "site.com/blog/index.html");
+    }
+
+    #[test]
+    fn rewrite_refs_to_local_paths() {
+        let base = reqwest::Url::parse("https://site.com/blog/post.html").unwrap();
+        let mut map = HashMap::new();
+        map.insert("https://site.com/css/a.css".to_string(), "site.com_css_a.css".to_string());
+        map.insert("https://site.com/blog/p2.html".to_string(), "site.com_blog_p2.html".to_string());
+        map.insert("https://cdn.x.com/i.png".to_string(), "i.png".to_string());
+        map.insert("https://site.com/set/a.png".to_string(), "a.png".to_string());
+        map.insert("https://site.com/set/a2.png".to_string(), "a_2.png".to_string());
+        let html = r##"<link href="/css/a.css"><a href="p2.html#c1">x</a>
+<img src="https://cdn.x.com/i.png"><img src="other.png">
+<div style="background-image:url('/css/a.css')"></div>
+<img srcset="https://site.com/set/a.png 1x, https://site.com/set/a2.png 2x">
+<a href="#anchor">keep</a><img src="data:image/png;base64,AAA">"##;
+        let out = rewrite_html_refs(html, &base, &map);
+        assert!(out.contains(r#"href="site.com_css_a.css""#), "{out}");
+        assert!(out.contains(r#"href="site.com_blog_p2.html#c1""#), "{out}");
+        assert!(out.contains(r#"src="i.png""#), "{out}");
+        // 未命中的引用保持原样
+        assert!(out.contains(r#"src="other.png""#), "{out}");
+        assert!(out.contains("background-image:url(site.com_css_a.css)"), "{out}");
+        assert!(out.contains("a.png 1x, a_2.png 2x"), "{out}");
+        assert!(out.contains(r##"href="#anchor""##), "{out}");
+        assert!(out.contains("data:image/png"), "{out}");
+    }
+
+    #[test]
+    fn dedup_name_keeps_extension() {
+        assert_eq!(dedup_name("a.png", 2), "a_2.png");
+        assert_eq!(dedup_name("noext", 3), "noext_3");
     }
 
     #[tokio::test]

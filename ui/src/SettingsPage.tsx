@@ -53,6 +53,23 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   const [updateErr, setUpdateErr] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [ifaces, setIfaces] = useState<string[]>([]);
+  const [dnsTesting, setDnsTesting] = useState(false);
+  const [dnsResult, setDnsResult] = useState<string | null>(null);
+
+  async function testDns() {
+    const servers = draft.dns_servers.trim();
+    if (!servers) return;
+    setDnsTesting(true);
+    setDnsResult(null);
+    try {
+      const ips = await api.testDns(servers, "www.example.com");
+      setDnsResult(`www.example.com → ${ips.join(", ")}`);
+    } catch (e: any) {
+      setDnsResult(typeof e === "string" ? e : String(e));
+    } finally {
+      setDnsTesting(false);
+    }
+  }
 
   useEffect(() => {
     api.listInterfaces().then(setIfaces).catch(() => {});
@@ -589,6 +606,44 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
           <div style={{ fontSize: 11.5, color: "var(--text-mute)", marginTop: 6 }}>
             {t("set.bindIpHint")}
           </div>
+        </div>
+
+        {/* DNS */}
+        <div className="field" style={{ marginTop: 16 }}>
+          <label className="field-label">{t("set.dns")}</label>
+          <select
+            className="select"
+            value={draft.dns_mode || "system"}
+            onChange={(e) => patch({ dns_mode: e.target.value })}
+          >
+            <option value="system">{t("set.dnsSystem")}</option>
+            <option value="custom">{t("set.dnsCustom")}</option>
+          </select>
+          {draft.dns_mode === "custom" && (
+            <>
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <input
+                  className="input"
+                  style={{ flex: 1 }}
+                  placeholder="1.1.1.1, 8.8.8.8"
+                  value={draft.dns_servers}
+                  onChange={(e) => patch({ dns_servers: e.target.value })}
+                  spellCheck={false}
+                />
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={dnsTesting || !draft.dns_servers.trim()}
+                  onClick={testDns}
+                >
+                  {dnsTesting ? t("set.dnsTesting") : t("set.dnsTest")}
+                </button>
+              </div>
+              <div style={{ fontSize: 11.5, color: "var(--text-mute)", marginTop: 6 }}>
+                {dnsResult || t("set.dnsHint")}
+              </div>
+            </>
+          )}
         </div>
       </div>
 

@@ -299,22 +299,40 @@ impl Engine {
     pub(crate) fn client_with_ua(&self, task: Option<&Task>, ua: &str) -> Result<Client> {
         let s = self.settings.read().clone();
         let referer = task.and_then(|t| t.referer.clone()).unwrap_or_default();
+        let dns_active = s.dns_mode.trim() == "custom" && !s.dns_servers.trim().is_empty();
         // 池化键：影响底层连接池配置的全部因素（Referer 通过默认头实现，也一并计入）
         let key = format!(
-            "{ua}\u{1}{referer}\u{1}{}\u{1}{}",
+            "{ua}\u{1}{referer}\u{1}{}\u{1}{}\u{1}{}\u{1}{}\u{1}{}",
             s.bind_ip.trim(),
-            s.proxy.to_url().unwrap_or_default()
+            s.proxy.to_url().unwrap_or_default(),
+            if dns_active { s.dns_servers.trim() } else { "" },
+            s.max_concurrent_tasks,
+            s.default_connections
         );
         if let Some(c) = self.clients.lock().get(&key) {
             return Ok(c);
         }
+        // 空闲连接上限按「同时在跑的任务数 × 每任务连接数」估算：
+        // 多任务共享同一个连接池时够用，又不会为单任务预留过多连接（省内存与端口）
+        let idle_cap = (s.max_concurrent_tasks.clamp(1, 32) * s.default_connections.clamp(1, 32))
+            .clamp(8, 256);
         let mut b = Client::builder()
             .user_agent(ua)
             .connect_timeout(std::time::Duration::from_secs(20))
             .timeout(std::time::Duration::from_secs(3600))
-            .pool_max_idle_per_host(64)
+            .pool_max_idle_per_host(idle_cap)
             // 不少下载站 / 镜像站的证书链不完整，这里保留校验但允许常见兼容
             .redirect(reqwest::redirect::Policy::limited(10));
+        // 自定义 DNS：解析交给 hickory，失败则回退系统解析（不阻断下载）
+        if dns_active {
+            match crate::dns::parse_servers(&s.dns_servers) {
+                Ok(servers) => match crate::dns::HickoryDns::new(&servers) {
+                    Ok(r) => b = b.dns_resolver(Arc::new(r)),
+                    Err(e) => eprintln!("自定义 DNS 初始化失败，回退系统 DNS: {e:#}"),
+                },
+                Err(e) => eprintln!("自定义 DNS 地址无效，回退系统 DNS: {e:#}"),
+            }
+        }
         // 绑定指定网络接口（IPv4 / IPv6 均可）
         if !s.bind_ip.trim().is_empty() {
             if let Ok(ip) = s.bind_ip.trim().parse::<std::net::IpAddr>() {

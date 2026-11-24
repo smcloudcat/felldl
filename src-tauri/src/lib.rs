@@ -149,6 +149,23 @@ async fn update_settings(
     Ok(state.engine.settings())
 }
 
+/// 用指定 DNS 服务器解析域名（设置页「测试」按钮）
+#[tauri::command]
+async fn test_dns(servers: String, host: String) -> Result<Vec<String>, String> {
+    let parsed = felldl_core::dns::parse_servers(&servers).map_err(|e| format!("{e:#}"))?;
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("请输入要解析的域名".into());
+    }
+    let ips = felldl_core::dns::resolve_with(&parsed, host)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    if ips.is_empty() {
+        return Err("DNS 未返回任何地址".into());
+    }
+    Ok(ips.iter().map(|ip| ip.to_string()).collect())
+}
+
 #[tauri::command]
 async fn get_api_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let s = state.engine.settings();
@@ -606,6 +623,7 @@ pub fn run() {
             resume_all,
             set_task_speed_limit,
             update_settings,
+            test_dns,
             get_api_info,
             open_file,
             show_in_folder,

@@ -9,6 +9,7 @@
 pub mod api;
 pub mod bt;
 pub mod crypto;
+pub mod dns;
 pub mod engine;
 pub mod grab;
 pub mod metalink;

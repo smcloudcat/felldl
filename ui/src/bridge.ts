@@ -88,6 +88,10 @@ export const api = {
 
   // 本机网络接口 IP 列表（绑定接口用）
   listInterfaces: () => invoke("list_interfaces") as Promise<string[]>,
+
+  // 用指定 DNS 服务器解析域名（设置页测试用）
+  testDns: (servers: string, host: string) =>
+    invoke("test_dns", { servers, host }) as Promise<string[]>,
 };
 
 /** 订阅引擎事件 */

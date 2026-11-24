@@ -124,6 +124,8 @@ let settings: Settings = {
   ui_skin: "blue",
   btn_style: "rounded",
   task_meta: ["size", "speed", "eta", "mirrors", "date"],
+  dns_mode: "system",
+  dns_servers: "",
 };
 
 // 每 400ms 推进下载进度
@@ -244,6 +246,8 @@ export const mockEngine = {
         return { port: settings.api_port, token: settings.api_token, running: true };
       case "list_interfaces":
         return ["192.168.123.137", "10.8.0.2", "fe80::1"];
+      case "test_dns":
+        return ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"];
       case "open_file":
       case "show_in_folder":
       case "set_task_speed_limit":

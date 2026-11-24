@@ -90,6 +90,8 @@ export interface Settings {
   ui_skin: "blue" | "purple" | "green" | "orange" | string;
   btn_style: "rounded" | "flat" | "outline" | string;
   task_meta: string[];
+  dns_mode: "system" | "custom" | string;
+  dns_servers: string;
 }
 
 export interface AddTaskRequest {

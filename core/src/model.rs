@@ -171,6 +171,12 @@ pub struct Settings {
     /// 任务卡片显示的信息项（顺序即显示顺序）
     #[serde(default = "default_task_meta")]
     pub task_meta: Vec<String>,
+    /// DNS 模式："system"（跟随系统） | "custom"（使用下方自定义服务器）
+    #[serde(default = "default_dns_mode")]
+    pub dns_mode: String,
+    /// 自定义 DNS 服务器，逗号/空格分隔，如 "1.1.1.1, 8.8.8.8"
+    #[serde(default)]
+    pub dns_servers: String,
 }
 
 /// 下载分类规则
@@ -209,6 +215,9 @@ fn default_btn_style() -> String {
 }
 fn default_task_meta() -> Vec<String> {
     vec!["size".into(), "speed".into(), "eta".into(), "mirrors".into(), "date".into()]
+}
+fn default_dns_mode() -> String {
+    "system".into()
 }
 
 fn default_download_dir() -> String {
@@ -255,6 +264,8 @@ impl Default for Settings {
             ui_skin: default_skin(),
             btn_style: default_btn_style(),
             task_meta: default_task_meta(),
+            dns_mode: default_dns_mode(),
+            dns_servers: String::new(),
         }
     }
 }
