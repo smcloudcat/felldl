@@ -10,7 +10,7 @@ import type { AddTaskRequest, Settings, Task, UpdateInfo, PageAnalysis } from ".
 type UnlistenFn = () => void;
 
 interface EngineEvent {
-  type: "taskUpdated" | "taskRemoved" | "settingsUpdated" | "notice";
+  type: "taskUpdated" | "taskProgress" | "taskRemoved" | "settingsUpdated" | "notice";
   payload: any;
 }
 

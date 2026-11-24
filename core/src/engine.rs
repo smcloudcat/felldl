@@ -72,6 +72,8 @@ pub(crate) struct Runtime {
     pub(crate) cancel: Mutex<CancellationToken>,
     /// 本次会话内是否正在运行
     pub(crate) running: Mutex<bool>,
+    /// 任务级限速器（运行中可由 set_task_speed_limit 动态调整）
+    pub(crate) task_limiter: Mutex<Option<Arc<RateLimiter>>>,
 }
 
 impl Runtime {
@@ -81,6 +83,7 @@ impl Runtime {
             cancel: Mutex::new(CancellationToken::new()),
             running: Mutex::new(false),
             task: Mutex::new(task),
+            task_limiter: Mutex::new(None),
         })
     }
 }
@@ -204,6 +207,10 @@ impl Engine {
         t.speed_limit = limit;
         let snap = t.clone();
         drop(t);
+        // 运行中的任务立即应用新限速（此前只在启动时读取一次）
+        if let Some(l) = rt.task_limiter.lock().as_ref() {
+            l.set_limit(limit);
+        }
         self.store.save_task(&snap)?;
         self.emit(EngineEvent::TaskUpdated(snap));
         Ok(())
@@ -709,20 +716,31 @@ impl Engine {
         if *rt.running.lock() {
             return Ok(());
         }
-        // BT 任务走 rqbit 会话恢复
+        // BT 任务走 rqbit 会话恢复（自行管理 running 状态）
         if rt.task.lock().kind == TaskKind::Bt {
             self.bt_resume(&rt).await;
             return Ok(());
         }
-        // 并发闸门
-        let active = {
+        // 非 BT：先原子占位，避免并发 resume / 并发泵把同一任务启动两次
+        // （两次 run_task 会同时写同一个文件并互相覆盖）
+        {
+            let mut g = rt.running.lock();
+            if *g {
+                return Ok(());
+            }
+            *g = true;
+        }
+        // 并发闸门：统计「其他」正在运行的任务数
+        let active_others = {
             let map = self.tasks.lock();
-            map.values()
-                .filter(|r| *r.running.lock())
+            map.iter()
+                .filter(|(k, r)| k.as_str() != id && *r.running.lock())
                 .count()
         };
         let max = self.settings.read().max_concurrent_tasks.max(1);
-        if active >= max {
+        if active_others >= max {
+            // 释放占位并转入排队
+            *rt.running.lock() = false;
             let mut t = rt.task.lock();
             if t.state != TaskState::Queued {
                 t.state = TaskState::Queued;
@@ -735,7 +753,6 @@ impl Engine {
             return Ok(());
         }
 
-        *rt.running.lock() = true;
         // 每次开工都换新 token，保证上一次暂停的取消信号不影响本轮
         let new_cancel = CancellationToken::new();
         *rt.cancel.lock() = new_cancel.clone();
@@ -931,7 +948,21 @@ impl Engine {
             }
         };
         let s = self.settings();
-        let task_limiter = Arc::new(RateLimiter::new(rt.task.lock().speed_limit));
+        // 复用 Runtime 中的任务限速器（若已有），以便运行中调速度能即时生效
+        let task_limiter = {
+            let existing = rt.task_limiter.lock().clone();
+            match existing {
+                Some(l) => {
+                    l.set_limit(rt.task.lock().speed_limit);
+                    l
+                }
+                None => {
+                    let l = Arc::new(RateLimiter::new(rt.task.lock().speed_limit));
+                    *rt.task_limiter.lock() = Some(l.clone());
+                    l
+                }
+            }
+        };
         // 注意：不要在这里用 settings 覆盖全局限速器，update_settings 已经负责同步，
         // 否则用户在下载途中调整限速会被旧值冲掉。
         let _ = &s;
@@ -1151,7 +1182,19 @@ impl Engine {
                     match chunk {
                         Some(Ok(bytes)) => {
                             let n = bytes.len() as u64;
-                            self.global_limiter.acquire(n).await;
+                            // 取消安全：暂停时不再卡在限速 sleep 里
+                            if !self.global_limiter.acquire_cancellable(n, cancel).await {
+                                *rt.running.lock() = false;
+                                let mut t = rt.task.lock();
+                                t.state = TaskState::Paused;
+                                t.downloaded = offset;
+                                t.speed = 0;
+                                let snap = t.clone();
+                                drop(t);
+                                let _ = self.store.save_task(&snap);
+                                self.emit(EngineEvent::TaskUpdated(snap));
+                                return Ok(false);
+                            }
                             write_at(&file, &bytes, offset)?;
                             offset += n;
                             rt.downloaded.store(offset, Ordering::Relaxed);
@@ -1252,57 +1295,65 @@ impl Engine {
                 me.bt_update_all();
 
                 let now = std::time::Instant::now();
-                let mut to_persist: Vec<Task> = Vec::new();
-                let snapshots: Vec<(TaskId, u64)> = {
+                let persist_due = last_persist.elapsed().as_secs() >= 2;
+                if persist_due {
+                    last_persist = now;
+                }
+
+                // 只对「正在运行」的任务做深克隆与进度广播；
+                // 历史/已完成任务只保留一份缓存，不再每 500ms 复制整个 Task。
+                let running_list: Vec<(TaskId, Arc<Runtime>, u64)> = {
                     let map = me.tasks.lock();
                     map.iter()
-                        .map(|(k, r)| (k.clone(), r.downloaded.load(Ordering::Relaxed)))
+                        .filter(|(_, r)| *r.running.lock())
+                        .map(|(k, r)| {
+                            (k.clone(), r.clone(), r.downloaded.load(Ordering::Relaxed))
+                        })
                         .collect()
                 };
-                for (id, dl) in snapshots {
-                    let rt = {
-                        let map = me.tasks.lock();
-                        map.get(&id).cloned()
-                    };
-                    let Some(rt) = rt else { continue };
-                    let running = *rt.running.lock();
-                    let (mut snap, prev) = {
+                // 首次出现（或从非运行态转入）的任务，广播一次当前快照，保证 UI 不错过
+                let fresh: Vec<(TaskId, Arc<Runtime>)> = {
+                    let map = me.tasks.lock();
+                    map.iter()
+                        .filter(|(k, r)| !last.contains_key(*k) && !*r.running.lock())
+                        .map(|(k, r)| (k.clone(), r.clone()))
+                        .collect()
+                };
+                for (id, rt) in fresh {
+                    let mut t = rt.task.lock();
+                    t.speed = 0;
+                    t.downloaded = rt.downloaded.load(Ordering::Relaxed);
+                    let snap = t.clone();
+                    drop(t);
+                    last.insert(id, (snap.downloaded, now));
+                    me.emit(EngineEvent::TaskUpdated(snap));
+                }
+                for (id, rt, dl) in running_list {
+                    let snap = {
                         let mut t = rt.task.lock();
                         t.downloaded = dl;
-                        let prev = last.get(&id).copied();
-                        if running {
-                            if let Some((pdl, pt)) = prev {
-                                let dt = now.duration_since(pt).as_secs_f64();
-                                if dt > 0.05 {
-                                    t.speed = ((dl.saturating_sub(pdl)) as f64 / dt) as u64;
-                                }
+                        if let Some((pdl, pt)) = last.get(&id).copied() {
+                            let dt = now.duration_since(pt).as_secs_f64();
+                            if dt > 0.05 {
+                                t.speed = ((dl.saturating_sub(pdl)) as f64 / dt) as u64;
                             }
-                        } else {
-                            t.speed = 0;
                         }
-                        (t.clone(), prev)
+                        t.clone()
                     };
-                    last.insert(id.clone(), (dl, now));
-                    if running || prev.is_none() {
-                        me.emit(EngineEvent::TaskUpdated(snap.clone()));
-                    }
-                    if running && last_persist.elapsed().as_secs() >= 2 {
-                        snap.downloaded = dl;
-                        to_persist.push(snap);
-                    }
-                }
-                if last_persist.elapsed().as_secs() >= 2 {
-                    last_persist = now;
-                    for t in to_persist {
-                        let _ = me.store.save_task(&t);
+                    last.insert(id, (dl, now));
+                    // 进度只发增量字段，静态信息（URL/镜像/凭据）不再重复传输
+                    me.emit(EngineEvent::TaskProgress(Box::new(snap.progress_snapshot())));
+                    if persist_due {
+                        // 走合并队列：不阻塞 Tokio，同一任务多次进度只落最后一版
+                        me.store.enqueue_save(&snap);
                     }
                 }
 
-                // 清理已不存在的任务的速度记录
-                last.retain(|k, _| {
+                // 清理已不存在的任务的速度记录（一次加锁完成）
+                {
                     let map = me.tasks.lock();
-                    map.contains_key(k)
-                });
+                    last.retain(|k, _| map.contains_key(k));
+                }
 
                 // 定时任务触发
                 let due: Vec<TaskId> = {
@@ -1501,8 +1552,13 @@ async fn fetch_segment(
                             return Ok(());
                         }
                         let part = &bytes[..take];
-                        job.global.acquire(part.len() as u64).await;
-                        job.limiter.acquire(part.len() as u64).await;
+                        // 取消安全：暂停时退还预约，不留下「未来债务」阻塞其他任务
+                        if !job.global.acquire_cancellable(part.len() as u64, cancel).await {
+                            return Ok(());
+                        }
+                        if !job.limiter.acquire_cancellable(part.len() as u64, cancel).await {
+                            return Ok(());
+                        }
                         write_at(&job.file, part, *cursor)?;
                         *cursor += part.len() as u64;
                         if job.tx.send((job.index, part.len() as u64)).await.is_err() {

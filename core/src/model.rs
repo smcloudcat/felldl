@@ -479,11 +479,48 @@ pub fn split_url_userinfo(url: &str) -> (String, Option<String>, Option<String>)
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 pub enum EngineEvent {
     TaskUpdated(Task),
+    /// 轻量进度增量：只含会变化的字段，避免每个进度 tick 都重复传输
+    /// URL / 镜像 / Cookie / 认证 / 文件名等静态信息（可占数 KB）。
+    TaskProgress(Box<TaskProgress>),
     TaskRemoved(TaskId),
     SettingsUpdated(Settings),
     Notice(String),
     /// 系统动作请求（如 "shutdown" / "sleep"），由宿主层执行
     SystemAction(String),
+}
+
+/// 下载进度增量。只携带会随 tick 变化的字段，
+/// UI 收到后按 id 合并进已有 Task，避免重复传输静态信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskProgress {
+    pub id: TaskId,
+    pub state: TaskState,
+    pub downloaded: u64,
+    pub size: Option<u64>,
+    pub speed: u64,
+    pub peers: u32,
+    pub upload_speed: u64,
+    pub segments: Vec<Segment>,
+    pub error: Option<String>,
+    pub completed_at: Option<i64>,
+}
+
+impl Task {
+    /// 生成进度增量快照（不含静态字段）
+    pub fn progress_snapshot(&self) -> TaskProgress {
+        TaskProgress {
+            id: self.id.clone(),
+            state: self.state,
+            downloaded: self.downloaded,
+            size: self.size,
+            speed: self.speed,
+            peers: self.peers,
+            upload_speed: self.upload_speed,
+            segments: self.segments.clone(),
+            error: self.error.clone(),
+            completed_at: self.completed_at,
+        }
+    }
 }
 
 /// 当前时间（毫秒）

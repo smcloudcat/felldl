@@ -186,6 +186,8 @@ pub struct RateLimiter {
     limit: AtomicU64,
     /// 下一个可发送数据的时刻
     next_slot: parking_lot::Mutex<std::time::Instant>,
+    /// 调速唤醒：set_limit 后唤醒正在等待的 acquire，使其按新限额重算
+    kick: tokio::sync::Notify,
 }
 
 impl RateLimiter {
@@ -193,38 +195,89 @@ impl RateLimiter {
         Self {
             limit: AtomicU64::new(limit),
             next_slot: parking_lot::Mutex::new(std::time::Instant::now()),
+            kick: tokio::sync::Notify::new(),
         }
     }
 
     pub fn set_limit(&self, limit: u64) {
         self.limit.store(limit, Ordering::Relaxed);
         *self.next_slot.lock() = std::time::Instant::now();
+        // 唤醒已阻塞在旧限额上的等待者，避免调高限速后仍按旧节奏等待
+        self.kick.notify_waiters();
     }
 
     pub fn limit(&self) -> u64 {
         self.limit.load(Ordering::Relaxed)
     }
 
-    /// 消耗额度，必要时等待
-    pub async fn acquire(&self, n: u64) {
-        let limit = self.limit();
-        if limit == 0 || n == 0 {
-            return;
+    /// 预约一段额度，返回 (需等待时长, 本次预约起点)
+    fn reserve(&self, n: u64, limit: u64) -> (Duration, std::time::Instant) {
+        let mut slot = self.next_slot.lock();
+        let now = std::time::Instant::now();
+        // 闲置太久则重置基准，避免「攒额度」导致瞬间突发
+        if *slot < now {
+            *slot = now;
         }
-        let wait = {
-            let mut slot = self.next_slot.lock();
-            let now = std::time::Instant::now();
-            // 闲置太久则重置基准，避免「攒额度」导致瞬间突发
-            if *slot < now {
-                *slot = now;
+        let start = *slot;
+        let cost = Duration::from_secs_f64(n as f64 / limit as f64);
+        *slot = start + cost;
+        (start.saturating_duration_since(now), start)
+    }
+
+    /// 取消时退还预约：若本次预约把队列推到最后，重置到当前，避免虚假债务
+    fn refund(&self, n: u64, limit: u64, my_start: std::time::Instant) {
+        let mut slot = self.next_slot.lock();
+        let cost = Duration::from_secs_f64(n as f64 / limit.max(1) as f64);
+        if *slot <= my_start + cost {
+            *slot = std::time::Instant::now();
+        }
+    }
+
+    /// 消耗额度，必要时等待（不感知取消）
+    pub async fn acquire(&self, n: u64) {
+        loop {
+            let limit = self.limit();
+            if limit == 0 || n == 0 {
+                return;
             }
-            let start = *slot;
-            let cost = Duration::from_secs_f64(n as f64 / limit as f64);
-            *slot = start + cost;
-            start.saturating_duration_since(now)
-        };
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
+            let (wait, _start) = self.reserve(n, limit);
+            if wait.is_zero() {
+                return;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => return,
+                _ = self.kick.notified() => continue, // 限额变化，重算
+            }
+        }
+    }
+
+    /// 取消安全的额度消耗：被取消时退还预约并返回 false。
+    /// 这样暂停后不会把已取消 chunk 的额度留成「未来债务」阻塞后续任务。
+    pub async fn acquire_cancellable(
+        &self,
+        n: u64,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> bool {
+        loop {
+            let limit = self.limit();
+            if limit == 0 || n == 0 {
+                return !cancel.is_cancelled();
+            }
+            if cancel.is_cancelled() {
+                return false;
+            }
+            let (wait, start) = self.reserve(n, limit);
+            if wait.is_zero() {
+                return !cancel.is_cancelled();
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => return true,
+                _ = cancel.cancelled() => {
+                    self.refund(n, limit, start);
+                    return false;
+                }
+                _ = self.kick.notified() => continue, // 限额变化，重算
+            }
         }
     }
 }

@@ -280,9 +280,13 @@ impl Engine {
             let snap = t.clone();
             drop(t);
             rt.downloaded.store(done, Ordering::Relaxed);
-            // 状态有变化或正在下载时广播
-            if was_running != *rt.running.lock() || snap.state.is_active() {
+            // 状态变化立即落盘；纯进度推进走合并队列（与后台 tick、其他协议去重）
+            if was_running != *rt.running.lock() {
                 let _ = self.store.save_task(&snap);
+            } else if snap.state.is_active() {
+                self.store.enqueue_save(&snap);
+            }
+            if was_running != *rt.running.lock() || snap.state.is_active() {
                 self.emit(EngineEvent::TaskUpdated(snap));
             }
             let _ = id;

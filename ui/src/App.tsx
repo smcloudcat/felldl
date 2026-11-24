@@ -119,24 +119,38 @@ export default function App() {
     // 进度事件批量合并：250ms 内的更新只触发一次 setState，
     // 避免高频进度把整个列表反复重渲染；终态/删除立即提交
     let pending = new Map<string, Task>();
+    // 轻量进度增量（只含变化字段），落盘前按 id 合并进现有任务
+    let progress = new Map<string, Partial<Task>>();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const flush = () => {
       timer = undefined;
-      if (pending.size === 0) return;
+      if (pending.size === 0 && progress.size === 0) return;
       const batch = pending;
       pending = new Map();
+      const pdelta = progress;
+      progress = new Map();
       setTasks((prev) => {
-        let next = prev;
+        let next = prev.slice();
+        let changed = false;
+        for (const [id, d] of pdelta) {
+          const i = next.findIndex((x) => x.id === id);
+          if (i === -1) continue; // 等完整快照到达后再合并
+          const cur = next[i];
+          // 已终态的任务忽略迟到进度，避免「完成/错误」被旧进度覆盖
+          if (cur.state === "completed" || cur.state === "error") continue;
+          next[i] = { ...cur, ...d };
+          changed = true;
+        }
         for (const t of batch.values()) {
           const i = next.findIndex((x) => x.id === t.id);
-          if (i === -1) next = [t, ...next];
-          else {
-            const arr = next.slice();
-            arr[i] = t;
-            next = arr;
+          if (i === -1) {
+            next = [t, ...next];
+          } else {
+            next[i] = t;
           }
+          changed = true;
         }
-        return next;
+        return changed ? next : prev;
       });
     };
     const scheduleFlush = (immediate: boolean) => {
@@ -151,8 +165,17 @@ export default function App() {
     };
     subscribe((e) => {
       switch (e?.type) {
+        case "taskProgress": {
+          const d = e.payload as Partial<Task> & { id: string };
+          if (!d?.id) break;
+          progress.set(d.id, d);
+          scheduleFlush(false);
+          break;
+        }
         case "taskUpdated": {
           const t = e.payload as Task;
+          // 完整快照优先于增量进度
+          progress.delete(t.id);
           // 合并同一任务的连续进度；非下载态（完成/暂停/错误/排队）立即提交
           pending.set(t.id, t);
           scheduleFlush(t.state !== "downloading" && t.state !== "probing");
@@ -160,6 +183,7 @@ export default function App() {
         }
         case "taskRemoved":
           pending.delete(e.payload as string);
+          progress.delete(e.payload as string);
           setTasks((prev) => prev.filter((x) => x.id !== e.payload));
           break;
         case "settingsUpdated":

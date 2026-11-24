@@ -134,14 +134,14 @@ where
             }
         }
 
-        // 每 2 秒持久化一次进度（进程被杀也能续传）
+        // 每 2 秒持久化一次进度（进程被杀也能续传）——走合并队列避免阻塞
         if last_persist.elapsed().as_secs() >= 2 {
             last_persist = std::time::Instant::now();
             let mut t = rt.task.lock();
             t.downloaded = offset;
             let snap = t.clone();
             drop(t);
-            engine.store.save_task(&snap).ok();
+            engine.store.enqueue_save(&snap);
         }
     }
     let _ = stream.finish();
@@ -247,7 +247,7 @@ async fn sftp_worker(
             t.downloaded = offset;
             let snap = t.clone();
             drop(t);
-            engine.store.save_task(&snap).ok();
+            engine.store.enqueue_save(&snap);
         }
     }
     sftp.close().await.ok();
