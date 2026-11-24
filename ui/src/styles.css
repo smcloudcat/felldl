@@ -508,6 +508,9 @@ textarea {
   position: relative;
   overflow: hidden;
   animation: cardIn 0.34s var(--ease-out);
+  /* 长列表性能：屏幕外的卡片跳过布局/绘制，滚动进入视口时按需渲染 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 92px;
 }
 @keyframes cardIn {
   from {
@@ -518,6 +521,10 @@ textarea {
     opacity: 1;
     transform: none;
   }
+}
+/* 长列表只让前 20 张卡片播放入场动画，避免一次性创建上百个动画 */
+.task-card:nth-child(n + 21) {
+  animation: none;
 }
 .task-card:hover {
   box-shadow: var(--shadow-md);
@@ -708,11 +715,13 @@ textarea {
 }
 .progress-fill {
   height: 100%;
+  width: 100%;
   border-radius: var(--r-full);
   background: var(--brand-grad);
-  transition: width 0.4s var(--ease);
+  transform-origin: left center;
+  /* 用 transform 缩放推进进度：合成层动画，不触发布局/重绘 */
+  transition: transform 0.4s var(--ease);
   position: relative;
-  min-width: 2px;
 }
 .progress-fill::after {
   content: "";

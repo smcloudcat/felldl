@@ -267,11 +267,40 @@ pub struct AnalyzeRequest {
     pub cookie: Option<String>,
 }
 
+/// 单个页面的体积上限（防止误抓大文件/无限流把内存吃满）
+const MAX_PAGE_BYTES: usize = 8 * 1024 * 1024;
+/// 单页最多提取的引用数（超长/恶意页面防御）
+const MAX_REFS_PER_PAGE: usize = 5000;
+/// 单页最多收录的可下载资源数
+const MAX_RESOURCES_PER_PAGE: usize = 500;
+
+/// 带上限地读取响应体：先看 Content-Length，再逐块累加，超限立即中止
+async fn read_body_capped(mut resp: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
+    if let Some(len) = resp.content_length() {
+        if len as usize > limit {
+            bail!("响应体积过大（{len} 字节 > {limit}），已跳过");
+        }
+    }
+    let mut buf = Vec::with_capacity(resp.content_length().unwrap_or(64 * 1024).min(limit as u64) as usize);
+    while let Some(chunk) = resp.chunk().await.context("读取响应体失败")? {
+        if buf.len() + chunk.len() > limit {
+            bail!("响应体积超过上限 {limit} 字节，已中止");
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
 /// 抓取并分析一个网页
-pub async fn analyze_page(
+pub async fn analyze_page(client: &Client, req: &AnalyzeRequest) -> Result<PageAnalysis> {
+    analyze_page_with_body(client, req).await.map(|(p, _)| p)
+}
+
+/// 抓取并分析网页，同时返回正文（整站抓取直接复用，避免同一页请求两次）
+pub async fn analyze_page_with_body(
     client: &Client,
     req: &AnalyzeRequest,
-) -> Result<PageAnalysis> {
+) -> Result<(PageAnalysis, String)> {
     let mut r = client.get(&req.url);
     if let Some(ref rf) = req.referer {
         r = r.header("Referer", rf);
@@ -287,10 +316,11 @@ pub async fn analyze_page(
         .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
     let final_url = resp.url().to_string();
     let text = if ct.contains("html") || ct.is_empty() || ct.contains("text/plain") {
-        let bytes = resp.bytes().await?;
+        let bytes = read_body_capped(resp, MAX_PAGE_BYTES).await?;
         // 编码探测：优先 BOM/meta charset，缺省按 UTF-8 解（GBK 页面丢字符但不崩）
         String::from_utf8_lossy(&bytes).into_owned()
     } else {
@@ -304,7 +334,7 @@ pub async fn analyze_page(
     let mut links = Vec::new();
     let mut seen_links = HashSet::new();
 
-    for raw in extract_refs(&text) {
+    for raw in extract_refs(&text).into_iter().take(MAX_REFS_PER_PAGE) {
         let u = match base.join(&raw) {
             Ok(u) => u,
             Err(_) => continue,
@@ -337,8 +367,14 @@ pub async fn analyze_page(
             .map(|s| decode_entities(s))
             .unwrap_or_else(|| abs.clone());
         resources.push(GrabResource { url: abs, kind, name });
+        if resources.len() >= MAX_RESOURCES_PER_PAGE {
+            break;
+        }
     }
-    Ok(PageAnalysis { url: final_url, title, resources, links })
+    Ok((
+        PageAnalysis { url: final_url, title, resources, links },
+        text,
+    ))
 }
 
 // ───────────────────────── 整站抓取 ─────────────────────────
@@ -441,6 +477,7 @@ impl Engine {
         let _base = reqwest::Url::parse(&req.url)?;
         let mut queue = VecDeque::new();
         let mut visited = HashSet::new();
+        let mut visited_assets: HashSet<String> = HashSet::new();
         queue.push_back((req.url.clone(), 0u32));
         visited.insert(req.url.clone());
         let mut saved = 0usize;
@@ -454,7 +491,8 @@ impl Engine {
             if saved as u64 >= req.max_pages as u64 {
                 break;
             }
-            let analysis = match analyze_page(&client, &AnalyzeRequest {
+            // 一次抓取同时拿到正文与引用列表（旧实现为保存 HTML 又重复请求了一次）
+            let (analysis, html) = match analyze_page_with_body(&client, &AnalyzeRequest {
                 url: url.clone(),
                 referer: req.referer.clone(),
                 cookie: None,
@@ -474,38 +512,43 @@ impl Engine {
             if let Some(parent) = html_path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            // 重新抓正文（analyze 内部没有返回原文，这里直接再取一次；带条件不太值，直接抓）
-            let mut r = client.get(&url);
-            if let Some(ref rf) = req.referer {
-                r = r.header("Referer", rf);
-            }
-            let resp = r.send().await?;
-            let html = String::from_utf8_lossy(&resp.bytes().await?).into_owned();
             std::fs::write(&html_path, &html).with_context(|| format!("写入 {}", html_path.display()))?;
             saved += 1;
             pages_done.store(saved as u64, Ordering::Relaxed);
 
-            // 静态资源 → 下载引擎
+            // 静态资源 → 下载引擎（跨页面去重 + 限并发建任务，避免一页几十个资源串行探测）
             if req.include_assets {
+                let asset_dir = html_path
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| req.save_dir.clone());
+                let mut batch: Vec<AddTaskRequest> = Vec::new();
                 for res in &analysis.resources {
                     if res.kind == "hls" {
                         continue;
                     }
-                    let _ = self.add(AddTaskRequest {
+                    // 同一资源在多个页面出现时只下一次
+                    if !visited_assets.insert(res.url.clone()) {
+                        continue;
+                    }
+                    batch.push(AddTaskRequest {
                         url: res.url.clone(),
-                        save_dir: Some(
-                            html_path
-                                .parent()
-                                .map(|p| p.to_string_lossy().to_string())
-                                .unwrap_or_else(|| req.save_dir.clone()),
-                        ),
+                        save_dir: Some(asset_dir.clone()),
                         file_name: Some(res.name.clone()),
                         connections: Some(4),
                         referer: Some(url.clone()),
                         ..Default::default()
+                    });
+                }
+                use futures_util::StreamExt;
+                futures_util::stream::iter(batch)
+                    .for_each_concurrent(4, |req_asset| {
+                        let me = self.clone();
+                        async move {
+                            let _ = me.add(req_asset).await;
+                        }
                     })
                     .await;
-                }
             }
 
             // 同域页面递归
@@ -579,7 +622,7 @@ async fn fetch_text(client: &Client, url: &str) -> Result<String> {
     if !resp.status().is_success() {
         bail!("m3u8 返回 HTTP {}", resp.status().as_u16());
     }
-    Ok(String::from_utf8_lossy(&resp.bytes().await?).into_owned())
+    Ok(String::from_utf8_lossy(&read_body_capped(resp, 4 * 1024 * 1024).await?).into_owned())
 }
 
 async fn parse_media_playlist(_client: &Client, base_url: &str, text: &str) -> Result<HlsMedia> {
@@ -859,7 +902,7 @@ impl Engine {
         Ok(id)
     }
 
-    async fn hls_run(
+    pub(crate) async fn hls_run(
         self: Arc<Self>,
         rt: &Arc<Runtime>,
         media: &HlsMedia,
@@ -894,7 +937,6 @@ impl Engine {
             None => None,
         };
 
-        let mut offset: u64 = 0;
         let total = media.segments.len();
 
         if let Some(init_url) = &media.init {
@@ -903,7 +945,6 @@ impl Engine {
                 .await?;
             use std::io::Write;
             file.write_all(&bytes)?;
-            offset += bytes.len() as u64;
             rt.downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed);
         }
 
@@ -929,7 +970,6 @@ impl Engine {
             }
             use std::io::Write;
             file.write_all(&bytes)?;
-            offset += bytes.len() as u64;
             rt.downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed);
             let _ = total;
         }

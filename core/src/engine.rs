@@ -50,6 +50,35 @@ use tokio_util::sync::CancellationToken;
 /// 兜底 UA：被网站反盗链拒绝浏览器 UA 时使用
 const FALLBACK_UA: &str = "felldl/0.1 (+https://github.com/felldl)";
 
+/// 客户端池上限：不同 UA / Referer / 网卡 / 代理组合过多时按插入顺序淘汰。
+/// reqwest::Client 内部是 Arc，clone 只是引用计数，共享同一个连接池。
+const CLIENT_CACHE_CAP: usize = 8;
+
+#[derive(Default)]
+struct ClientCache {
+    map: HashMap<String, Client>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl ClientCache {
+    fn get(&self, key: &str) -> Option<Client> {
+        self.map.get(key).cloned()
+    }
+
+    fn put(&mut self, key: String, client: Client) {
+        while self.order.len() >= CLIENT_CACHE_CAP {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            } else {
+                break;
+            }
+        }
+        if self.map.insert(key.clone(), client).is_none() {
+            self.order.push_back(key);
+        }
+    }
+}
+
 pub struct Engine {
     pub(crate) store: Store,
     settings: RwLock<Settings>,
@@ -57,6 +86,9 @@ pub struct Engine {
     events: broadcast::Sender<EngineEvent>,
     /// 全局限速器
     global_limiter: Arc<RateLimiter>,
+    /// HTTP 客户端池：按 (UA, Referer, 绑定网卡, 代理) 复用同一个 Client，
+    /// 从而跨任务共享连接池与 TLS 会话，省掉每个任务重建连接池的内存与握手开销。
+    clients: Mutex<ClientCache>,
     pub http_token: RwLock<String>,
     /// 整站抓取任务（可取消）
     pub(crate) grab_jobs: Mutex<HashMap<String, Arc<crate::grab::GrabJob>>>,
@@ -151,6 +183,7 @@ impl Engine {
             tasks: Mutex::new(HashMap::new()),
             events: tx,
             global_limiter: limiter,
+            clients: Mutex::new(ClientCache::default()),
             http_token: RwLock::new(token),
             grab_jobs: Mutex::new(HashMap::new()),
             bt_session: tokio::sync::OnceCell::new(),
@@ -265,6 +298,16 @@ impl Engine {
 
     pub(crate) fn client_with_ua(&self, task: Option<&Task>, ua: &str) -> Result<Client> {
         let s = self.settings.read().clone();
+        let referer = task.and_then(|t| t.referer.clone()).unwrap_or_default();
+        // 池化键：影响底层连接池配置的全部因素（Referer 通过默认头实现，也一并计入）
+        let key = format!(
+            "{ua}\u{1}{referer}\u{1}{}\u{1}{}",
+            s.bind_ip.trim(),
+            s.proxy.to_url().unwrap_or_default()
+        );
+        if let Some(c) = self.clients.lock().get(&key) {
+            return Ok(c);
+        }
         let mut b = Client::builder()
             .user_agent(ua)
             .connect_timeout(std::time::Duration::from_secs(20))
@@ -282,16 +325,16 @@ impl Engine {
             let p = reqwest::Proxy::all(&url).with_context(|| format!("代理地址无效: {url}"))?;
             b = b.proxy(p);
         }
-        if let Some(t) = task {
-            if let Some(ref r) = t.referer {
-                if let Ok(v) = reqwest::header::HeaderValue::from_str(r) {
-                    let mut hm = reqwest::header::HeaderMap::new();
-                    hm.insert(REFERER, v);
-                    b = b.default_headers(hm);
-                }
+        if !referer.is_empty() {
+            if let Ok(v) = reqwest::header::HeaderValue::from_str(&referer) {
+                let mut hm = reqwest::header::HeaderMap::new();
+                hm.insert(REFERER, v);
+                b = b.default_headers(hm);
             }
         }
-        Ok(b.build()?)
+        let client = b.build()?;
+        self.clients.lock().put(key, client.clone());
+        Ok(client)
     }
 
     // ───────────────────────── 添加任务 ─────────────────────────
@@ -866,6 +909,41 @@ impl Engine {
             }
         }
 
+        // HLS（m3u8）：必须走分片 runner，否则会被当成普通文件把播放列表本身下下来
+        if rt.task.lock().kind == TaskKind::Hls {
+            let url = { rt.task.lock().url.clone() };
+            let client = self.client(None)?;
+            let media = crate::grab::parse_hls(&client, &url).await?;
+            // 分片流无法按字节对齐续传，恢复时从 0 重写（truncate）
+            rt.downloaded.store(0, Ordering::Relaxed);
+            {
+                let mut t = rt.task.lock();
+                t.state = TaskState::Downloading;
+                t.error = None;
+                t.speed = 0;
+                t.downloaded = 0;
+            }
+            let snap = { rt.task.lock().clone() };
+            self.emit(EngineEvent::TaskUpdated(snap));
+            return match self.clone().hls_run(&rt, &media, &client, &cancel).await {
+                // 用户取消：落暂停并保存进度，不能当成错误
+                Err(_) if cancel.is_cancelled() => {
+                    let mut t = rt.task.lock();
+                    if t.state.is_active() {
+                        t.state = TaskState::Paused;
+                        t.speed = 0;
+                    }
+                    t.downloaded = rt.downloaded.load(Ordering::Relaxed);
+                    let snap = t.clone();
+                    drop(t);
+                    let _ = self.store.save_task(&snap);
+                    self.emit(EngineEvent::TaskUpdated(snap));
+                    Ok(())
+                }
+                other => other,
+            };
+        }
+
         let (url, save_path, total, supports_range, conns, etag, task_ua) = {
             let t = rt.task.lock();
             (
@@ -1345,7 +1423,8 @@ impl Engine {
                     me.emit(EngineEvent::TaskProgress(Box::new(snap.progress_snapshot())));
                     if persist_due {
                         // 走合并队列：不阻塞 Tokio，同一任务多次进度只落最后一版
-                        me.store.enqueue_save(&snap);
+                        // 这里直接移交所有权，避免再深拷贝一次 segments
+                        me.store.enqueue_save_owned(snap);
                     }
                 }
 

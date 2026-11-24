@@ -61,10 +61,16 @@ impl Store {
     /// 热路径用：把任务放进合并队列，立即返回（不阻塞调用者）。
     /// 同一 id 的旧快照会被新快照覆盖，从而合并多次进度更新。
     pub fn enqueue_save(&self, task: &Task) {
+        self.enqueue_save_owned(task.clone());
+    }
+
+    /// 同 `enqueue_save`，但直接接管所有权，省掉热路径上的一次深拷贝
+    /// （Task 内含 segments 向量，任务多/分片多时拷贝并不便宜）。
+    pub fn enqueue_save_owned(&self, task: Task) {
         let rev = self.next_rev();
         let (lock, cv) = &*self.queue;
         let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
-        g.map.insert(task.id.clone(), (rev, Some(task.clone())));
+        g.map.insert(task.id.clone(), (rev, Some(task)));
         cv.notify_one();
     }
 

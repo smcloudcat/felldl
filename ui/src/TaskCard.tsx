@@ -202,7 +202,10 @@ function TaskCardInner({ task, meta, onPause, onResume, onRemove, onOpen, onReve
               <div className="progress-track">
                 <div
                   className={cx("progress-fill", !isActive && "paused")}
-                  style={{ width: `${Math.max(pct * 100, pct > 0 ? 1.5 : 0)}%` }}
+                  /* 用 transform 而非 width 推进：走合成层，不再每次进度更新触发重排 */
+                  style={{
+                    transform: `scaleX(${Math.min(1, Math.max(pct, pct > 0 ? 0.015 : 0))})`,
+                  }}
                 />
                 {isActive && task.segments.length > 1 && (
                   <div className="segment-ticks">
