@@ -149,7 +149,112 @@ async function notify(title, message) {
   }
 }
 
-// 安装时打开配置页
+// 安装时：注册右键菜单 + 打开配置页
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.action.openPopup?.().catch(() => {});
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: "felldl-download-link",
+      title: "使用 Felldl 下载此链接",
+      contexts: ["link"],
+    });
+    chrome.contextMenus.create({
+      id: "felldl-download-selection",
+      title: "Felldl 批量下载选中的链接",
+      contexts: ["selection"],
+    });
+  });
+  chrome.action.openPopup?.().catch?.(() => {});
+});
+
+// ── 右键菜单：单链接 / 选中区批量 ──
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === "felldl-download-link" && info.linkUrl) {
+    const cfg = await getConfig();
+    const urls = [info.linkUrl];
+    const n = await sendMany(urls, cfg, tab);
+    notify("Felldl", n > 0 ? `已加入下载队列（${n} 个）` : "发送失败，请确认 Felldl 正在运行");
+  }
+  if (info.menuItemId === "felldl-download-selection" && tab?.id != null) {
+    let urls = [];
+    try {
+      const resp = await chrome.tabs.sendMessage(tab.id, { type: "getSelectionLinks" });
+      urls = resp?.urls || [];
+    } catch {
+      /* content script 未注入 */
+    }
+    if (!urls.length && info.linkUrl) urls = [info.linkUrl];
+    if (!urls.length) {
+      notify("Felldl", "选中内容里没有发现可下载的链接");
+      return;
+    }
+    const cfg = await getConfig();
+    const n = await sendMany(urls, cfg, tab);
+    notify("Felldl", n > 0 ? `已把 ${n} 个链接加入下载队列` : "发送失败，请确认 Felldl 正在运行且令牌正确");
+  }
+});
+
+/** 批量发送（带 panel 模式的通知） */
+async function sendMany(urls, cfg, tab) {
+  let ok = 0;
+  for (const url of urls) {
+    try {
+      const cookie = await cookiesFor(url);
+      const body = {
+        url,
+        referer: tab?.url || undefined,
+        cookie: cookie || undefined,
+      };
+      const resp = await fetch(
+        `http://127.0.0.1:${cfg.port}/add?token=${encodeURIComponent(cfg.token)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      );
+      const data = await resp.json().catch(() => null);
+      if (resp.ok && data?.ok) ok++;
+    } catch {
+      /* 单个失败继续 */
+    }
+  }
+  // 面板显示方式：none = 静默；minimize/notify 都用系统通知提示
+  const panel = await panelMode(cfg);
+  if (ok > 0 && panel !== "none") {
+    notify("Felldl", `已添加 ${ok} 个下载任务`);
+  }
+  return ok;
+}
+
+/** 读 Felldl /config 的 browser_panel 设置 */
+async function panelMode(cfg) {
+  try {
+    const r = await fetch(
+      `http://127.0.0.1:${cfg.port}/config?token=${encodeURIComponent(cfg.token)}`,
+      { cache: "no-store" }
+    );
+    const d = await r.json();
+    return d?.browser_panel || "notify";
+  } catch {
+    return "notify";
+  }
+}
+
+// ── 消息：content.js 悬浮按钮批量提交 ──
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type === "sendLinks") {
+    (async () => {
+      const cfg = await getConfig();
+      const n = await sendMany(msg.urls || [], cfg, sender.tab);
+      sendResponse({ ok: n > 0, count: n });
+    })();
+    return true;
+  }
+  if (msg?.type === "pingFelldl") {
+    (async () => {
+      const cfg = await getConfig();
+      sendResponse({ ok: await ping(cfg) });
+    })();
+    return true;
+  }
 });

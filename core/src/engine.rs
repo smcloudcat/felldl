@@ -68,7 +68,7 @@ impl Runtime {
 // ───────────────────────── 平台相关的定位写入 ─────────────────────────
 
 #[cfg(windows)]
-fn write_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
+pub(crate) fn write_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
     use std::os::windows::fs::FileExt;
     let mut written = 0usize;
     while written < buf.len() {
@@ -82,7 +82,7 @@ fn write_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn write_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
+pub(crate) fn write_at(file: &File, buf: &[u8], offset: u64) -> io::Result<()> {
     use std::os::unix::fs::FileExt;
     let mut written = 0usize;
     while written < buf.len() {
@@ -245,6 +245,12 @@ impl Engine {
             .pool_max_idle_per_host(64)
             // 不少下载站 / 镜像站的证书链不完整，这里保留校验但允许常见兼容
             .redirect(reqwest::redirect::Policy::limited(10));
+        // 绑定指定网络接口（IPv4 / IPv6 均可）
+        if !s.bind_ip.trim().is_empty() {
+            if let Ok(ip) = s.bind_ip.trim().parse::<std::net::IpAddr>() {
+                b = b.local_address(ip);
+            }
+        }
         if let Some(url) = s.proxy.to_url() {
             let p = reqwest::Proxy::all(&url).with_context(|| format!("代理地址无效: {url}"))?;
             b = b.proxy(p);
@@ -270,12 +276,34 @@ impl Engine {
         if url.starts_with("magnet:") {
             return self.bt_add(&url, &req).await;
         }
+        // FTP / SFTP：单流下载，无需 HTTP 探测
+        let lower = url.to_lowercase();
+        if lower.starts_with("ftp://") || lower.starts_with("ftps://") || lower.starts_with("sftp://") {
+            return self.add_remote(req, url).await;
+        }
         if !(url.starts_with("http://") || url.starts_with("https://")) {
-            bail!("仅支持 http/https 链接");
+            bail!("仅支持 http/https/ftp/sftp 链接");
+        }
+        // Metalink：解析出镜像列表后按普通多源任务下载
+        let mut req = req;
+        if lower.ends_with(".metalink") || lower.ends_with(".meta4") {
+            req = self.resolve_metalink(req, &url).await?;
         }
         let s = self.settings();
 
-        let probe = match self.probe(&url, req.referer.as_deref(), req.cookie.as_deref()).await {
+        // URL 自带 userinfo（user:pass@host）时自动剥离为凭据
+        let (clean_url, url_user, url_pass) = split_url_userinfo(&req.url);
+        let username = req.username.clone().filter(|s| !s.is_empty()).or(url_user);
+        let password = req.password.clone().filter(|s| !s.is_empty()).or(url_pass);
+        req.url = clean_url;
+        req.username = username.clone();
+        req.password = password.clone();
+        let auth = (username.as_deref(), password.as_deref());
+
+        let probe = match self
+            .probe(&req.url, req.referer.as_deref(), req.cookie.as_deref(), auth)
+            .await
+        {
             Ok(p) => p,
             Err(e) => {
                 // 探测失败也建任务，标记错误便于用户重试
@@ -287,14 +315,19 @@ impl Engine {
             }
         };
 
+        // metalink 解析出的镜像直接注入（不再二次校验）
+        let metalink_mirrors = std::mem::take(&mut req.mirrors);
         let mut t = self.build_task(&req, probe, &s);
         // 校验镜像：逐个探测，仅保留与主地址大小一致的镜像
-        for m in &req.mirrors {
+        for m in &metalink_mirrors {
             let m = m.trim();
             if m.is_empty() || m == &t.url {
                 continue;
             }
-            match self.probe(m, req.referer.as_deref(), req.cookie.as_deref()).await {
+            match self
+                .probe(m, req.referer.as_deref(), req.cookie.as_deref(), auth)
+                .await
+            {
                 Ok(p) => {
                     let same_size = match (p.size, t.size) {
                         (Some(a), Some(b)) => a == b,
@@ -320,13 +353,92 @@ impl Engine {
         Ok(t.id)
     }
 
+    /// FTP / SFTP 任务：无 HTTP 探测，直接建任务
+    async fn add_remote(self: &Arc<Self>, req: AddTaskRequest, url: String) -> Result<TaskId> {
+        let s = self.settings();
+        let kind = if url.to_lowercase().starts_with("sftp://") {
+            TaskKind::Sftp
+        } else {
+            TaskKind::Ftp
+        };
+        // URL 自带凭据剥离
+        let (clean_url, u, p) = split_url_userinfo(&url);
+        let username = req.username.clone().filter(|x| !x.is_empty()).or(u)
+            .unwrap_or_else(|| "anonymous".into());
+        let password = req
+            .password
+            .clone()
+            .filter(|x| !x.is_empty())
+            .or(p)
+            .unwrap_or_else(|| "felldl@example.com".into());
+        let mut r2 = req.clone();
+        r2.url = clean_url;
+
+        let file_name = util::filename_from_url(&r2.url).unwrap_or_else(|| "download".into());
+        let probe = ProbeInfo {
+            size: None,
+            supports_range: true,
+            file_name: Some(file_name),
+            content_type: None,
+            ..Default::default()
+        };
+        let mut t = self.build_task_with_auth(&r2, probe, &s, kind, Some(username), Some(password));
+        t.supports_range = true;
+        self.insert_task(t.clone());
+        if s.auto_start {
+            let _ = self.resume(&t.id).await;
+        }
+        Ok(t.id)
+    }
+
+    /// Metalink(.metalink/.meta4) 解析：提取全部 <url> 与文件名，
+    /// 主 URL 建任务、其余 URL 注入镜像列表。
+    async fn resolve_metalink(&self, mut req: AddTaskRequest, url: &str) -> Result<AddTaskRequest> {
+        let client = self.client(None)?;
+        let text = client
+            .get(url)
+            .send()
+            .await
+            .context("下载 metalink 文件失败")?
+            .error_for_status()
+            .context("下载 metalink 文件失败")?
+            .text()
+            .await?;
+        let (urls, name) = crate::metalink::parse(&text)
+            .ok_or_else(|| anyhow!("metalink 内容无效或不含可用 URL"))?;
+        if urls.is_empty() {
+            bail!("metalink 中没有可用 URL");
+        }
+        if req.file_name.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+            if let Some(n) = name {
+                req.file_name = Some(util::sanitize_name(&n));
+            }
+        }
+        req.url = urls[0].clone();
+        req.mirrors = urls[1..].to_vec();
+        Ok(req)
+    }
+
     fn build_task(&self, req: &AddTaskRequest, probe: ProbeInfo, s: &Settings) -> Task {
+        let kind = TaskKind::Http;
+        let auth = (req.username.clone(), req.password.clone());
+        self.build_task_with_auth(req, probe, s, kind, auth.0, auth.1)
+    }
+
+    fn build_task_with_auth(
+        &self,
+        req: &AddTaskRequest,
+        probe: ProbeInfo,
+        s: &Settings,
+        kind: TaskKind,
+        username: Option<String>,
+        password: Option<String>,
+    ) -> Task {
         let save_dir = req
             .save_dir
             .clone()
             .filter(|d| !d.trim().is_empty())
             .unwrap_or_else(|| s.download_dir.clone());
-        let _ = std::fs::create_dir_all(&save_dir);
 
         let raw_name = req
             .file_name
@@ -340,19 +452,37 @@ impl Engine {
             &util::sanitize_name(&raw_name),
             probe.content_type.as_deref(),
         );
-        let path = util::unique_path(Path::new(&save_dir), &name);
-        let final_name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or(name);
+        let final_name = name.clone();
+
+        // 分类：显式指定 > 规则自动归类；命中的分类可提供独立保存目录
+        let category = req
+            .category
+            .clone()
+            .filter(|c| !c.trim().is_empty())
+            .or_else(|| classify_category(&final_name, &req.url, &s.categories));
+        let save_dir = category
+            .as_ref()
+            .and_then(|cat| {
+                s.categories
+                    .iter()
+                    .find(|c| &c.name == cat)
+                    .and_then(|c| c.save_dir.clone().filter(|d| !d.trim().is_empty()))
+            })
+            .unwrap_or(save_dir);
+        let _ = std::fs::create_dir_all(&save_dir);
+        // 保存目录因分类规则变化时，重算唯一路径
+        let path = util::unique_path(Path::new(&save_dir), &final_name);
 
         Task {
             id: uuid::Uuid::new_v4().to_string(),
             url: probe.final_url.clone().if_empty_then(req.url.clone()),
-            kind: TaskKind::Http,
+            kind,
             mirrors: Vec::new(),
-            file_name: final_name,
-            save_dir,
+            file_name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or(final_name),
+            save_dir: save_dir.clone(),
             save_path: path.to_string_lossy().to_string(),
             size: probe.size,
             downloaded: 0,
@@ -375,6 +505,10 @@ impl Engine {
             peers: 0,
             upload_speed: 0,
             bt_info_hash: None,
+            category,
+            username,
+            password,
+            interval_secs: req.interval_secs,
         }
     }
 
@@ -397,11 +531,12 @@ impl Engine {
         url: &str,
         referer: Option<&str>,
         cookie: Option<&str>,
+        auth: (Option<&str>, Option<&str>),
     ) -> Result<ProbeInfo> {
         let uas = self.probe_uas();
         let mut last_err = None;
         for ua in &uas {
-            match self.probe_with_ua(url, referer, cookie, ua).await {
+            match self.probe_with_ua(url, referer, cookie, ua, auth).await {
                 Ok(info) => return Ok(info),
                 Err(e) => {
                     let retriable = {
@@ -436,6 +571,7 @@ impl Engine {
         referer: Option<&str>,
         cookie: Option<&str>,
         ua: &str,
+        auth: (Option<&str>, Option<&str>),
     ) -> Result<ProbeInfo> {
         let client = self.client_with_ua(None, ua)?;
         let mut req = client
@@ -447,6 +583,9 @@ impl Engine {
         }
         if let Some(c) = cookie {
             req = req.header(COOKIE, c);
+        }
+        if let (Some(u), Some(p)) = auth {
+            req = req.basic_auth(u, Some(p));
         }
         let resp = req.send().await.context("连接服务器失败")?;
         let status = resp.status();
@@ -665,6 +804,22 @@ impl Engine {
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow!("任务不存在"))?;
+
+        // FTP / SFTP 单流下载分支
+        {
+            let kind = rt.task.lock().kind;
+            if kind == TaskKind::Ftp || kind == TaskKind::Sftp {
+                {
+                    let mut t = rt.task.lock();
+                    t.state = TaskState::Downloading;
+                    t.error = None;
+                    t.speed = 0;
+                }
+                let snap = { rt.task.lock().clone() };
+                self.emit(EngineEvent::TaskUpdated(snap));
+                return crate::remote::download(self.clone(), rt, &cancel).await;
+            }
+        }
 
         let (url, save_path, total, supports_range, conns, etag, task_ua) = {
             let t = rt.task.lock();
@@ -991,11 +1146,51 @@ impl Engine {
         t.completed_at = Some(now_ms());
         t.speed = 0;
         t.error = None;
+
+        // 周期性同步：完成后按间隔重新调度（保持文件始终最新）
+        let reschedule = t.interval_secs > 0;
+        if reschedule {
+            t.state = TaskState::Scheduled;
+            t.scheduled_at = Some(now_ms() + t.interval_secs as i64 * 1000);
+            // 清零进度并删除旧文件，下次到点重新完整下载
+            t.downloaded = 0;
+            t.segments.clear();
+            t.completed_at = None;
+            rt.downloaded.store(0, Ordering::Relaxed);
+            let path = t.save_path.clone();
+            let _ = std::fs::remove_file(&path);
+        }
+
         let snap = t.clone();
         drop(t);
         let _ = self.store.save_task(&snap);
         self.emit(EngineEvent::TaskUpdated(snap));
+
+        // 全部任务都完成 → 触发「下载后动作」（关机 / 睡眠）
+        if !reschedule {
+            self.maybe_after_complete();
+        }
         Ok(())
+    }
+
+    /// 所有任务都处于终态时，按设置触发系统动作
+    fn maybe_after_complete(&self) {
+        let action = self.settings.read().after_complete.clone();
+        if action != "shutdown" && action != "sleep" {
+            return;
+        }
+        let all_done = {
+            let map = self.tasks.lock();
+            !map.is_empty()
+                && map.values().all(|r| {
+                    let t = r.task.lock();
+                    t.state.is_terminal()
+                })
+        };
+        if all_done {
+            self.emit(EngineEvent::SystemAction(action));
+            self.emit(EngineEvent::Notice("全部下载完成，即将执行关机/睡眠动作".into()));
+        }
     }
 
     // ───────────────────────── 后台循环 ─────────────────────────

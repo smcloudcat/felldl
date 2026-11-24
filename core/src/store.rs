@@ -149,10 +149,17 @@ mod tests {
             peers: 0,
             upload_speed: 0,
             bt_info_hash: None,
+            category: Some("压缩包".into()),
+            username: Some("u".into()),
+            password: Some("p".into()),
+            interval_secs: 60,
         };
         store.save_task(&t).unwrap();
         let loaded = store.load_tasks();
         assert_eq!(loaded.len(), 1);
+        // 新字段也要原样往返
+        assert_eq!(loaded[0].category.as_deref(), Some("压缩包"));
+        assert_eq!(loaded[0].interval_secs, 60);
         // 重启后进行中 → 暂停
         assert_eq!(loaded[0].state, TaskState::Paused);
         assert_eq!(loaded[0].downloaded, 400);

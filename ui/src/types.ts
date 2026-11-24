@@ -16,7 +16,14 @@ export interface Segment {
   done: number;
 }
 
-export type TaskKind = "http" | "bt" | "hls";
+export type TaskKind = "http" | "bt" | "hls" | "ftp" | "sftp";
+
+export interface Category {
+  name: string;
+  extensions: string[];
+  site_pattern?: string | null;
+  save_dir?: string | null;
+}
 
 export interface Task {
   id: string;
@@ -47,6 +54,10 @@ export interface Task {
   peers: number;
   upload_speed: number;
   bt_info_hash: string | null;
+  category: string | null;
+  username: string | null;
+  password: string | null;
+  interval_secs: number;
 }
 
 export interface ProxyConfig {
@@ -72,6 +83,13 @@ export interface Settings {
   notify_on_complete: boolean;
   user_agent: string;
   auto_start: boolean;
+  categories: Category[];
+  after_complete: "none" | "shutdown" | "sleep" | string;
+  bind_ip: string;
+  browser_panel: "notify" | "minimize" | "none" | string;
+  ui_skin: "blue" | "purple" | "green" | "orange" | string;
+  btn_style: "rounded" | "flat" | "outline" | string;
+  task_meta: string[];
 }
 
 export interface AddTaskRequest {
@@ -85,6 +103,10 @@ export interface AddTaskRequest {
   cookie?: string | null;
   headers?: Record<string, string>;
   mirrors?: string[];
+  username?: string | null;
+  password?: string | null;
+  interval_secs?: number;
+  category?: string | null;
 }
 
 // ── 网页抓取 / 嗅探 ──

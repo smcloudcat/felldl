@@ -11,6 +11,7 @@ import {
   IconBolt,
   IconCheck,
   IconDownload,
+  IconFolder,
   IconGlobe,
   IconMenu,
   IconPause,
@@ -41,6 +42,7 @@ export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [view, setView] = useState<View>("downloads");
   const [filter, setFilter] = useState<FilterKey>("all");
+  const [category, setCategory] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -138,7 +140,7 @@ export default function App() {
     return () => un?.();
   }, [toast]);
 
-  // ── 主题 ──
+  // ── 主题 / 皮肤 / 按钮风格 ──
   useEffect(() => {
     if (!settings) return;
     const apply = () => {
@@ -147,13 +149,15 @@ export default function App() {
         pref === "dark" ||
         (pref === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
       document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+      document.documentElement.setAttribute("data-skin", settings.ui_skin || "blue");
+      document.documentElement.setAttribute("data-btn", settings.btn_style || "rounded");
     };
     apply();
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const onMq = () => settings.theme === "system" && apply();
     mq.addEventListener("change", onMq);
     return () => mq.removeEventListener("change", onMq);
-  }, [settings?.theme]);
+  }, [settings?.theme, settings?.ui_skin, settings?.btn_style]);
 
   // ── 统计 ──
   const stats = useMemo(() => {
@@ -181,21 +185,23 @@ export default function App() {
   }, [tasks]);
 
   const visible = useMemo(() => {
+    let list = tasks;
+    if (category) list = list.filter((t) => t.category === category);
     switch (filter) {
       case "downloading":
-        return tasks.filter(
+        return list.filter(
           (t) => t.state === "downloading" || t.state === "probing" || t.state === "queued"
         );
       case "completed":
-        return tasks.filter((t) => t.state === "completed");
+        return list.filter((t) => t.state === "completed");
       case "paused":
-        return tasks.filter((t) => t.state === "paused" || t.state === "scheduled");
+        return list.filter((t) => t.state === "paused" || t.state === "scheduled");
       case "error":
-        return tasks.filter((t) => t.state === "error");
+        return list.filter((t) => t.state === "error");
       default:
-        return tasks;
+        return list;
     }
-  }, [tasks, filter]);
+  }, [tasks, filter, category]);
 
   // ── 操作 ──
   const handlePause = useCallback(
@@ -350,6 +356,43 @@ export default function App() {
           </button>
         ))}
 
+        {(settings.categories?.length ?? 0) > 0 && (
+          <>
+            <div className="nav-section">{t("set.categories")}</div>
+            <button
+              className={cx("nav-item", view === "downloads" && category === null && filter === "all" && "active")}
+              onClick={() => {
+                setView("downloads");
+                setCategory(null);
+                setFilter("all");
+                setSidebarOpen(false);
+              }}
+            >
+              <IconDownload />
+              {t("filter.all")}
+            </button>
+            {settings.categories.map((c) => {
+              const count = tasks.filter((t) => t.category === c.name).length;
+              return (
+                <button
+                  key={c.name}
+                  className={cx("nav-item", view === "downloads" && category === c.name && "active")}
+                  onClick={() => {
+                    setView("downloads");
+                    setCategory(c.name);
+                    setFilter("all");
+                    setSidebarOpen(false);
+                  }}
+                >
+                  <IconFolder />
+                  {c.name}
+                  {count > 0 && <span className="nav-count">{count}</span>}
+                </button>
+              );
+            })}
+          </>
+        )}
+
         <div className="nav-section">{t("nav.tools")}</div>
         <button
           className={cx("nav-item", view === "grab" && "active")}
@@ -403,7 +446,9 @@ export default function App() {
               ? t("nav.settings")
               : view === "grab"
                 ? t("nav.grab")
-                : FILTERS.find((f) => f.key === filter)?.label ?? t("filter.all")}
+                : category
+                  ? category
+                  : FILTERS.find((f) => f.key === filter)?.label ?? t("filter.all")}
             {view === "downloads" && visible.length > 0 && (
               <span className="count-pill">{visible.length}</span>
             )}
@@ -487,6 +532,7 @@ export default function App() {
                 <TaskCard
                   key={t.id}
                   task={t}
+                  meta={settings.task_meta}
                   onPause={handlePause}
                   onResume={handleResume}
                   onRemove={handleRemove}

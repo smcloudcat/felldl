@@ -64,6 +64,16 @@ pub struct ApiAddBody {
     pub headers: Option<HashMap<String, String>>,
     #[serde(default)]
     pub save_dir: Option<String>,
+    #[serde(default)]
+    pub mirrors: Option<Vec<String>>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub interval_secs: Option<u64>,
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 async fn ping() -> impl IntoResponse {
@@ -93,7 +103,11 @@ async fn add_task(
         referer: body.referer,
         cookie: body.cookie,
         headers: body.headers.unwrap_or_default(),
-        mirrors: Vec::new(),
+        mirrors: body.mirrors.unwrap_or_default(),
+        username: body.username,
+        password: body.password,
+        interval_secs: body.interval_secs.unwrap_or(0),
+        category: body.category,
     };
     match st.engine.add(req).await {
         Ok(id) => Json(json!({"ok": true, "id": id})).into_response(),
@@ -125,6 +139,26 @@ async fn stats(State(st): State<ApiState>) -> impl IntoResponse {
     }))
 }
 
+/// 扩展用的配置：面板显示方式 + 基本信息（需鉴权）
+async fn config(
+    State(st): State<ApiState>,
+    Query(q): Query<TokenQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = check_token(&st.engine, &headers, &q) {
+        return r;
+    }
+    let s = st.engine.settings();
+    Json(json!({
+        "ok": true,
+        "version": crate::VERSION,
+        "browser_panel": s.browser_panel,
+        "categories": s.categories.iter().map(|c| c.name.clone()).collect::<Vec<_>>(),
+        "download_dir": s.download_dir,
+    }))
+    .into_response()
+}
+
 /// 启动 API 服务（非阻塞）。仅监听 127.0.0.1。
 pub async fn serve(engine: Arc<Engine>, port: u16) -> anyhow::Result<u16> {
     let st = ApiState {
@@ -133,6 +167,7 @@ pub async fn serve(engine: Arc<Engine>, port: u16) -> anyhow::Result<u16> {
     let app = Router::new()
         .route("/ping", get(ping))
         .route("/stats", get(stats))
+        .route("/config", get(config))
         .route("/add", post(add_task))
         .route("/tasks", get(list_tasks))
         .layer(

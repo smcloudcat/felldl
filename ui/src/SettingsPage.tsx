@@ -14,6 +14,7 @@ import {
   IconSun,
   IconMonitor,
   IconCheck,
+  IconX,
 } from "./icons";
 import { cx } from "./format";
 
@@ -51,6 +52,11 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateErr, setUpdateErr] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
+  const [ifaces, setIfaces] = useState<string[]>([]);
+
+  useEffect(() => {
+    api.listInterfaces().then(setIfaces).catch(() => {});
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -398,6 +404,192 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
             </div>
           </div>
         )}
+
+        {draft.api_enabled && (
+          <div style={{ marginTop: 14 }}>
+            <label className="field-label">{t("set.browserPanel")}</label>
+            <div className="seg-control" style={{ marginTop: 6 }}>
+              {(
+                [
+                  { v: "notify", label: t("set.panelNotify") },
+                  { v: "minimize", label: t("set.panelMinimize") },
+                  { v: "none", label: t("set.panelNone") },
+                ] as const
+              ).map(({ v, label }) => (
+                <button
+                  key={v}
+                  type="button"
+                  className={cx("seg-btn", draft.browser_panel === v && "active")}
+                  onClick={() => patch({ browser_panel: v })}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--text-mute)", marginTop: 8, lineHeight: 1.6 }}>
+              {t("set.extHint")}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 下载分类 */}
+      <div className="card">
+        <div className="card-head">
+          <div className="card-icon">
+            <IconFolder size={15} />
+          </div>
+          <div className="card-title">{t("set.categories")}</div>
+        </div>
+        <div className="card-sub">{t("set.categoriesSub")}</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
+          {draft.categories.map((c, i) => (
+            <div
+              key={i}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "90px 1.4fr 1fr 1.2fr auto",
+                gap: 6,
+                alignItems: "center",
+              }}
+            >
+              <input
+                className="input"
+                value={c.name}
+                placeholder={t("set.catName")}
+                onChange={(e) => {
+                  const cats = draft.categories.slice();
+                  cats[i] = { ...c, name: e.target.value };
+                  patch({ categories: cats });
+                }}
+              />
+              <input
+                className="input"
+                value={c.extensions.join(",")}
+                placeholder={t("set.catExt")}
+                onChange={(e) => {
+                  const cats = draft.categories.slice();
+                  cats[i] = {
+                    ...c,
+                    extensions: e.target.value.split(/[,\s]+/).filter(Boolean),
+                  };
+                  patch({ categories: cats });
+                }}
+              />
+              <input
+                className="input"
+                value={c.site_pattern || ""}
+                placeholder={t("set.catSite")}
+                onChange={(e) => {
+                  const cats = draft.categories.slice();
+                  cats[i] = { ...c, site_pattern: e.target.value || null };
+                  patch({ categories: cats });
+                }}
+              />
+              <input
+                className="input"
+                value={c.save_dir || ""}
+                placeholder={t("set.catDir")}
+                onChange={(e) => {
+                  const cats = draft.categories.slice();
+                  cats[i] = { ...c, save_dir: e.target.value || null };
+                  patch({ categories: cats });
+                }}
+              />
+              <button
+                className="icon-btn"
+                title={t("set.catDelete")}
+                onClick={() =>
+                  patch({ categories: draft.categories.filter((_, k) => k !== i) })
+                }
+              >
+                <IconX size={14} />
+              </button>
+            </div>
+          ))}
+          {draft.categories.length === 0 && (
+            <div style={{ fontSize: 12, color: "var(--text-mute)" }}>{t("set.catEmpty")}</div>
+          )}
+          <div>
+            <button
+              className="btn btn-soft btn-sm"
+              type="button"
+              onClick={() =>
+                patch({
+                  categories: [
+                    ...draft.categories,
+                    { name: "", extensions: [], site_pattern: null, save_dir: null },
+                  ],
+                })
+              }
+            >
+              + {t("set.catAdd")}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* 下载后动作 */}
+      <div className="card">
+        <div className="card-head">
+          <div className="card-icon">
+            <IconMoon size={15} />
+          </div>
+          <div className="card-title">{t("set.after")}</div>
+        </div>
+        <div className="card-sub">{t("set.afterSub")}</div>
+        <div className="seg-control" style={{ marginTop: 12 }}>
+          {(
+            [
+              { v: "none", label: t("set.afterNone") },
+              { v: "shutdown", label: t("set.afterShutdown") },
+              { v: "sleep", label: t("set.afterSleep") },
+            ] as const
+          ).map(({ v, label }) => (
+            <button
+              key={v}
+              type="button"
+              className={cx("seg-btn", draft.after_complete === v && "active")}
+              onClick={() => patch({ after_complete: v })}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {draft.after_complete === "shutdown" && (
+          <div style={{ fontSize: 11.5, color: "var(--text-mute)", marginTop: 8 }}>
+            {t("set.afterShutdownHint")}
+          </div>
+        )}
+      </div>
+
+      {/* 网络接口绑定 */}
+      <div className="card">
+        <div className="card-head">
+          <div className="card-icon">
+            <IconGlobe size={15} />
+          </div>
+          <div className="card-title">{t("set.net")}</div>
+        </div>
+        <div className="card-sub">{t("set.netSub")}</div>
+        <div className="field" style={{ marginTop: 12 }}>
+          <label className="field-label">{t("set.bindIp")}</label>
+          <select
+            className="select"
+            value={draft.bind_ip}
+            onChange={(e) => patch({ bind_ip: e.target.value })}
+          >
+            <option value="">{t("set.bindAuto")}</option>
+            {(ifaces.length ? ifaces : draft.bind_ip ? [draft.bind_ip] : []).map((ip) => (
+              <option key={ip} value={ip}>
+                {ip}
+              </option>
+            ))}
+          </select>
+          <div style={{ fontSize: 11.5, color: "var(--text-mute)", marginTop: 6 }}>
+            {t("set.bindIpHint")}
+          </div>
+        </div>
       </div>
 
       {/* 外观 */}
@@ -428,6 +620,94 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
               {label}
             </button>
           ))}
+        </div>
+
+        {/* 界面自定义 */}
+        <div className="card-sub" style={{ marginTop: 16 }}>{t("set.customizeSub")}</div>
+        <div className="field" style={{ marginTop: 8 }}>
+          <label className="field-label">{t("set.skin")}</label>
+          <div className="seg-control">
+            {(
+              [
+                { v: "blue", label: t("set.skinBlue"), c: "#3b82f6" },
+                { v: "purple", label: t("set.skinPurple"), c: "#8b5cf6" },
+                { v: "green", label: t("set.skinGreen"), c: "#10b981" },
+                { v: "orange", label: t("set.skinOrange"), c: "#f59e0b" },
+              ] as const
+            ).map(({ v, label, c }) => (
+              <button
+                key={v}
+                type="button"
+                className={cx("seg-btn", draft.ui_skin === v && "active")}
+                onClick={() => patch({ ui_skin: v })}
+                style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+              >
+                <span
+                  style={{
+                    width: 10,
+                    height: 10,
+                    borderRadius: "50%",
+                    background: c,
+                    display: "inline-block",
+                  }}
+                />
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="field" style={{ marginTop: 10 }}>
+          <label className="field-label">{t("set.btnStyle")}</label>
+          <div className="seg-control">
+            {(
+              [
+                { v: "rounded", label: t("set.btnRounded") },
+                { v: "flat", label: t("set.btnFlat") },
+                { v: "outline", label: t("set.btnOutline") },
+              ] as const
+            ).map(({ v, label }) => (
+              <button
+                key={v}
+                type="button"
+                className={cx("seg-btn", draft.btn_style === v && "active")}
+                onClick={() => patch({ btn_style: v })}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="field" style={{ marginTop: 10 }}>
+          <label className="field-label">{t("set.taskMeta")}</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 4 }}>
+            {(
+              [
+                { v: "size", label: t("meta.size") },
+                { v: "speed", label: t("meta.speed") },
+                { v: "eta", label: t("meta.eta") },
+                { v: "mirrors", label: t("meta.mirrors") },
+                { v: "date", label: t("meta.date") },
+              ] as const
+            ).map(({ v, label }) => {
+              const on = draft.task_meta.includes(v);
+              return (
+                <button
+                  key={v}
+                  type="button"
+                  className={cx("seg-btn", on && "active")}
+                  onClick={() =>
+                    patch({
+                      task_meta: on
+                        ? draft.task_meta.filter((x) => x !== v)
+                        : [...draft.task_meta, v],
+                    })
+                  }
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </div>
 

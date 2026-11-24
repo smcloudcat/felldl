@@ -40,6 +40,9 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
   });
   const [referer, setReferer] = useState("");
   const [mirrorsText, setMirrorsText] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [interval, setInterval] = useState(0);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -114,6 +117,9 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
         scheduled_at: scheduledAt,
         referer: referer.trim() || null,
         mirrors: mirrorUrls,
+        username: username.trim() || null,
+        password: password || null,
+        interval_secs: interval,
       }));
 
       if (reqs.length === 1) {
@@ -309,6 +315,44 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
                   spellCheck={false}
                 />
                 <div className="field-hint">{t("dlg.mirrorsHint")}</div>
+              </div>
+              <div className="field">
+                <label className="field-label">🔑 {t("dlg.auth")}</label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <input
+                    className="input"
+                    placeholder={t("dlg.username")}
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <input
+                    className="input"
+                    type="password"
+                    placeholder={t("dlg.password")}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    autoComplete="new-password"
+                  />
+                </div>
+                <div className="field-hint">{t("dlg.authHint")}</div>
+              </div>
+              <div className="field">
+                <label className="field-label">🔄 {t("dlg.interval")}</label>
+                <select
+                  className="select"
+                  value={interval}
+                  onChange={(e) => setInterval(Number(e.target.value))}
+                >
+                  <option value={0}>{t("dlg.intervalOff")}</option>
+                  <option value={300}>5 min</option>
+                  <option value={1800}>30 min</option>
+                  <option value={3600}>1 h</option>
+                  <option value={21600}>6 h</option>
+                  <option value={86400}>24 h</option>
+                </select>
+                <div className="field-hint">{t("dlg.intervalHint")}</div>
               </div>
             </>
           )}

@@ -815,6 +815,10 @@ impl Engine {
             peers: 0,
             upload_speed: 0,
             bt_info_hash: None,
+            category: Some("视频".into()),
+            username: None,
+            password: None,
+            interval_secs: 0,
         };
         let id = t.id.clone();
         let task_id = id.clone();

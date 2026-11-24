@@ -150,6 +150,65 @@ pub struct Settings {
     /// 添加任务后是否立即开始
     #[serde(default = "default_true")]
     pub auto_start: bool,
+    /// 下载分类规则（按顺序匹配，第一个命中的生效）
+    #[serde(default = "default_categories")]
+    pub categories: Vec<Category>,
+    /// 全部下载完成后执行的动作："none" | "shutdown" | "sleep"
+    #[serde(default)]
+    pub after_complete: String,
+    /// 绑定的本地网络接口 IP（空 = 自动选择）；支持 IPv4 / IPv6
+    #[serde(default)]
+    pub bind_ip: String,
+    /// 浏览器扩展下载面板显示方式："notify" | "minimize" | "none"
+    #[serde(default = "default_browser_panel")]
+    pub browser_panel: String,
+    /// 界面皮肤（强调色主题）："blue" | "purple" | "green" | "orange"
+    #[serde(default = "default_skin")]
+    pub ui_skin: String,
+    /// 按钮风格："rounded" | "flat" | "outline"
+    #[serde(default = "default_btn_style")]
+    pub btn_style: String,
+    /// 任务卡片显示的信息项（顺序即显示顺序）
+    #[serde(default = "default_task_meta")]
+    pub task_meta: Vec<String>,
+}
+
+/// 下载分类规则
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Category {
+    pub name: String,
+    /// 扩展名列表（不含点，小写）
+    #[serde(default)]
+    pub extensions: Vec<String>,
+    /// 站点匹配（子串匹配 URL host，可选）
+    #[serde(default)]
+    pub site_pattern: Option<String>,
+    /// 该分类的独立保存目录（空 = 跟随默认目录）
+    #[serde(default)]
+    pub save_dir: Option<String>,
+}
+
+fn default_categories() -> Vec<Category> {
+    vec![
+        Category { name: "视频".into(), extensions: vec!["mp4","mkv","avi","mov","webm","flv","ts","m3u8","wmv"].into_iter().map(String::from).collect(), site_pattern: None, save_dir: None },
+        Category { name: "音乐".into(), extensions: vec!["mp3","flac","wav","aac","ogg","m4a","ape"].into_iter().map(String::from).collect(), site_pattern: None, save_dir: None },
+        Category { name: "文档".into(), extensions: vec!["pdf","doc","docx","xls","xlsx","ppt","pptx","txt","md","epub","mobi"].into_iter().map(String::from).collect(), site_pattern: None, save_dir: None },
+        Category { name: "压缩包".into(), extensions: vec!["zip","rar","7z","tar","gz","bz2","xz","iso"].into_iter().map(String::from).collect(), site_pattern: None, save_dir: None },
+        Category { name: "程序".into(), extensions: vec!["exe","msi","apk","dmg","appimage","deb","rpm"].into_iter().map(String::from).collect(), site_pattern: None, save_dir: None },
+        Category { name: "图片".into(), extensions: vec!["jpg","jpeg","png","gif","webp","bmp","svg"].into_iter().map(String::from).collect(), site_pattern: None, save_dir: None },
+    ]
+}
+fn default_browser_panel() -> String {
+    "notify".into()
+}
+fn default_skin() -> String {
+    "blue".into()
+}
+fn default_btn_style() -> String {
+    "rounded".into()
+}
+fn default_task_meta() -> Vec<String> {
+    vec!["size".into(), "speed".into(), "eta".into(), "mirrors".into(), "date".into()]
 }
 
 fn default_download_dir() -> String {
@@ -189,6 +248,13 @@ impl Default for Settings {
             notify_on_complete: true,
             user_agent: default_ua(),
             auto_start: true,
+            categories: default_categories(),
+            after_complete: "none".into(),
+            bind_ip: String::new(),
+            browser_panel: default_browser_panel(),
+            ui_skin: default_skin(),
+            btn_style: default_btn_style(),
+            task_meta: default_task_meta(),
         }
     }
 }
@@ -224,6 +290,10 @@ pub enum TaskKind {
     Bt,
     /// HLS 直播/点播（m3u8 分片合并）
     Hls,
+    /// FTP / FTPS（单流 + REST 续传）
+    Ftp,
+    /// SFTP（单流 + seek 续传）
+    Sftp,
 }
 
 impl TaskKind {
@@ -232,6 +302,8 @@ impl TaskKind {
             TaskKind::Http => "http",
             TaskKind::Bt => "bt",
             TaskKind::Hls => "hls",
+            TaskKind::Ftp => "ftp",
+            TaskKind::Sftp => "sftp",
         }
     }
     /// 从字符串（浏览器传来的小写）解析，默认 Http
@@ -239,6 +311,8 @@ impl TaskKind {
         match s {
             "bt" => TaskKind::Bt,
             "hls" => TaskKind::Hls,
+            "ftp" => TaskKind::Ftp,
+            "sftp" => TaskKind::Sftp,
             _ => TaskKind::Http,
         }
     }
@@ -309,6 +383,18 @@ pub struct Task {
     /// BT：info_hash（hex），用于关联 librqbit 会话中的种子
     #[serde(default)]
     pub bt_info_hash: Option<String>,
+    /// 下载分类（分类名）
+    #[serde(default)]
+    pub category: Option<String>,
+    /// HTTP Basic / FTP / SFTP 认证用户名
+    #[serde(default)]
+    pub username: Option<String>,
+    /// 认证密码（本地存储）
+    #[serde(default)]
+    pub password: Option<String>,
+    /// 周期性同步：完成后每 N 秒自动重新下载（0 = 关闭）
+    #[serde(default)]
+    pub interval_secs: u64,
 }
 
 impl Task {
@@ -348,6 +434,44 @@ pub struct AddTaskRequest {
     /// 镜像地址（多源并行下载）
     #[serde(default)]
     pub mirrors: Vec<String>,
+    /// 认证用户名（HTTP Basic / FTP / SFTP）
+    #[serde(default)]
+    pub username: Option<String>,
+    /// 认证密码
+    #[serde(default)]
+    pub password: Option<String>,
+    /// 周期性同步间隔（秒，0 = 一次性下载）
+    #[serde(default)]
+    pub interval_secs: u64,
+    /// 指定分类名（不指定则自动归类）
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+/// 从 URL 中剥离 userinfo（user:pass@host）→ 返回 (剥离后的 URL, user, pass)
+pub fn split_url_userinfo(url: &str) -> (String, Option<String>, Option<String>) {
+    if let Some(scheme_end) = url.find("://") {
+        let after = &url[scheme_end + 3..];
+        if let Some(at) = after.find('@') {
+            // 只把最后一个 @ 前的部分当凭据（密码里可能带 @，取 host 段前的第一个 @ 不可靠，
+            // 但 host 段不含 @，因此取第一个出现在路径之前的 @）
+            let head = &after[..at];
+            if head.contains('/') || head.contains('?') || head.contains('#') {
+                return (url.to_string(), None, None);
+            }
+            let (u, p) = match head.split_once(':') {
+                Some((u, p)) => (u.to_string(), p.to_string()),
+                None => (head.to_string(), String::new()),
+            };
+            let cleaned = format!("{}://{}", &url[..scheme_end + 3], &after[at + 1..]);
+            return (
+                cleaned,
+                if u.is_empty() { None } else { Some(u) },
+                if p.is_empty() { None } else { Some(p) },
+            );
+        }
+    }
+    (url.to_string(), None, None)
 }
 
 /// 引擎事件（推送给 UI / 订阅者）
@@ -358,6 +482,8 @@ pub enum EngineEvent {
     TaskRemoved(TaskId),
     SettingsUpdated(Settings),
     Notice(String),
+    /// 系统动作请求（如 "shutdown" / "sleep"），由宿主层执行
+    SystemAction(String),
 }
 
 /// 当前时间（毫秒）
@@ -367,4 +493,31 @@ pub fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// 按分类规则自动归类：先匹配扩展名，再匹配站点；都不命中返回 None
+pub fn classify_category(
+    file_name: &str,
+    url: &str,
+    categories: &[Category],
+) -> Option<String> {
+    let ext = file_name
+        .rsplit('.')
+        .next()
+        .filter(|e| e.len() < 12 && !e.contains('/'))
+        .map(|e| e.to_lowercase())?;
+    let url_lower = url.to_lowercase();
+    for c in categories {
+        if c.extensions.iter().any(|e| e.eq_ignore_ascii_case(&ext)) {
+            return Some(c.name.clone());
+        }
+    }
+    for c in categories {
+        if let Some(p) = &c.site_pattern {
+            if !p.trim().is_empty() && url_lower.contains(&p.to_lowercase()) {
+                return Some(c.name.clone());
+            }
+        }
+    }
+    None
 }

@@ -186,17 +186,10 @@ async fn segmented_download_is_byte_exact() {
     let url = format!("http://{}/file.bin", srv.addr);
     let id = engine
         .add(AddTaskRequest {
-            url,
+            url: url.clone(),
             save_dir: Some(out.to_string_lossy().to_string()),
-            file_name: None,
-            connections: Some(8),
-            speed_limit: None,
-            scheduled_at: None,
-            referer: None,
-            cookie: None,
-            headers: Default::default(),
-            mirrors: Vec::new(),
-})
+            ..Default::default()
+        })
         .await
         .unwrap();
 
@@ -228,20 +221,18 @@ async fn pause_then_resume_continues_correctly() {
     std::fs::create_dir_all(&out).unwrap();
     let engine = new_engine(&root);
 
+    // 限速 2MB/s，确保下载不会在暂停前跑完
+    let mut s = engine.settings();
+    s.global_speed_limit = 2 * 1024 * 1024;
+    engine.update_settings(s).unwrap();
+
     let url = format!("http://{}/big.bin", srv.addr);
     let id = engine
         .add(AddTaskRequest {
-            url,
+            url: url.clone(),
             save_dir: Some(out.to_string_lossy().to_string()),
-            file_name: None,
-            connections: Some(4),
-            speed_limit: Some(400 * 1024), // 400KB/s → 约 10s 下完
-            scheduled_at: None,
-            referer: None,
-            cookie: None,
-            headers: Default::default(),
-            mirrors: Vec::new(),
-})
+            ..Default::default()
+        })
         .await
         .unwrap();
 
@@ -289,17 +280,10 @@ async fn no_range_server_falls_back_single_stream() {
     let url = format!("http://{}/plain.bin", srv.addr);
     let id = engine
         .add(AddTaskRequest {
-            url,
+            url: url.clone(),
             save_dir: Some(out.to_string_lossy().to_string()),
-            file_name: None,
-            connections: Some(16),
-            speed_limit: None,
-            scheduled_at: None,
-            referer: None,
-            cookie: None,
-            headers: Default::default(),
-            mirrors: Vec::new(),
-})
+            ..Default::default()
+        })
         .await
         .unwrap();
 
@@ -330,17 +314,10 @@ async fn speed_limit_actually_slows() {
     let t0 = std::time::Instant::now();
     let id = engine
         .add(AddTaskRequest {
-            url,
+            url: url.clone(),
             save_dir: Some(out.to_string_lossy().to_string()),
-            file_name: None,
-            connections: Some(2),
-            speed_limit: None,
-            scheduled_at: None,
-            referer: None,
-            cookie: None,
-            headers: Default::default(),
-            mirrors: Vec::new(),
-})
+            ..Default::default()
+        })
         .await
         .unwrap();
 
@@ -365,16 +342,9 @@ async fn error_paths_are_reported() {
         let id = engine
             .add(AddTaskRequest {
                 url,
-                save_dir: Some(root.join("out").to_string_lossy().to_string()),
-                file_name: None,
-                connections: Some(4),
-                speed_limit: None,
-                scheduled_at: None,
-                referer: None,
-                cookie: None,
-                headers: Default::default(),
-            mirrors: Vec::new(),
-})
+                save_dir: Some(root.to_string_lossy().to_string()),
+                ..Default::default()
+            })
             .await
             .unwrap();
         let t = engine.get(&id).unwrap();
@@ -401,15 +371,9 @@ async fn scheduled_task_waits_then_runs() {
         .add(AddTaskRequest {
             url,
             save_dir: Some(out.to_string_lossy().to_string()),
-            file_name: None,
-            connections: Some(4),
-            speed_limit: None,
             scheduled_at: Some(fire_at),
-            referer: None,
-            cookie: None,
-            headers: Default::default(),
-            mirrors: Vec::new(),
-})
+            ..Default::default()
+        })
         .await
         .unwrap();
 
@@ -445,15 +409,8 @@ async fn concurrent_limit_queues_extra_tasks() {
             .add(AddTaskRequest {
                 url,
                 save_dir: Some(out.to_string_lossy().to_string()),
-                file_name: Some(format!("c{i}.bin")),
-                connections: Some(2),
-                speed_limit: None,
-                scheduled_at: None,
-                referer: None,
-                cookie: None,
-                headers: Default::default(),
-            mirrors: Vec::new(),
-})
+                ..Default::default()
+            })
             .await
             .unwrap();
         ids.push(id);
@@ -487,23 +444,20 @@ async fn resume_after_process_restart() {
     let out = root.join("out");
     std::fs::create_dir_all(&out).unwrap();
 
+    // 限速 1MB/s，保证暂停前下载未完成
     let id_stored;
     {
         let engine = new_engine(&root);
+        let mut s = engine.settings();
+        s.global_speed_limit = 1024 * 1024;
+        engine.update_settings(s).unwrap();
         let url = format!("http://{}/r.bin", srv.addr);
         let id = engine
             .add(AddTaskRequest {
                 url,
                 save_dir: Some(out.to_string_lossy().to_string()),
-                file_name: None,
-                connections: Some(4),
-                speed_limit: Some(300 * 1024),
-                scheduled_at: None,
-                referer: None,
-                cookie: None,
-                headers: Default::default(),
-            mirrors: Vec::new(),
-})
+                ..Default::default()
+            })
             .await
             .unwrap();
         id_stored = id.clone();
@@ -621,17 +575,10 @@ async fn retry_after_connection_drop_does_not_duplicate() {
     let url = format!("http://{}/flaky.bin", addr);
     let id = engine
         .add(AddTaskRequest {
-            url,
+            url: url.clone(),
             save_dir: Some(out.to_string_lossy().to_string()),
-            file_name: Some("flaky.bin".into()),
-            connections: Some(4),
-            speed_limit: None,
-            scheduled_at: None,
-            referer: None,
-            cookie: None,
-            headers: Default::default(),
-            mirrors: Vec::new(),
-})
+            ..Default::default()
+        })
         .await
         .unwrap();
 
@@ -667,19 +614,14 @@ async fn scheduled_task_starts_on_time() {
         .as_millis()
         + 1500) as i64;
 
+    let url = format!("http://{}/dly.bin", srv.addr);
     let id = engine
         .add(AddTaskRequest {
-            url: format!("http://{}/s.bin", srv.addr),
+            url,
             save_dir: Some(out.to_string_lossy().to_string()),
-            file_name: Some("scheduled.bin".into()),
-            connections: Some(4),
-            speed_limit: None,
             scheduled_at: Some(when),
-            referer: None,
-            cookie: None,
-            headers: Default::default(),
-            mirrors: Vec::new(),
-})
+            ..Default::default()
+        })
         .await
         .unwrap();
 

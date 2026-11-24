@@ -11,7 +11,9 @@ pub mod bt;
 pub mod crypto;
 pub mod engine;
 pub mod grab;
+pub mod metalink;
 pub mod model;
+pub mod remote;
 pub mod store;
 pub mod util;
 

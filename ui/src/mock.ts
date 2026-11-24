@@ -50,6 +50,10 @@ function makeTask(url: string, name: string, size: number): Task {
     peers: 0,
     upload_speed: 0,
     bt_info_hash: null,
+    category: null,
+    username: null,
+    password: null,
+    interval_secs: 0,
   };
 }
 
@@ -107,6 +111,19 @@ let settings: Settings = {
   user_agent:
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
   auto_start: true,
+  categories: [
+    { name: "视频", extensions: ["mp4", "mkv", "webm"], site_pattern: null, save_dir: null },
+    { name: "音乐", extensions: ["mp3", "flac"], site_pattern: null, save_dir: null },
+    { name: "文档", extensions: ["pdf", "docx"], site_pattern: null, save_dir: null },
+    { name: "压缩包", extensions: ["zip", "7z"], site_pattern: null, save_dir: null },
+    { name: "程序", extensions: ["exe", "apk"], site_pattern: null, save_dir: null },
+  ],
+  after_complete: "none",
+  bind_ip: "",
+  browser_panel: "notify",
+  ui_skin: "blue",
+  btn_style: "rounded",
+  task_meta: ["size", "speed", "eta", "mirrors", "date"],
 };
 
 // 每 400ms 推进下载进度
@@ -225,6 +242,8 @@ export const mockEngine = {
         return "/Users/you/Downloads";
       case "get_api_info":
         return { port: settings.api_port, token: settings.api_token, running: true };
+      case "list_interfaces":
+        return ["192.168.123.137", "10.8.0.2", "fe80::1"];
       case "open_file":
       case "show_in_folder":
       case "set_task_speed_limit":

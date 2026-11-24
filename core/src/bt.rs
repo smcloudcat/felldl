@@ -135,6 +135,10 @@ impl Engine {
             peers: 0,
             upload_speed: 0,
             bt_info_hash: Some(info_hash),
+            category: None,
+            username: None,
+            password: None,
+            interval_secs: 0,
         };
         let id = t.id.clone();
         let rt = Runtime::new(t.clone());

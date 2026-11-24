@@ -29,6 +29,7 @@ import {
 
 interface Props {
   task: Task;
+  meta?: string[];
   onPause: (id: string) => void;
   onResume: (id: string) => void;
   onRemove: (id: string) => void;
@@ -47,7 +48,7 @@ const KIND_ICON = {
   other: IconFile,
 } as const;
 
-function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: Props) {
+function TaskCardInner({ task, meta, onPause, onResume, onRemove, onOpen, onReveal }: Props) {
   const { t, lang } = useI18n();
   const [confirmDel, setConfirmDel] = useState(false);
   const kind = task.kind === "bt" ? "other" : fileKind(task.file_name);
@@ -57,6 +58,8 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
   const isDone = task.state === "completed";
   const isBt = task.kind === "bt";
   const isHls = task.kind === "hls";
+  const isRemote = task.kind === "ftp" || task.kind === "sftp";
+  const show = (k: string) => !meta || meta.length === 0 || meta.includes(k);
 
   const stateClass =
     task.state === "completed"
@@ -79,9 +82,9 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
         <div className="task-main">
           <div className="task-head">
             <div className="task-name" title={task.file_name}>
-              {(isBt || isHls) && (
+              {(isBt || isHls || isRemote) && (
                 <span className={cx("kind-badge", task.kind)}>
-                  {isBt ? "BT" : "HLS"}
+                  {isBt ? "BT" : isHls ? "HLS" : isRemote ? task.kind.toUpperCase() : ""}
                 </span>
               )}
               {task.file_name}
@@ -93,11 +96,13 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
           </div>
 
           <div className="task-meta">
-            <span>
-              {formatBytes(task.downloaded)}
-              {task.size ? ` / ${formatBytes(task.size)}` : ""}
-            </span>
-            {isActive && task.speed > 0 && (
+            {show("size") && (
+              <span>
+                {formatBytes(task.downloaded)}
+                {task.size ? ` / ${formatBytes(task.size)}` : ""}
+              </span>
+            )}
+            {show("speed") && isActive && task.speed > 0 && (
               <>
                 <span className="sep" />
                 <span className="speed">{formatSpeed(task.speed)}</span>
@@ -119,7 +124,7 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
                 </span>
               </>
             )}
-            {isActive && !isBt && !isHls && task.speed > 0 && (
+            {show("eta") && isActive && !isBt && !isHls && task.speed > 0 && (
               <>
                 <span className="sep" />
                 <span>
@@ -138,7 +143,7 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
                 </span>
               </>
             )}
-            {task.mirrors.length > 0 && (
+            {show("mirrors") && task.mirrors.length > 0 && (
               <>
                 <span className="sep" />
                 <span title={task.mirrors.join("\n")}>
@@ -160,12 +165,31 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
                 </span>
               </>
             )}
-            {isDone && !isBt && !isHls && task.connections > 0 && (
+            {task.interval_secs > 0 && (
+              <>
+                <span className="sep" />
+                <span title={t("dlg.intervalHint")}>
+                  🔄 {task.interval_secs >= 3600 ? `${task.interval_secs / 3600}h` : `${task.interval_secs / 60}m`}
+                </span>
+              </>
+            )}
+            {show("date") && (
               <>
                 <span className="sep" />
                 <span>
-                  {task.connections} {t("state.threads")}
+                  {new Date(task.created_at).toLocaleString(lang === "zh" ? "zh-CN" : "en-US", {
+                    month: "2-digit",
+                    day: "2-digit",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
                 </span>
+              </>
+            )}
+            {task.category && (
+              <>
+                <span className="sep" />
+                <span className="cat-chip">{task.category}</span>
               </>
             )}
           </div>

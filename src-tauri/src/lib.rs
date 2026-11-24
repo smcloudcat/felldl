@@ -330,6 +330,22 @@ async fn show_in_folder(path: String) -> Result<(), String> {
     reveal_path(&path)
 }
 
+/// 列出本机网络接口的 IP 地址（IPv4 + IPv6），用于「绑定网络接口」设置
+#[tauri::command]
+async fn list_interfaces() -> Result<Vec<String>, String> {
+    let mut v: Vec<std::net::IpAddr> = Vec::new();
+    for ip in if_addrs::get_if_addrs()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|i| i.ip())
+    {
+        if !v.contains(&ip) {
+            v.push(ip);
+        }
+    }
+    Ok(v.into_iter().map(|i| i.to_string()).collect())
+}
+
 #[tauri::command]
 async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     // 桌面对话框支持选择目录
@@ -552,6 +568,10 @@ pub fn run() {
                                     notify_done(&app_handle, t);
                                 }
                             }
+                            // 下载后动作：关机 / 睡眠（仅桌面执行）
+                            if let EngineEvent::SystemAction(action) = &ev {
+                                execute_system_action(action);
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(_) => break,
@@ -596,13 +616,35 @@ pub fn run() {
             grab_site,
             cancel_grab,
             download_hls,
+            list_interfaces,
         ])
         .run(tauri::generate_context!())
         .expect("Felldl 启动失败");
 }
 
-fn notify_done(app: &tauri::AppHandle, task: &Task) {
-    use tauri_plugin_notification::NotificationExt;
+/// 执行下载后动作。Windows：shutdown / 睡眠；其他平台暂不支持（静默忽略）。
+fn execute_system_action(action: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new(match action {
+            "shutdown" => "shutdown",
+            "sleep" => "rundll32.exe",
+            _ => return,
+        })
+        .args(match action {
+            "shutdown" => vec!["/s", "/t", "60"],
+            "sleep" => vec!["powrprof.dll,SetSuspendState", "0,1,0"],
+            _ => vec![],
+        })
+        .spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = action;
+    }
+}
+
+fn notify_done(app: &tauri::AppHandle, task: &Task) {    use tauri_plugin_notification::NotificationExt;
     let enabled = app
         .try_state::<AppState>()
         .map(|s| s.engine.settings().notify_on_complete)

@@ -17,6 +17,8 @@ custom-protocol = ["tauri/custom-protocol"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# 本机网络接口 IP 列表（设置「绑定网络接口」用）
+if-addrs = "0.13"
 felldl-core = { path = "../core" }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"

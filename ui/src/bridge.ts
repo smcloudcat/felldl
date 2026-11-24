@@ -85,6 +85,9 @@ export const api = {
       save_dir: saveDir || null,
       file_name: fileName || null,
     }) as Promise<string>,
+
+  // 本机网络接口 IP 列表（绑定接口用）
+  listInterfaces: () => invoke("list_interfaces") as Promise<string[]>,
 };
 
 /** 订阅引擎事件 */

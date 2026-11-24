@@ -25,6 +25,14 @@ aes = "0.8"
 # BitTorrent 客户端（DHT / tracker / magnet 全支持，纯 Rust 免交叉编译坑）
 librqbit = { version = "9", default-features = false, features = ["rust-tls"] }
 librqbit-core = { version = "9", default-features = false }
+# FTP / FTPS（rustls-ring：ring 后端便于 Android 交叉编译）
+suppaftp = { version = "13", default-features = false, features = ["rustls-ring"] }
+# SFTP（russh 全家桶，纯 Rust）
+russh = { version = "0.65", default-features = false, features = ["ring"] }
+russh-sftp = "4"
+# FTPS 根证书
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+webpki-roots = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
