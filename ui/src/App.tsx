@@ -4,13 +4,14 @@ import { api, subscribe } from "./bridge";
 import { TaskCard } from "./TaskCard";
 import { NewTaskDialog } from "./NewTaskDialog";
 import { SettingsPage } from "./SettingsPage";
+import { GrabPage } from "./GrabPage";
 import { cx, formatSpeed, isActive } from "./format";
+import { useI18n } from "./i18n";
 import {
   IconBolt,
   IconCheck,
-  IconClock,
   IconDownload,
-  IconFolder,
+  IconGlobe,
   IconMenu,
   IconPause,
   IconPlay,
@@ -20,23 +21,22 @@ import {
   IconX,
 } from "./icons";
 
-type View = "downloads" | "settings";
-
-const FILTERS: { key: FilterKey; label: string; icon: any }[] = [
-  { key: "all", label: "全部任务", icon: IconDownload },
-  { key: "downloading", label: "进行中", icon: IconBolt },
-  { key: "completed", label: "已完成", icon: IconCheck },
-  { key: "paused", label: "已暂停", icon: IconPause },
-  { key: "error", label: "失败", icon: IconX },
-];
-
-interface Toast {
-  id: number;
-  msg: string;
-  kind: "ok" | "error";
-}
+type View = "downloads" | "grab" | "settings";
 
 export default function App() {
+  const { t } = useI18n();
+  const FILTERS = useMemo(
+    () =>
+      [
+        { key: "all", label: t("filter.all"), icon: IconDownload },
+        { key: "downloading", label: t("filter.downloading"), icon: IconBolt },
+        { key: "completed", label: t("filter.completed"), icon: IconCheck },
+        { key: "paused", label: t("filter.paused"), icon: IconPause },
+        { key: "error", label: t("filter.error"), icon: IconX },
+      ] as { key: FilterKey; label: string; icon: any }[],
+    [t]
+  );
+
   const [tasks, setTasks] = useState<Task[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [view, setView] = useState<View>("downloads");
@@ -51,6 +51,12 @@ export default function App() {
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const toastId = useRef(0);
 
+  interface Toast {
+    id: number;
+    msg: string;
+    kind: "ok" | "error";
+  }
+
   const toast = useCallback((msg: string, kind: "ok" | "error" = "ok") => {
     const id = ++toastId.current;
     setToasts((t) => [...t, { id, msg, kind }]);
@@ -60,7 +66,6 @@ export default function App() {
   // ── 初始化 ──
   useEffect(() => {
     let alive = true;
-    // 兜底提示：低端机冷启动 WebView 可能超过 10s，这里只提示"较慢"、不判失败
     const timer = setTimeout(() => {
       if (alive) setSlowHint(true);
     }, 20000);
@@ -79,14 +84,14 @@ export default function App() {
         console.error("初始化失败", e);
         setInitError(String(e));
         setSlowHint(false);
-        toast("初始化失败，请检查后端服务", "error");
+        toast(t("act.initFail"), "error");
       }
     })();
     return () => {
       alive = false;
       clearTimeout(timer);
     };
-  }, [toast, reloadKey]);
+  }, [toast, reloadKey, t]);
 
   // ── 启动后自动检查更新（静默：失败不打扰） ──
   useEffect(() => {
@@ -107,7 +112,6 @@ export default function App() {
   useEffect(() => {
     let un: (() => void) | undefined;
     subscribe((e) => {
-      // bridge 已解包，e 就是 EngineEvent 本身
       switch (e?.type) {
         case "taskUpdated": {
           const t = e.payload as Task;
@@ -212,62 +216,62 @@ export default function App() {
     async (id: string) => {
       try {
         await api.remove(id, false);
-        toast("已删除任务");
+        toast(t("act.taskRemoved"));
       } catch (e) {
         toast(String(e), "error");
       }
     },
-    [toast]
+    [toast, t]
   );
 
   const handleOpen = useCallback(
-    async (t: Task) => {
+    async (task: Task) => {
       try {
-        await api.openFile(t.save_path);
-      } catch (e) {
-        toast("打开失败", "error");
+        await api.openFile(task.save_path);
+      } catch {
+        toast(t("act.openFail"), "error");
       }
     },
-    [toast]
+    [toast, t]
   );
 
   const handleReveal = useCallback(
-    async (t: Task) => {
+    async (task: Task) => {
       try {
-        await api.showInFolder(t.save_path);
-      } catch (e) {
-        toast("打开文件夹失败", "error");
+        await api.showInFolder(task.save_path);
+      } catch {
+        toast(t("act.revealFail"), "error");
       }
     },
-    [toast]
+    [toast, t]
   );
 
   const pauseAll = useCallback(async () => {
     try {
       await api.pauseAll();
-      toast("已暂停全部任务");
+      toast(t("act.pausedAll"));
     } catch (e) {
       toast(String(e), "error");
     }
-  }, [toast]);
+  }, [toast, t]);
 
   const resumeAll = useCallback(async () => {
     try {
       await api.resumeAll();
-      toast("已恢复全部任务");
+      toast(t("act.resumedAll"));
     } catch (e) {
       toast(String(e), "error");
     }
-  }, [toast]);
+  }, [toast, t]);
 
   const clearCompleted = useCallback(async () => {
     try {
       await api.clearCompleted();
-      toast("已清空完成记录");
+      toast(t("act.cleared"));
     } catch (e) {
       toast(String(e), "error");
     }
-  }, [toast]);
+  }, [toast, t]);
 
   const hasActive = stats.downloading.length > 0;
   const hasResumable = stats.paused.length + stats.error.length > 0;
@@ -291,10 +295,8 @@ export default function App() {
     return (
       <div className="app">
         <div className="boot-screen">
-          <div className="boot-title">{initError ? "引擎启动失败" : "正在启动引擎…"}</div>
-          {slowHint && !initError && (
-            <div className="boot-hint">启动较慢，仍在等待后端响应…</div>
-          )}
+          <div className="boot-title">{initError ? t("boot.failed") : t("boot.starting")}</div>
+          {slowHint && !initError && <div className="boot-hint">{t("boot.slow")}</div>}
           {initError && (
             <>
               <div className="boot-error">{initError}</div>
@@ -306,7 +308,7 @@ export default function App() {
                   setReloadKey((k) => k + 1);
                 }}
               >
-                重试
+                {t("boot.retry")}
               </button>
             </>
           )}
@@ -317,7 +319,6 @@ export default function App() {
 
   return (
     <div className="app">
-      {/* 移动端遮罩 */}
       {sidebarOpen && <div className="sidebar-scrim" onClick={() => setSidebarOpen(false)} />}
 
       {/* 侧边栏 */}
@@ -332,7 +333,7 @@ export default function App() {
           </div>
         </div>
 
-        <div className="nav-section">下载</div>
+        <div className="nav-section">{t("nav.downloads")}</div>
         {FILTERS.map(({ key, label, icon: Icon }) => (
           <button
             key={key}
@@ -349,7 +350,17 @@ export default function App() {
           </button>
         ))}
 
-        <div className="nav-section">工具</div>
+        <div className="nav-section">{t("nav.tools")}</div>
+        <button
+          className={cx("nav-item", view === "grab" && "active")}
+          onClick={() => {
+            setView("grab");
+            setSidebarOpen(false);
+          }}
+        >
+          <IconGlobe />
+          {t("nav.grab")}
+        </button>
         <button
           className={cx("nav-item", view === "settings" && "active")}
           onClick={() => {
@@ -358,19 +369,19 @@ export default function App() {
           }}
         >
           <IconSettings />
-          设置
+          {t("nav.settings")}
         </button>
 
         <div className="sidebar-footer">
           <div className="speed-card">
-            <div className="speed-card-label">当前速度</div>
+            <div className="speed-card-label">{t("side.speed")}</div>
             <div className="speed-card-value">
-              {stats.totalSpeed > 0 ? formatSpeed(stats.totalSpeed) : "空闲"}
+              {stats.totalSpeed > 0 ? formatSpeed(stats.totalSpeed) : t("side.idle")}
             </div>
             <div className="speed-card-sub">
               {stats.downloading.length > 0
-                ? `${stats.downloading.length} 个任务下载中`
-                : `${stats.completed.length} 个已完成`}
+                ? t("side.activeTasks", { n: stats.downloading.length })
+                : t("side.doneTasks", { n: stats.completed.length })}
             </div>
           </div>
         </div>
@@ -382,15 +393,17 @@ export default function App() {
           <button
             className="icon-btn mobile-only"
             onClick={() => setSidebarOpen((v) => !v)}
-            aria-label="菜单"
+            aria-label={t("hdr.menu")}
           >
             <IconMenu />
           </button>
 
           <div className="header-title">
             {view === "settings"
-              ? "设置"
-              : FILTERS.find((f) => f.key === filter)?.label ?? "全部任务"}
+              ? t("nav.settings")
+              : view === "grab"
+                ? t("nav.grab")
+                : FILTERS.find((f) => f.key === filter)?.label ?? t("filter.all")}
             {view === "downloads" && visible.length > 0 && (
               <span className="count-pill">{visible.length}</span>
             )}
@@ -400,34 +413,34 @@ export default function App() {
             {view === "downloads" && (
               <>
                 {hasActive && (
-                  <button className="btn btn-ghost btn-sm" onClick={pauseAll} title="全部暂停">
+                  <button className="btn btn-ghost btn-sm" onClick={pauseAll} title={t("hdr.pauseAll")}>
                     <IconPause size={13} />
-                    <span className="desktop-label">全部暂停</span>
+                    <span className="desktop-label">{t("hdr.pauseAll")}</span>
                   </button>
                 )}
                 {!hasActive && hasResumable && (
-                  <button className="btn btn-ghost btn-sm" onClick={resumeAll} title="全部开始">
+                  <button className="btn btn-ghost btn-sm" onClick={resumeAll} title={t("hdr.resumeAll")}>
                     <IconPlay size={13} />
-                    <span className="desktop-label">全部开始</span>
+                    <span className="desktop-label">{t("hdr.resumeAll")}</span>
                   </button>
                 )}
                 {stats.completed.length > 0 && (
                   <button
                     className="btn btn-ghost btn-sm"
                     onClick={clearCompleted}
-                    title="清空已完成"
+                    title={t("hdr.clearDone")}
                   >
                     <IconTrash size={13} />
-                    <span className="desktop-label">清空完成</span>
+                    <span className="desktop-label">{t("hdr.clearDone")}</span>
                   </button>
                 )}
                 <button
                   className="btn btn-primary header-new-btn"
                   onClick={() => setShowNew(true)}
-                  title="新建下载 (Ctrl+N)"
+                  title={t("hdr.newTask") + " (Ctrl+N)"}
                 >
                   <IconPlus />
-                  <span>新建下载</span>
+                  <span>{t("hdr.newTask")}</span>
                 </button>
               </>
             )}
@@ -436,44 +449,38 @@ export default function App() {
 
         <div className="content">
           {/* 更新提示横幅 */}
-          {view === "downloads" &&
-            updateInfo?.has_update &&
-            !updateDismissed && (
-              <div className="update-banner">
-                <span className="update-badge">NEW</span>
-                <div className="update-text">
-                  发现新版本 <b>v{updateInfo.latest_version}</b>
-                  <span className="update-muted">
-                    （当前 v{updateInfo.current_version}）
-                  </span>
-                </div>
-                <button
-                  className="btn btn-primary update-btn"
-                  onClick={() =>
-                    api
-                      .openUrl(updateInfo.release_url)
-                      .catch(() => toast("打开链接失败", "error"))
-                  }
-                >
-                  去更新
-                </button>
-                <button
-                  className="icon-btn update-close"
-                  aria-label="关闭更新提示"
-                  onClick={() => setUpdateDismissed(true)}
-                >
-                  ✕
-                </button>
+          {view === "downloads" && updateInfo?.has_update && !updateDismissed && (
+            <div className="update-banner">
+              <span className="update-badge">NEW</span>
+              <div className="update-text">
+                {t("upd.found")} <b>v{updateInfo.latest_version}</b>
+                <span className="update-muted">
+                  （{t("upd.current")} v{updateInfo.current_version}）
+                </span>
               </div>
-            )}
+              <button
+                className="btn btn-primary update-btn"
+                onClick={() =>
+                  api.openUrl(updateInfo.release_url).catch(() => toast(t("upd.openFail"), "error"))
+                }
+              >
+                {t("upd.go")}
+              </button>
+              <button
+                className="icon-btn update-close"
+                aria-label={t("dlg.close")}
+                onClick={() => setUpdateDismissed(true)}
+              >
+                ✕
+              </button>
+            </div>
+          )}
           {view === "settings" ? (
-            <SettingsPage
-              settings={settings}
-              onChange={setSettings}
-              toast={toast}
-            />
+            <SettingsPage settings={settings} onChange={setSettings} toast={toast} />
+          ) : view === "grab" ? (
+            <GrabPage settings={settings} toast={toast} />
           ) : visible.length === 0 ? (
-            <EmptyState filter={filter} onNew={() => setShowNew(true)} />
+            <EmptyState filter={filter} onNew={() => setShowNew(true)} t={t} />
           ) : (
             <div className="task-list">
               {visible.map((t) => (
@@ -498,8 +505,8 @@ export default function App() {
         <button
           className="btn btn-primary mobile-fab"
           onClick={() => setShowNew(true)}
-          aria-label="新建下载"
-          title="新建下载"
+          aria-label={t("hdr.newTask")}
+          title={t("hdr.newTask")}
         >
           <IconPlus />
         </button>
@@ -525,16 +532,21 @@ export default function App() {
   );
 }
 
-function EmptyState({ filter, onNew }: { filter: FilterKey; onNew: () => void }) {
+function EmptyState({
+  filter,
+  onNew,
+  t,
+}: {
+  filter: FilterKey;
+  onNew: () => void;
+  t: (k: string) => string;
+}) {
   const content: Record<FilterKey, { title: string; desc: string }> = {
-    all: {
-      title: "还没有下载任务",
-      desc: "粘贴一个链接开始吧，Felldl 会用多线程分段加速帮你抢满带宽。",
-    },
-    downloading: { title: "暂无进行中的任务", desc: "当前没有任务在下载。" },
-    completed: { title: "还没有完成的任务", desc: "下载完成的文件会出现在这里。" },
-    paused: { title: "没有暂停的任务", desc: "被暂停或定时等待的任务会显示在这里。" },
-    error: { title: "没有失败的任务", desc: "一切顺利。" },
+    all: { title: t("empty.all.title"), desc: t("empty.all.desc") },
+    downloading: { title: t("empty.downloading.title"), desc: t("empty.downloading.desc") },
+    completed: { title: t("empty.completed.title"), desc: t("empty.completed.desc") },
+    paused: { title: t("empty.paused.title"), desc: t("empty.paused.desc") },
+    error: { title: t("empty.error.title"), desc: t("empty.error.desc") },
   };
   const c = content[filter];
   return (
@@ -548,7 +560,7 @@ function EmptyState({ filter, onNew }: { filter: FilterKey; onNew: () => void })
         <div className="empty-actions">
           <button className="btn btn-primary" onClick={onNew}>
             <IconPlus />
-            新建下载
+            {t("hdr.newTask")}
           </button>
         </div>
       )}

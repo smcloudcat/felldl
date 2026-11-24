@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Settings, UpdateInfo } from "./types";
 import { api } from "./bridge";
+import { useI18n, setLang } from "./i18n";
 import {
   IconCopy,
   IconFolder,
@@ -41,6 +42,7 @@ function Switch({
 }
 
 export function SettingsPage({ settings, onChange, toast }: Props) {
+  const { t, lang } = useI18n();
   const [draft, setDraft] = useState<Settings>(settings);
   const [saved, setSaved] = useState(false);
   const [apiInfo, setApiInfo] = useState<{ port: number; token: string; running: boolean } | null>(
@@ -50,7 +52,6 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   const [updateErr, setUpdateErr] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
 
-  // 进入设置页时静默检查一次，顺带把当前版本号填上
   useEffect(() => {
     let alive = true;
     api
@@ -61,7 +62,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
         setUpdateErr(null);
       })
       .catch((e) => {
-        if (alive) setUpdateErr(typeof e === "string" ? e : "检查更新失败");
+        if (alive) setUpdateErr(typeof e === "string" ? e : t("set.checkFail"));
       });
     return () => {
       alive = false;
@@ -86,10 +87,10 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       const next = await api.updateSettings(draft);
       onChange(next);
       setSaved(true);
-      toast("设置已保存");
+      toast(t("set.saved"));
       setTimeout(() => setSaved(false), 2000);
     } catch (e: any) {
-      toast(typeof e === "string" ? e : "保存失败", "error");
+      toast(typeof e === "string" ? e : t("set.saveFail"), "error");
     }
   }
 
@@ -104,9 +105,9 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
     if (!apiInfo) return;
     try {
       await navigator.clipboard.writeText(apiInfo.token);
-      toast("令牌已复制");
+      toast(t("set.copied"));
     } catch {
-      toast("复制失败", "error");
+      toast(t("set.copyFail"), "error");
     }
   }
 
@@ -116,14 +117,14 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
     try {
       const info = await api.checkUpdate();
       setUpdateInfo(info);
-      if (info.has_update) {
-        toast(`发现新版本 v${info.latest_version}`);
+      if (info?.has_update) {
+        toast(t("set.newFound", { v: info.latest_version }));
       } else {
-        toast(`已是最新版本 v${info.current_version}`);
+        toast(t("set.latest", { v: info?.current_version ?? "…" }));
       }
     } catch (e: any) {
-      setUpdateErr(typeof e === "string" ? e : "检查更新失败");
-      toast(typeof e === "string" ? e : "检查更新失败", "error");
+      setUpdateErr(typeof e === "string" ? e : t("set.checkFail"));
+      toast(typeof e === "string" ? e : t("set.checkFail"), "error");
     } finally {
       setChecking(false);
     }
@@ -137,16 +138,16 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       <div className="card">
         <div className="card-head">
           <div className="card-icon">
-            <IconDownloadLayers />
+            <IconLayers size={15} />
           </div>
-          <div className="card-title">下载</div>
+          <div className="card-title">{t("set.download")}</div>
         </div>
-        <div className="card-sub">默认保存位置与并发策略</div>
+        <div className="card-sub">{t("set.downloadSub")}</div>
 
         <div className="field">
           <label className="field-label">
             <IconFolder size={14} />
-            默认下载目录
+            {t("set.downloadDir")}
           </label>
           <div className="input-row">
             <input
@@ -156,7 +157,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
               spellCheck={false}
             />
             <button className="btn btn-soft" onClick={pickDir} type="button">
-              浏览
+              {t("dlg.browse")}
             </button>
           </div>
         </div>
@@ -165,7 +166,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
           <div className="field">
             <label className="field-label">
               <IconLayers size={14} />
-              默认连接数
+              {t("set.defaultConns")}
             </label>
             <select
               className="select"
@@ -174,7 +175,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
             >
               {[1, 2, 4, 8, 16, 32, 64].map((n) => (
                 <option key={n} value={n}>
-                  {n} 线程
+                  {t("set.threadsN", { n })}
                 </option>
               ))}
             </select>
@@ -182,7 +183,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
           <div className="field">
             <label className="field-label">
               <IconGauge size={14} />
-              同时下载任务数
+              {t("set.maxTasks")}
             </label>
             <select
               className="select"
@@ -191,7 +192,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
             >
               {[1, 2, 3, 4, 5, 6, 8].map((n) => (
                 <option key={n} value={n}>
-                  {n} 个
+                  {t("set.maxTasksN", { n })}
                 </option>
               ))}
             </select>
@@ -200,15 +201,15 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
 
         <div className="switch-row" style={{ marginTop: 6 }}>
           <div className="switch-info">
-            <div className="switch-title">添加后自动开始</div>
-            <div className="switch-desc">关闭后新任务会进入排队状态，需手动开始</div>
+            <div className="switch-title">{t("set.autoStart")}</div>
+            <div className="switch-desc">{t("set.autoStartDesc")}</div>
           </div>
           <Switch on={draft.auto_start} onChange={(v) => patch({ auto_start: v })} />
         </div>
         <div className="switch-row">
           <div className="switch-info">
-            <div className="switch-title">完成后通知</div>
-            <div className="switch-desc">下载结束后发送系统通知</div>
+            <div className="switch-title">{t("set.notify")}</div>
+            <div className="switch-desc">{t("set.notifyDesc")}</div>
           </div>
           <Switch
             on={draft.notify_on_complete}
@@ -223,12 +224,12 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
           <div className="card-icon">
             <IconGauge />
           </div>
-          <div className="card-title">全局限速</div>
+          <div className="card-title">{t("set.globalLimit")}</div>
         </div>
         <div className="card-sub">
-          限制所有任务的总带宽，0 表示不限速。当前：
+          {t("set.globalLimitSub")}{" "}
           <strong style={{ color: "var(--brand-1)" }}>
-            {draft.global_speed_limit === 0 ? "不限速" : `${limitMB} MB/s`}
+            {draft.global_speed_limit === 0 ? t("set.unlimited") : `${limitMB} MB/s`}
           </strong>
         </div>
         <input
@@ -251,7 +252,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
             marginTop: 2,
           }}
         >
-          <span>不限</span>
+          <span>{t("set.noLimit")}</span>
           <span>25 MB/s</span>
           <span>50 MB/s</span>
         </div>
@@ -263,14 +264,14 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
           <div className="card-icon">
             <IconGlobe />
           </div>
-          <div className="card-title">代理服务器</div>
+          <div className="card-title">{t("set.proxy")}</div>
         </div>
-        <div className="card-sub">通过 HTTP / SOCKS5 代理下载</div>
+        <div className="card-sub">{t("set.proxySub")}</div>
 
         <div className="switch-row" style={{ paddingTop: 0 }}>
           <div className="switch-info">
-            <div className="switch-title">启用代理</div>
-            <div className="switch-desc">所有下载请求都将经过代理</div>
+            <div className="switch-title">{t("set.proxyEnable")}</div>
+            <div className="switch-desc">{t("set.proxyEnableDesc")}</div>
           </div>
           <Switch
             on={draft.proxy.enabled}
@@ -299,7 +300,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
               <input
                 className="input"
                 type="number"
-                placeholder="端口"
+                placeholder="Port"
                 value={draft.proxy.port || ""}
                 onChange={(e) =>
                   patch({ proxy: { ...draft.proxy, port: Number(e.target.value) || 0 } })
@@ -309,7 +310,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
               <input
                 className="input"
-                placeholder="用户名（可选）"
+                placeholder={t("set.proxyUser")}
                 value={draft.proxy.username}
                 onChange={(e) => patch({ proxy: { ...draft.proxy, username: e.target.value } })}
                 spellCheck={false}
@@ -317,7 +318,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
               <input
                 className="input"
                 type="password"
-                placeholder="密码（可选）"
+                placeholder={t("set.proxyPass")}
                 value={draft.proxy.password}
                 onChange={(e) => patch({ proxy: { ...draft.proxy, password: e.target.value } })}
               />
@@ -332,16 +333,14 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
           <div className="card-icon">
             <IconShield />
           </div>
-          <div className="card-title">浏览器集成</div>
+          <div className="card-title">{t("set.browser")}</div>
         </div>
-        <div className="card-sub">
-          开启本地 API，浏览器扩展即可把下载任务转交给 Felldl
-        </div>
+        <div className="card-sub">{t("set.browserSub")}</div>
 
         <div className="switch-row" style={{ paddingTop: 0 }}>
           <div className="switch-info">
-            <div className="switch-title">启用本地接口</div>
-            <div className="switch-desc">仅监听 127.0.0.1，需令牌鉴权</div>
+            <div className="switch-title">{t("set.apiEnable")}</div>
+            <div className="switch-desc">{t("set.apiEnableDesc")}</div>
           </div>
           <Switch on={draft.api_enabled} onChange={(v) => patch({ api_enabled: v })} />
         </div>
@@ -362,7 +361,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ color: "var(--text-mute)", minWidth: 52 }}>地址</span>
+              <span style={{ color: "var(--text-mute)", minWidth: 52 }}>{t("set.addr")}</span>
               <span style={{ color: "var(--brand-1)", fontWeight: 650 }}>
                 http://127.0.0.1:{apiInfo.port}
               </span>
@@ -376,12 +375,12 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
                   }}
                 />
                 <span style={{ fontSize: 11, color: "var(--text-mute)" }}>
-                  {apiInfo.running ? "运行中" : "已停止"}
+                  {apiInfo.running ? t("set.running") : t("set.stopped")}
                 </span>
               </span>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ color: "var(--text-mute)", minWidth: 52 }}>令牌</span>
+              <span style={{ color: "var(--text-mute)", minWidth: 52 }}>{t("set.token")}</span>
               <span
                 style={{
                   flex: 1,
@@ -393,7 +392,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
               >
                 {apiInfo.token}
               </span>
-              <button className="icon-btn" onClick={copyToken} title="复制令牌">
+              <button className="icon-btn" onClick={copyToken} title={t("set.copyToken")}>
                 <IconCopy size={14} />
               </button>
             </div>
@@ -407,15 +406,15 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
           <div className="card-icon">
             <IconSliders />
           </div>
-          <div className="card-title">外观</div>
+          <div className="card-title">{t("set.appearance")}</div>
         </div>
-        <div className="card-sub">主题会立即生效</div>
+        <div className="card-sub">{t("set.appearanceSub")}</div>
         <div className="seg-control">
           {(
             [
-              { v: "light", label: "浅色", Icon: IconSun },
-              { v: "dark", label: "深色", Icon: IconMoon },
-              { v: "system", label: "跟随系统", Icon: IconMonitor },
+              { v: "light", label: t("set.themeLight"), Icon: IconSun },
+              { v: "dark", label: t("set.themeDark"), Icon: IconMoon },
+              { v: "system", label: t("set.themeSystem"), Icon: IconMonitor },
             ] as const
           ).map(({ v, label, Icon }) => (
             <button
@@ -432,38 +431,63 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
         </div>
       </div>
 
+      {/* 语言 */}
+      <div className="card">
+        <div className="card-head">
+          <div className="card-icon">
+            <IconGlobe />
+          </div>
+          <div className="card-title">{t("set.language")}</div>
+        </div>
+        <div className="seg-control" style={{ marginTop: 12 }}>
+          {(
+            [
+              { v: "zh", label: "简体中文" },
+              { v: "en", label: "English" },
+            ] as const
+          ).map(({ v, label }) => (
+            <button
+              key={v}
+              type="button"
+              className={cx("seg-btn", lang === v && "active")}
+              onClick={() => setLang(v)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* 关于与更新 */}
       <div className="card">
         <div className="card-head">
           <div className="card-icon">
             <IconGlobe size={15} />
           </div>
-          <div className="card-title">关于与更新</div>
+          <div className="card-title">{t("set.about")}</div>
         </div>
-        <div className="card-sub">
-          Felldl v{updateInfo?.current_version ?? "…"} · 通过 GitHub Releases 检查新版本
-        </div>
+        <div className="card-sub">{t("set.aboutSub", { v: updateInfo?.current_version ?? "…" })}</div>
 
         <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
           <button className="btn btn-soft" onClick={checkUpdate} disabled={checking} type="button">
-            {checking ? "检查中…" : "检查更新"}
+            {checking ? t("set.checking") : t("set.checkUpdate")}
           </button>
           {updateInfo && (
             <span style={{ fontSize: 12, color: "var(--text-mute)" }}>
               {updateInfo.has_update
-                ? `发现新版本 v${updateInfo.latest_version}`
-                : `已是最新（远端 v${updateInfo.latest_version || "-"}）`}
+                ? t("set.newFound", { v: updateInfo.latest_version })
+                : t("set.latestRemote", { v: updateInfo.latest_version || "-" })}
             </span>
           )}
           {updateInfo?.has_update && (
             <button
               className="btn btn-primary"
               onClick={() =>
-                api.openUrl(updateInfo.release_url).catch(() => toast("打开链接失败", "error"))
+                api.openUrl(updateInfo.release_url).catch(() => toast(t("upd.openFail"), "error"))
               }
               type="button"
             >
-              前往发布页下载
+              {t("set.goDownload")}
             </button>
           )}
           {updateErr && (
@@ -514,23 +538,19 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
         >
           <div className="spacer" style={{ flex: 1 }} />
           <button className="btn btn-ghost" onClick={() => setDraft(settings)}>
-            放弃
+            {t("set.discard")}
           </button>
           <button className="btn btn-primary" onClick={save}>
             {saved ? (
               <>
-                <IconCheck size={14} /> 已保存
+                <IconCheck size={14} /> {t("set.savedBtn")}
               </>
             ) : (
-              "保存设置"
+              t("set.save")
             )}
           </button>
         </div>
       )}
     </div>
   );
-}
-
-function IconDownloadLayers() {
-  return <IconLayers size={15} />;
 }

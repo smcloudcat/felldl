@@ -123,6 +123,8 @@ mod tests {
         let mut t = Task {
             id: "abc".into(),
             url: "https://e.com/f.bin".into(),
+            kind: crate::model::TaskKind::Http,
+            mirrors: vec!["https://mirror.com/f.bin".into()],
             file_name: "f.bin".into(),
             save_dir: "C:/dl".into(),
             save_path: "C:/dl/f.bin".into(),
@@ -144,6 +146,9 @@ mod tests {
             created_at: 1,
             completed_at: None,
             speed: 12345,
+            peers: 0,
+            upload_speed: 0,
+            bt_info_hash: None,
         };
         store.save_task(&t).unwrap();
         let loaded = store.load_tasks();

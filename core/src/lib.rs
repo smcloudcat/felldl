@@ -7,7 +7,10 @@
 //! - 引擎与 UI 解耦：通过 broadcast 事件与快照结构对外，Tauri / CLI / HTTP API 共用。
 
 pub mod api;
+pub mod bt;
+pub mod crypto;
 pub mod engine;
+pub mod grab;
 pub mod model;
 pub mod store;
 pub mod util;

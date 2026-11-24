@@ -16,9 +16,13 @@ export interface Segment {
   done: number;
 }
 
+export type TaskKind = "http" | "bt" | "hls";
+
 export interface Task {
   id: string;
   url: string;
+  kind: TaskKind;
+  mirrors: string[];
   file_name: string;
   save_dir: string;
   save_path: string;
@@ -40,6 +44,9 @@ export interface Task {
   created_at: number;
   completed_at: number | null;
   speed: number;
+  peers: number;
+  upload_speed: number;
+  bt_info_hash: string | null;
 }
 
 export interface ProxyConfig {
@@ -77,6 +84,21 @@ export interface AddTaskRequest {
   referer?: string | null;
   cookie?: string | null;
   headers?: Record<string, string>;
+  mirrors?: string[];
+}
+
+// ── 网页抓取 / 嗅探 ──
+export interface GrabResource {
+  url: string;
+  kind: string;
+  name: string;
+}
+
+export interface PageAnalysis {
+  url: string;
+  title: string;
+  resources: GrabResource[];
+  links: string[];
 }
 
 export type FilterKey =

@@ -6,10 +6,10 @@ import {
   formatPercent,
   formatSpeed,
   fileKind,
-  fileExt,
-  STATE_LABEL,
+  STATE_KEY,
   cx,
 } from "./format";
+import { useI18n } from "./i18n";
 import {
   IconArchive,
   IconCheck,
@@ -48,12 +48,15 @@ const KIND_ICON = {
 } as const;
 
 function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: Props) {
+  const { t, lang } = useI18n();
   const [confirmDel, setConfirmDel] = useState(false);
-  const kind = fileKind(task.file_name);
+  const kind = task.kind === "bt" ? "other" : fileKind(task.file_name);
   const Icon = KIND_ICON[kind];
   const pct = task.size ? Math.min(1, task.downloaded / task.size) : 0;
   const isActive = task.state === "downloading" || task.state === "probing";
   const isDone = task.state === "completed";
+  const isBt = task.kind === "bt";
+  const isHls = task.kind === "hls";
 
   const stateClass =
     task.state === "completed"
@@ -76,11 +79,16 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
         <div className="task-main">
           <div className="task-head">
             <div className="task-name" title={task.file_name}>
+              {(isBt || isHls) && (
+                <span className={cx("kind-badge", task.kind)}>
+                  {isBt ? "BT" : "HLS"}
+                </span>
+              )}
               {task.file_name}
             </div>
             <span className={cx("task-state-badge", stateClass)}>
               <span className="dot" />
-              {STATE_LABEL[task.state] ?? task.state}
+              {t(STATE_KEY[task.state] ?? task.state)}
             </span>
           </div>
 
@@ -93,42 +101,78 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
               <>
                 <span className="sep" />
                 <span className="speed">{formatSpeed(task.speed)}</span>
+              </>
+            )}
+            {isBt && task.upload_speed > 0 && (
+              <>
                 <span className="sep" />
-                <span>剩余 {formatEta(task.downloaded, task.size, task.speed)}</span>
+                <span className="speed">
+                  {t("state.upload")} {formatSpeed(task.upload_speed)}
+                </span>
+              </>
+            )}
+            {isBt && task.peers > 0 && (
+              <>
+                <span className="sep" />
+                <span>
+                  {task.peers} {t("state.peers")}
+                </span>
+              </>
+            )}
+            {isActive && !isBt && !isHls && task.speed > 0 && (
+              <>
+                <span className="sep" />
+                <span>
+                  {t("state.eta")} {formatEta(task.downloaded, task.size, task.speed, lang)}
+                </span>
               </>
             )}
             {task.state === "paused" && (
               <>
                 <span className="sep" />
-                <span>{task.connections} 线程 · 可续传</span>
+                <span>
+                  {task.connections > 0
+                    ? `${task.connections} ${t("state.threads")} · `
+                    : ""}
+                  {t("state.resumable")}
+                </span>
+              </>
+            )}
+            {task.mirrors.length > 0 && (
+              <>
+                <span className="sep" />
+                <span title={task.mirrors.join("\n")}>
+                  +{task.mirrors.length} {t("state.mirrors")}
+                </span>
               </>
             )}
             {task.state === "scheduled" && task.scheduled_at && (
               <>
                 <span className="sep" />
                 <span>
-                  {new Date(task.scheduled_at).toLocaleString("zh-CN", {
+                  {new Date(task.scheduled_at).toLocaleString(lang === "zh" ? "zh-CN" : "en-US", {
                     month: "2-digit",
                     day: "2-digit",
                     hour: "2-digit",
                     minute: "2-digit",
                   })}{" "}
-                  开始
+                  {t("task.startAt")}
                 </span>
               </>
             )}
-            {isDone && (
+            {isDone && !isBt && !isHls && task.connections > 0 && (
               <>
                 <span className="sep" />
-                <span>{task.connections} 线程</span>
+                <span>
+                  {task.connections} {t("state.threads")}
+                </span>
               </>
             )}
           </div>
 
           {task.error && <div className="task-error-msg">⚠ {task.error}</div>}
 
-          {/* 进度区：一条进度条搞定。下载中时用分片刻度线画出「多线程并行」的细节，
-              既保留信息又不制造第二根进度条 */}
+          {/* 进度区：一条进度条搞定。下载中时用分片刻度线画出「多线程并行」的细节 */}
           {!isDone && task.state !== "error" && (
             <div className="progress-wrap">
               <div className="progress-track">
@@ -136,7 +180,6 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
                   className={cx("progress-fill", !isActive && "paused")}
                   style={{ width: `${Math.max(pct * 100, pct > 0 ? 1.5 : 0)}%` }}
                 />
-                {/* 分片分隔刻度：贴在进度条上，随分片完成度点亮 */}
                 {isActive && task.segments.length > 1 && (
                   <div className="segment-ticks">
                     {task.segments.map((seg) => {
@@ -147,7 +190,7 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
                           key={seg.index}
                           className={cx("tick", sp >= 1 && "full")}
                           style={{ flex: len || 1 }}
-                          title={`分片 ${seg.index + 1}: ${(sp * 100).toFixed(0)}%`}
+                          title={`${t("state.segment")} ${seg.index + 1}: ${(sp * 100).toFixed(0)}%`}
                         />
                       );
                     })}
@@ -165,8 +208,8 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
             <button
               className="icon-btn"
               onClick={() => onPause(task.id)}
-              title="暂停"
-              aria-label="暂停"
+              title={t("task.pause")}
+              aria-label={t("task.pause")}
             >
               <IconPause />
             </button>
@@ -175,8 +218,8 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
             <button
               className="icon-btn"
               onClick={() => onResume(task.id)}
-              title="开始下载"
-              aria-label="开始下载"
+              title={t("task.start")}
+              aria-label={t("task.start")}
             >
               <IconPlay />
             </button>
@@ -186,16 +229,16 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
               <button
                 className="icon-btn"
                 onClick={() => onOpen(task)}
-                title="打开文件"
-                aria-label="打开文件"
+                title={t("task.open")}
+                aria-label={t("task.open")}
               >
                 <IconDownload />
               </button>
               <button
                 className="icon-btn"
                 onClick={() => onReveal(task)}
-                title="打开所在文件夹"
-                aria-label="打开所在文件夹"
+                title={t("task.folder")}
+                aria-label={t("task.folder")}
               >
                 <IconFolder />
               </button>
@@ -212,8 +255,8 @@ function TaskCardInner({ task, onPause, onResume, onRemove, onOpen, onReveal }: 
                 setTimeout(() => setConfirmDel(false), 2600);
               }
             }}
-            title={confirmDel ? "再次点击确认删除" : "删除任务"}
-            aria-label="删除任务"
+            title={confirmDel ? t("task.delConfirm") : t("task.del")}
+            aria-label={t("task.del")}
           >
             {confirmDel ? <IconX /> : <IconTrash />}
           </button>

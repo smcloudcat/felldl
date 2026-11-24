@@ -93,6 +93,7 @@ async fn add_task(
         referer: body.referer,
         cookie: body.cookie,
         headers: body.headers.unwrap_or_default(),
+        mirrors: Vec::new(),
     };
     match st.engine.add(req).await {
         Ok(id) => Json(json!({"ok": true, "id": id})).into_response(),

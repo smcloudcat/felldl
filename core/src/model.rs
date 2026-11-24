@@ -213,11 +213,48 @@ fn default_download_dir_impl() -> String {
     }
 }
 
+/// 任务类型
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskKind {
+    /// 普通 HTTP(S) 多线程下载
+    #[default]
+    Http,
+    /// BitTorrent（磁力 / 种子文件）
+    Bt,
+    /// HLS 直播/点播（m3u8 分片合并）
+    Hls,
+}
+
+impl TaskKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskKind::Http => "http",
+            TaskKind::Bt => "bt",
+            TaskKind::Hls => "hls",
+        }
+    }
+    /// 从字符串（浏览器传来的小写）解析，默认 Http
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "bt" => TaskKind::Bt,
+            "hls" => TaskKind::Hls,
+            _ => TaskKind::Http,
+        }
+    }
+}
+
 /// 下载任务
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: TaskId,
     pub url: String,
+    /// 任务类型：http 多线程 / bt
+    #[serde(default)]
+    pub kind: TaskKind,
+    /// 镜像地址列表（多源并行下载；与 url 同一文件的不同镜像站）
+    #[serde(default)]
+    pub mirrors: Vec<String>,
     /// 最终落盘文件名
     pub file_name: String,
     pub save_dir: String,
@@ -263,6 +300,15 @@ pub struct Task {
     /// 实时速度（字节/秒），仅内存态
     #[serde(default)]
     pub speed: u64,
+    /// BT：做种数（实时）
+    #[serde(default)]
+    pub peers: u32,
+    /// BT：上传速度（字节/秒）
+    #[serde(default)]
+    pub upload_speed: u64,
+    /// BT：info_hash（hex），用于关联 librqbit 会话中的种子
+    #[serde(default)]
+    pub bt_info_hash: Option<String>,
 }
 
 impl Task {
@@ -279,7 +325,7 @@ impl Task {
 }
 
 /// 新任务参数
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AddTaskRequest {
     pub url: String,
     #[serde(default)]
@@ -299,6 +345,9 @@ pub struct AddTaskRequest {
     /// 浏览器集成透传的自定义请求头
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
+    /// 镜像地址（多源并行下载）
+    #[serde(default)]
+    pub mirrors: Vec<String>,
 }
 
 /// 引擎事件（推送给 UI / 订阅者）

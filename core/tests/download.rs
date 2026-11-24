@@ -195,7 +195,8 @@ async fn segmented_download_is_byte_exact() {
             referer: None,
             cookie: None,
             headers: Default::default(),
-        })
+            mirrors: Vec::new(),
+})
         .await
         .unwrap();
 
@@ -239,7 +240,8 @@ async fn pause_then_resume_continues_correctly() {
             referer: None,
             cookie: None,
             headers: Default::default(),
-        })
+            mirrors: Vec::new(),
+})
         .await
         .unwrap();
 
@@ -296,7 +298,8 @@ async fn no_range_server_falls_back_single_stream() {
             referer: None,
             cookie: None,
             headers: Default::default(),
-        })
+            mirrors: Vec::new(),
+})
         .await
         .unwrap();
 
@@ -336,7 +339,8 @@ async fn speed_limit_actually_slows() {
             referer: None,
             cookie: None,
             headers: Default::default(),
-        })
+            mirrors: Vec::new(),
+})
         .await
         .unwrap();
 
@@ -369,7 +373,8 @@ async fn error_paths_are_reported() {
                 referer: None,
                 cookie: None,
                 headers: Default::default(),
-            })
+            mirrors: Vec::new(),
+})
             .await
             .unwrap();
         let t = engine.get(&id).unwrap();
@@ -403,7 +408,8 @@ async fn scheduled_task_waits_then_runs() {
             referer: None,
             cookie: None,
             headers: Default::default(),
-        })
+            mirrors: Vec::new(),
+})
         .await
         .unwrap();
 
@@ -446,7 +452,8 @@ async fn concurrent_limit_queues_extra_tasks() {
                 referer: None,
                 cookie: None,
                 headers: Default::default(),
-            })
+            mirrors: Vec::new(),
+})
             .await
             .unwrap();
         ids.push(id);
@@ -495,7 +502,8 @@ async fn resume_after_process_restart() {
                 referer: None,
                 cookie: None,
                 headers: Default::default(),
-            })
+            mirrors: Vec::new(),
+})
             .await
             .unwrap();
         id_stored = id.clone();
@@ -622,7 +630,8 @@ async fn retry_after_connection_drop_does_not_duplicate() {
             referer: None,
             cookie: None,
             headers: Default::default(),
-        })
+            mirrors: Vec::new(),
+})
         .await
         .unwrap();
 
@@ -669,7 +678,8 @@ async fn scheduled_task_starts_on_time() {
             referer: None,
             cookie: None,
             headers: Default::default(),
-        })
+            mirrors: Vec::new(),
+})
         .await
         .unwrap();
 

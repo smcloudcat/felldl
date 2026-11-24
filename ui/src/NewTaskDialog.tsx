@@ -3,6 +3,7 @@ import type { AddTaskRequest, Settings } from "./types";
 import { api } from "./bridge";
 import { IconClock, IconFolder, IconLayers, IconLink, IconX, IconZap } from "./icons";
 import { cx } from "./format";
+import { useI18n } from "./i18n";
 
 interface Props {
   settings: Settings;
@@ -24,6 +25,7 @@ const SPEED_OPTIONS = [
 ];
 
 export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props) {
+  const { t } = useI18n();
   const [text, setText] = useState((initialUrls ?? []).join("\n"));
   const [dir, setDir] = useState(settings.download_dir);
   const [conns, setConns] = useState(settings.default_connections);
@@ -37,6 +39,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
   });
   const [referer, setReferer] = useState("");
+  const [mirrorsText, setMirrorsText] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -51,19 +54,32 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, busy]);
 
+  const limitLabel = (v: number) => (v === 0 ? t("dlg.unlimited") : `${v} KB/s`);
+
   const urls = useMemo(
     () =>
       text
         .split(/[\n\s]+/)
         .map((s) => s.trim())
-        .filter((s) => s.length > 0 && (s.startsWith("http://") || s.startsWith("https://"))),
+        .filter((s) => s.length > 0 && (s.startsWith("http://") || s.startsWith("https://") || s.startsWith("magnet:"))),
     [text]
   );
+
+  const hasMagnet = urls.some((u) => u.startsWith("magnet:"));
 
   const invalidCount = useMemo(() => {
     const all = text.split(/[\n\s]+/).map((s) => s.trim()).filter(Boolean);
     return all.length - urls.length;
   }, [text, urls.length]);
+
+  const mirrorUrls = useMemo(
+    () =>
+      mirrorsText
+        .split(/[\n\s]+/)
+        .map((s) => s.trim())
+        .filter((s) => s.startsWith("http://") || s.startsWith("https://")),
+    [mirrorsText]
+  );
 
   async function pickDir() {
     try {
@@ -76,7 +92,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
 
   async function submit() {
     if (urls.length === 0) {
-      setErr("请至少输入一个有效的 http/https 链接");
+      setErr(t("dlg.errEmpty"));
       return;
     }
     setBusy(true);
@@ -85,7 +101,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
       const scheduledAt =
         schedule === "later" && scheduleAt ? new Date(scheduleAt).getTime() : null;
       if (schedule === "later" && (!scheduledAt || scheduledAt <= Date.now())) {
-        setErr("定时时间必须晚于当前时间");
+        setErr(t("dlg.errSchedule"));
         setBusy(false);
         return;
       }
@@ -97,6 +113,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
         speed_limit: limit > 0 ? limit * 1024 : null,
         scheduled_at: scheduledAt,
         referer: referer.trim() || null,
+        mirrors: mirrorUrls,
       }));
 
       if (reqs.length === 1) {
@@ -107,28 +124,27 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
       onDone(
         urls.length === 1
           ? schedule === "later"
-            ? "已加入定时队列"
-            : "已开始下载"
-          : `已添加 ${urls.length} 个任务`
+            ? t("dlg.queuedScheduled")
+            : t("dlg.started")
+          : t("dlg.addedN", { n: urls.length })
       );
       onClose();
     } catch (e: any) {
-      setErr(typeof e === "string" ? e : e?.message ?? "添加失败");
+      setErr(typeof e === "string" ? e : e?.message ?? t("dlg.addFail"));
       setBusy(false);
     }
   }
+
 
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
       <div className="dialog wide" role="dialog" aria-modal="true">
         <div className="dialog-head">
           <div style={{ flex: 1 }}>
-            <div className="dialog-title">新建下载</div>
-            <div className="dialog-desc">
-              支持多线程分段加速，可一次粘贴多个链接
-            </div>
+            <div className="dialog-title">{t("dlg.title")}</div>
+            <div className="dialog-desc">{t("dlg.desc")}</div>
           </div>
-          <button className="icon-btn" onClick={onClose} disabled={busy} aria-label="关闭">
+          <button className="icon-btn" onClick={onClose} disabled={busy} aria-label={t("dlg.close")}>
             <IconX />
           </button>
         </div>
@@ -137,17 +153,17 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
           <div className="field">
             <label className="field-label">
               <IconLink size={14} />
-              下载链接
+              {t("dlg.url")}
               {urls.length > 1 && (
                 <span style={{ color: "var(--brand-1)", fontWeight: 700 }}>
-                  · 已识别 {urls.length} 个
+                  · {t("dlg.recognized", { n: urls.length })}
                 </span>
               )}
             </label>
             <textarea
               ref={textRef}
               className="textarea"
-              placeholder={"https://example.com/file.zip\n每行一个链接，支持批量添加"}
+              placeholder={t("dlg.urlPlaceholder")}
               value={text}
               onChange={(e) => {
                 setText(e.target.value);
@@ -158,9 +174,14 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
               }}
               spellCheck={false}
             />
+            {hasMagnet && (
+              <div className="field-hint" style={{ color: "var(--brand-1)" }}>
+                🧲 {t("dlg.btHint")}
+              </div>
+            )}
             {invalidCount > 0 && (
               <div className="field-hint" style={{ color: "var(--accent-warn)" }}>
-                已忽略 {invalidCount} 个非 http(s) 内容
+                {t("dlg.ignored", { n: invalidCount })}
               </div>
             )}
           </div>
@@ -168,7 +189,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
           <div className="field">
             <label className="field-label">
               <IconFolder size={14} />
-              保存位置
+              {t("dlg.saveDir")}
             </label>
             <div className="input-row">
               <input
@@ -178,7 +199,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
                 spellCheck={false}
               />
               <button className="btn btn-soft" onClick={pickDir} type="button">
-                浏览
+                {t("dlg.browse")}
               </button>
             </div>
           </div>
@@ -187,7 +208,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
             <div className="field">
               <label className="field-label">
                 <IconLayers size={14} />
-                连接数
+                {t("dlg.conns")}
               </label>
               <div className="seg-control numeric">
                 {CONN_OPTIONS.map((n) => (
@@ -206,7 +227,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
             <div className="field">
               <label className="field-label">
                 <IconZap size={14} />
-                限速
+                {t("dlg.limit")}
               </label>
               <select
                 className="select"
@@ -215,7 +236,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
               >
                 {SPEED_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
-                    {o.label}
+                    {limitLabel(o.value)}
                   </option>
                 ))}
               </select>
@@ -225,7 +246,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
           <div className="field">
             <label className="field-label">
               <IconClock size={14} />
-              开始时间
+              {t("dlg.time")}
             </label>
             <div className="seg-control" style={{ alignSelf: "flex-start" }}>
               <button
@@ -233,14 +254,14 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
                 className={cx("seg-btn", schedule === "now" && "active")}
                 onClick={() => setSchedule("now")}
               >
-                立即开始
+                {t("dlg.now")}
               </button>
               <button
                 type="button"
                 className={cx("seg-btn", schedule === "later" && "active")}
                 onClick={() => setSchedule("later")}
               >
-                定时下载
+                {t("dlg.later")}
               </button>
             </div>
             {schedule === "later" && (
@@ -260,24 +281,36 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
               className="btn btn-soft btn-sm"
               onClick={() => setShowAdvanced((v) => !v)}
             >
-              {showAdvanced ? "收起高级选项" : "高级选项"}
+              {showAdvanced ? t("dlg.advancedHide") : t("dlg.advanced")}
             </button>
           </div>
 
           {showAdvanced && (
-            <div className="field">
-              <label className="field-label">Referer（防盗链站点需要）</label>
-              <input
-                className="input"
-                placeholder="https://example.com/"
-                value={referer}
-                onChange={(e) => setReferer(e.target.value)}
-                spellCheck={false}
-              />
-              <div className="field-hint">
-                部分网站会校验来源页。留空则由服务器自行判断。
+            <>
+              <div className="field">
+                <label className="field-label">{t("dlg.referer")}</label>
+                <input
+                  className="input"
+                  placeholder="https://example.com/"
+                  value={referer}
+                  onChange={(e) => setReferer(e.target.value)}
+                  spellCheck={false}
+                />
+                <div className="field-hint">{t("dlg.refererHint")}</div>
               </div>
-            </div>
+              <div className="field">
+                <label className="field-label">🪞 {t("dlg.mirrors")}</label>
+                <textarea
+                  className="textarea"
+                  style={{ minHeight: 56 }}
+                  placeholder={"https://mirror1.example.com/file.zip\nhttps://mirror2.example.org/file.zip"}
+                  value={mirrorsText}
+                  onChange={(e) => setMirrorsText(e.target.value)}
+                  spellCheck={false}
+                />
+                <div className="field-hint">{t("dlg.mirrorsHint")}</div>
+              </div>
+            </>
           )}
 
           {err && (
@@ -298,14 +331,19 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
 
         <div className="dialog-foot">
           <span style={{ fontSize: 11.6, color: "var(--text-mute)" }}>
-            {conns} 线程 · {limit > 0 ? `限速 ${limit} KB/s` : "不限速"}
+            {t("dlg.threadsSummary", { n: conns })} ·{" "}
+            {limit > 0 ? t("dlg.limitSummary", { n: limit }) : t("dlg.unlimited")}
           </span>
           <div className="spacer" />
           <button className="btn btn-ghost" onClick={onClose} disabled={busy}>
-            取消
+            {t("dlg.cancel")}
           </button>
-          <button className="btn btn-primary" onClick={submit} disabled={busy || urls.length === 0}>
-            {busy ? "处理中…" : schedule === "later" ? "加入定时" : "开始下载"}
+          <button
+            className="btn btn-primary"
+            onClick={submit}
+            disabled={busy || urls.length === 0}
+          >
+            {busy ? t("dlg.processing") : schedule === "later" ? t("dlg.submitScheduled") : t("dlg.submit")}
           </button>
         </div>
       </div>

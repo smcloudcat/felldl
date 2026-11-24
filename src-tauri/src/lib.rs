@@ -411,6 +411,79 @@ fn reveal_path(path: &str) -> Result<(), String> {
     }
 }
 
+// ───────────────────────── 网页抓取 / 嗅探 / HLS ─────────────────────────
+
+#[tauri::command]
+async fn analyze_url(
+    state: State<'_, AppState>,
+    url: String,
+    referer: Option<String>,
+) -> Result<felldl_core::grab::PageAnalysis, String> {
+    let s = state.engine.settings();
+    let mut b = reqwest::Client::builder()
+        .user_agent(&s.user_agent)
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::limited(10));
+    if let Some(pu) = s.proxy.to_url() {
+        let p = reqwest::Proxy::all(&pu).map_err(|e| e.to_string())?;
+        b = b.proxy(p);
+    }
+    let client = b.build().map_err(|e| e.to_string())?;
+    felldl_core::grab::analyze_page(
+        &client,
+        &felldl_core::grab::AnalyzeRequest {
+            url,
+            referer: referer.filter(|r| !r.trim().is_empty()),
+            cookie: None,
+        },
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn grab_site(
+    state: State<'_, AppState>,
+    url: String,
+    save_dir: String,
+    max_depth: u32,
+    max_pages: u32,
+    include_assets: bool,
+) -> Result<String, String> {
+    state
+        .engine
+        .grab_site(felldl_core::grab::GrabSiteRequest {
+            url,
+            save_dir,
+            max_depth: max_depth.clamp(1, 5),
+            max_pages: max_pages.clamp(1, 500),
+            include_assets,
+            referer: None,
+        })
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn cancel_grab(state: State<'_, AppState>, job_id: String) -> Result<bool, String> {
+    Ok(state.engine.cancel_grab(&job_id))
+}
+
+#[tauri::command]
+async fn download_hls(
+    state: State<'_, AppState>,
+    url: String,
+    save_dir: Option<String>,
+    file_name: Option<String>,
+) -> Result<String, String> {
+    state
+        .engine
+        .download_hls(&url, save_dir, file_name)
+        .await
+        .map(|id| id)
+        .map_err(|e| format!("{e:#}"))
+}
+
 // ───────────────────────── 启动 ─────────────────────────
 
 /// 应用入口。
@@ -519,6 +592,10 @@ pub fn run() {
             pick_folder,
             check_update,
             open_url,
+            analyze_url,
+            grab_site,
+            cancel_grab,
+            download_hls,
         ])
         .run(tauri::generate_context!())
         .expect("Felldl 启动失败");

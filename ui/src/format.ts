@@ -25,12 +25,23 @@ export function formatPercent(p: number): string {
   return `${(p * 100).toFixed(1)}%`;
 }
 
-/** 剩余时间估算 */
-export function formatEta(downloaded: number, size: number | null, speed: number): string {
+/** 剩余时间估算（双语） */
+export function formatEta(
+  downloaded: number,
+  size: number | null,
+  speed: number,
+  lang: "zh" | "en" = "zh"
+): string {
   if (!size || !speed || speed <= 0) return "—";
   const remain = size - downloaded;
   if (remain <= 0) return "—";
   const sec = remain / speed;
+  if (lang === "en") {
+    if (sec < 1) return "finishing";
+    if (sec < 60) return `${Math.ceil(sec)}s`;
+    if (sec < 3600) return `${Math.floor(sec / 60)}m ${Math.ceil(sec % 60)}s`;
+    return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+  }
   if (sec < 1) return "即将完成";
   if (sec < 60) return `${Math.ceil(sec)} 秒`;
   if (sec < 3600) return `${Math.floor(sec / 60)} 分 ${Math.ceil(sec % 60)} 秒`;
@@ -84,15 +95,15 @@ export function cx(...args: (string | false | null | undefined)[]): string {
   return args.filter(Boolean).join(" ");
 }
 
-/** 状态中文名 */
-export const STATE_LABEL: Record<string, string> = {
-  queued: "排队中",
-  probing: "连接中",
-  downloading: "下载中",
-  paused: "已暂停",
-  completed: "已完成",
-  error: "出错",
-  scheduled: "定时等待",
+/** 状态 → i18n 词条键 */
+export const STATE_KEY: Record<string, string> = {
+  queued: "state.queued",
+  probing: "state.probing",
+  downloading: "state.downloading",
+  paused: "state.paused",
+  completed: "state.completed",
+  error: "state.error",
+  scheduled: "state.scheduled",
 };
 
 /** 是否处于活跃下载状态 */

@@ -31,27 +31,31 @@ use tokio_util::sync::CancellationToken;
 const FALLBACK_UA: &str = "felldl/0.1 (+https://github.com/felldl)";
 
 pub struct Engine {
-    store: Store,
+    pub(crate) store: Store,
     settings: RwLock<Settings>,
-    tasks: Mutex<HashMap<TaskId, Arc<Runtime>>>,
+    pub(crate) tasks: Mutex<HashMap<TaskId, Arc<Runtime>>>,
     events: broadcast::Sender<EngineEvent>,
     /// 全局限速器
     global_limiter: Arc<RateLimiter>,
     pub http_token: RwLock<String>,
+    /// 整站抓取任务（可取消）
+    pub(crate) grab_jobs: Mutex<HashMap<String, Arc<crate::grab::GrabJob>>>,
+    /// BitTorrent 会话（首次添加磁力任务时惰性初始化）
+    pub(crate) bt_session: tokio::sync::OnceCell<Arc<crate::bt::BtManager>>,
 }
 
-struct Runtime {
-    task: Mutex<Task>,
+pub(crate) struct Runtime {
+    pub(crate) task: Mutex<Task>,
     /// 实时已下载字节（比 task.downloaded 更新更频繁）
-    downloaded: AtomicU64,
+    pub(crate) downloaded: AtomicU64,
     /// 每次启动下载都换新 token，因此暂停 → 恢复 → 再暂停都能正确中断
-    cancel: Mutex<CancellationToken>,
+    pub(crate) cancel: Mutex<CancellationToken>,
     /// 本次会话内是否正在运行
-    running: Mutex<bool>,
+    pub(crate) running: Mutex<bool>,
 }
 
 impl Runtime {
-    fn new(task: Task) -> Arc<Self> {
+    pub(crate) fn new(task: Task) -> Arc<Self> {
         Arc::new(Self {
             downloaded: AtomicU64::new(task.downloaded),
             cancel: Mutex::new(CancellationToken::new()),
@@ -125,6 +129,8 @@ impl Engine {
             events: tx,
             global_limiter: limiter,
             http_token: RwLock::new(token),
+            grab_jobs: Mutex::new(HashMap::new()),
+            bt_session: tokio::sync::OnceCell::new(),
         });
 
         // 载入历史任务（进行中的已回落为 Paused）
@@ -145,7 +151,7 @@ impl Engine {
         self.events.subscribe()
     }
 
-    fn emit(&self, ev: EngineEvent) {
+    pub(crate) fn emit(&self, ev: EngineEvent) {
         let _ = self.events.send(ev);
     }
 
@@ -225,12 +231,12 @@ impl Engine {
         })
     }
 
-    fn client(&self, task: Option<&Task>) -> Result<Client> {
+    pub(crate) fn client(&self, task: Option<&Task>) -> Result<Client> {
         let ua = self.settings.read().user_agent.clone();
         self.client_with_ua(task, &ua)
     }
 
-    fn client_with_ua(&self, task: Option<&Task>, ua: &str) -> Result<Client> {
+    pub(crate) fn client_with_ua(&self, task: Option<&Task>, ua: &str) -> Result<Client> {
         let s = self.settings.read().clone();
         let mut b = Client::builder()
             .user_agent(ua)
@@ -260,6 +266,10 @@ impl Engine {
     /// 添加任务并返回任务 ID。会先做一次探测以获取大小与是否支持分段。
     pub async fn add(self: &Arc<Self>, req: AddTaskRequest) -> Result<TaskId> {
         let url = req.url.trim().to_string();
+        // 磁力 / .torrent 交给 BT 管理器处理
+        if url.starts_with("magnet:") {
+            return self.bt_add(&url, &req).await;
+        }
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             bail!("仅支持 http/https 链接");
         }
@@ -278,6 +288,26 @@ impl Engine {
         };
 
         let mut t = self.build_task(&req, probe, &s);
+        // 校验镜像：逐个探测，仅保留与主地址大小一致的镜像
+        for m in &req.mirrors {
+            let m = m.trim();
+            if m.is_empty() || m == &t.url {
+                continue;
+            }
+            match self.probe(m, req.referer.as_deref(), req.cookie.as_deref()).await {
+                Ok(p) => {
+                    let same_size = match (p.size, t.size) {
+                        (Some(a), Some(b)) => a == b,
+                        // 任一方大小未知则保守接受，靠 If-Range 兜底
+                        _ => true,
+                    };
+                    if same_size {
+                        t.mirrors.push(p.final_url);
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
         let scheduled = req.scheduled_at.filter(|&ms| ms > now_ms());
         if scheduled.is_some() {
             t.state = TaskState::Scheduled;
@@ -319,6 +349,8 @@ impl Engine {
         Task {
             id: uuid::Uuid::new_v4().to_string(),
             url: probe.final_url.clone().if_empty_then(req.url.clone()),
+            kind: TaskKind::Http,
+            mirrors: Vec::new(),
             file_name: final_name,
             save_dir,
             save_path: path.to_string_lossy().to_string(),
@@ -340,6 +372,9 @@ impl Engine {
             created_at: now_ms(),
             completed_at: None,
             speed: 0,
+            peers: 0,
+            upload_speed: 0,
+            bt_info_hash: None,
         }
     }
 
@@ -477,6 +512,11 @@ impl Engine {
         let Some(rt) = self.tasks.lock().get(id).cloned() else {
             bail!("任务不存在");
         };
+        // BT 任务走 rqbit 会话暂停
+        if rt.task.lock().kind == TaskKind::Bt {
+            self.bt_pause(&rt).await;
+            return Ok(());
+        }
         rt.cancel.lock().cancel();
         // 等下载线程真正退出，避免 pause 与 resume 交叉写状态
         let waited = std::time::Instant::now();
@@ -508,6 +548,11 @@ impl Engine {
             }
         }
         if *rt.running.lock() {
+            return Ok(());
+        }
+        // BT 任务走 rqbit 会话恢复
+        if rt.task.lock().kind == TaskKind::Bt {
+            self.bt_resume(&rt).await;
             return Ok(());
         }
         // 并发闸门
@@ -558,7 +603,12 @@ impl Engine {
         let Some(rt) = self.tasks.lock().get(id).cloned() else {
             bail!("任务不存在");
         };
-        rt.cancel.lock().cancel();
+        // BT 任务先从 rqbit 会话移除
+        if rt.task.lock().kind == TaskKind::Bt {
+            self.bt_remove(&rt, delete_file).await;
+        } else {
+            rt.cancel.lock().cancel();
+        }
         let path = {
             let t = rt.task.lock();
             t.save_path.clone()
@@ -592,7 +642,7 @@ impl Engine {
         }
     }
 
-    fn fail_task(&self, id: &str, msg: String) {
+    pub(crate) fn fail_task(&self, id: &str, msg: String) {
         if let Some(rt) = self.tasks.lock().get(id).cloned() {
             *rt.running.lock() = false;
             let mut t = rt.task.lock();
@@ -708,7 +758,13 @@ impl Engine {
 
         for seg in pending {
             let client = client.clone();
-            let url = url.clone();
+            let urls = Arc::new({
+                let mut v = vec![url.clone()];
+                let mirrors = { rt.task.lock().mirrors.clone() };
+                v.extend(mirrors);
+                v
+            });
+            let mirror_start = seg.index % urls.len();
             let file = file.clone();
             let limiter = task_limiter.clone();
             let global = self.global_limiter.clone();
@@ -724,7 +780,8 @@ impl Engine {
                 download_segment(
                     SegmentJob {
                         client,
-                        url,
+                        urls,
+                        mirror_start,
                         index: seg.index,
                         cursor: seg.cursor(),
                         end: seg.end,
@@ -916,7 +973,7 @@ impl Engine {
         Ok(())
     }
 
-    fn finish_task(&self, rt: &Arc<Runtime>) -> Result<()> {
+    pub(crate) fn finish_task(&self, rt: &Arc<Runtime>) -> Result<()> {
         *rt.running.lock() = false;
         let mut t = rt.task.lock();
         let total = t.size.unwrap_or(rt.downloaded.load(Ordering::Relaxed));
@@ -952,6 +1009,9 @@ impl Engine {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
             loop {
                 tick.tick().await;
+                // BT 任务状态轮询（会话未初始化时无操作）
+                me.bt_update_all();
+
                 let now = std::time::Instant::now();
                 let mut to_persist: Vec<Task> = Vec::new();
                 let snapshots: Vec<(TaskId, u64)> = {
@@ -1102,7 +1162,10 @@ pub fn plan_segments(total: Option<u64>, supports_range: bool, conns: usize) -> 
 
 struct SegmentJob {
     client: Client,
-    url: String,
+    /// 主地址 + 镜像池（轮转分配实现多源并行）
+    urls: Arc<Vec<String>>,
+    /// 本分片起始使用的镜像下标（= 分片序号对镜像数取模）
+    mirror_start: usize,
     index: usize,
     cursor: u64,
     end: u64,
@@ -1125,7 +1188,10 @@ async fn download_segment(job: SegmentJob, cancel: CancellationToken) -> Result<
         if cancel.is_cancelled() || cursor > job.end {
             return Ok(());
         }
-        match fetch_segment(&job, &mut cursor, &cancel).await {
+        // 每次重试轮换镜像：不同分片起点不同 → 多镜像同时参与下载；
+        // 某镜像挂了自动切到下一个。
+        let mirror_idx = (job.mirror_start + attempt as usize) % job.urls.len().max(1);
+        match fetch_segment(&job, &mut cursor, mirror_idx, &cancel).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 attempt += 1;
@@ -1149,11 +1215,13 @@ async fn download_segment(job: SegmentJob, cancel: CancellationToken) -> Result<
 async fn fetch_segment(
     job: &SegmentJob,
     cursor: &mut u64,
+    mirror_idx: usize,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let mut req = job
-        .client
-        .get(&job.url)
+    let client = job.client.clone();
+    let url = &job.urls[mirror_idx % job.urls.len()];
+    let mut req = client
+        .get(url)
         .header(RANGE, format!("bytes={}-{}", *cursor, job.end))
         .header(USER_AGENT, job.ua.clone().unwrap_or_else(|| user_agent_hdr().to_string()));
     if let Some(etag) = &job.etag {

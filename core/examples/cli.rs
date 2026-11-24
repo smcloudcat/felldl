@@ -69,7 +69,8 @@ async fn main() -> anyhow::Result<()> {
             referer: None,
             cookie: None,
             headers: Default::default(),
-        })
+            mirrors: Vec::new(),
+})
         .await?;
 
     let mut last_print = std::time::Instant::now();

@@ -19,6 +19,8 @@ function makeTask(url: string, name: string, size: number): Task {
   return {
     id: `mock-${++counter}`,
     url,
+    kind: "http",
+    mirrors: [],
     file_name: name,
     save_dir: "/Users/you/Downloads",
     save_path: `/Users/you/Downloads/${name}`,
@@ -45,6 +47,9 @@ function makeTask(url: string, name: string, size: number): Task {
     created_at: now(),
     completed_at: null,
     speed: 0,
+    peers: 0,
+    upload_speed: 0,
+    bt_info_hash: null,
   };
 }
 

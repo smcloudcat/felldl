@@ -40,7 +40,8 @@ async fn main() -> anyhow::Result<()> {
             referer: None,
             cookie: None,
             headers: Default::default(),
-        })
+            mirrors: Vec::new(),
+})
         .await?;
 
     // 等到下载量够大再中断

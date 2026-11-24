@@ -5,7 +5,7 @@
  *   1. 开发时在没有 Tauri 环境（纯浏览器）下也能跑，用假数据预览界面
  *   2. 换实现时只改这一处
  */
-import type { AddTaskRequest, Settings, Task, UpdateInfo } from "./types";
+import type { AddTaskRequest, Settings, Task, UpdateInfo, PageAnalysis } from "./types";
 
 type UnlistenFn = () => void;
 
@@ -67,6 +67,24 @@ export const api = {
   openUrl: (url: string) => invoke("open_url", { url }) as Promise<void>,
   setTaskSpeedLimit: (id: string, limit: number) =>
     invoke("set_task_speed_limit", { id, limit }) as Promise<void>,
+
+  // 网页抓取 / 嗅探 / HLS
+  analyzeUrl: (url: string, referer?: string) =>
+    invoke("analyze_url", { url, referer: referer || null }) as Promise<PageAnalysis>,
+  grabSite: (opts: {
+    url: string;
+    save_dir: string;
+    max_depth: number;
+    max_pages: number;
+    include_assets: boolean;
+  }) => invoke("grab_site", opts) as Promise<string>,
+  cancelGrab: (jobId: string) => invoke("cancel_grab", { jobId }) as Promise<boolean>,
+  downloadHls: (url: string, saveDir?: string, fileName?: string) =>
+    invoke("download_hls", {
+      url,
+      save_dir: saveDir || null,
+      file_name: fileName || null,
+    }) as Promise<string>,
 };
 
 /** 订阅引擎事件 */
