@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { AddTaskRequest, Settings } from "./types";
 import { api } from "./bridge";
 import { IconClock, IconFolder, IconLayers, IconLink, IconX, IconZap } from "./icons";
@@ -24,7 +24,7 @@ const SPEED_OPTIONS = [
   { label: "10 MB/s", value: 10240 },
 ];
 
-export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props) {
+function NewTaskDialogInner({ settings, initialUrls, onClose, onDone }: Props) {
   const { t } = useI18n();
   const [text, setText] = useState((initialUrls ?? []).join("\n"));
   const [dir, setDir] = useState(settings.download_dir);
@@ -46,17 +46,25 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
   const [interval, setInterval] = useState(0);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [err, setErr] = useState<string | null>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  // 稳定回调引用：进度更新重渲染时不重挂 keydown / 不重新抢焦点
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
 
+  // 自动聚焦只在弹窗首次打开时执行一次
   useEffect(() => {
     textRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onClose();
+      if (e.key === "Escape" && !busy) onCloseRef.current();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, busy]);
+  }, [busy]);
 
   const limitLabel = (v: number) => (v === 0 ? t("dlg.unlimited") : `${v} KB/s`);
 
@@ -95,10 +103,12 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
   }
 
   async function submit() {
+    if (busyRef.current) return; // 防止 Ctrl+Enter / 双击重复提交（同步锁）
     if (urls.length === 0) {
       setErr(t("dlg.errEmpty"));
       return;
     }
+    busyRef.current = true;
     setBusy(true);
     setErr(null);
     try {
@@ -106,6 +116,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
         schedule === "later" && scheduleAt ? new Date(scheduleAt).getTime() : null;
       if (schedule === "later" && (!scheduledAt || scheduledAt <= Date.now())) {
         setErr(t("dlg.errSchedule"));
+        busyRef.current = false;
         setBusy(false);
         return;
       }
@@ -139,6 +150,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
       onClose();
     } catch (e: any) {
       setErr(typeof e === "string" ? e : e?.message ?? t("dlg.addFail"));
+      busyRef.current = false;
       setBusy(false);
     }
   }
@@ -408,3 +420,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
     </div>
   );
 }
+
+// memo 隔离：下载进度更新 App 重渲染时，弹窗（props 引用稳定）不随之刷新，
+// 避免用户填写 Cookie/密码时被打断
+export const NewTaskDialog = memo(NewTaskDialogInner);

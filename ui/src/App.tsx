@@ -44,6 +44,8 @@ export default function App() {
   const [filter, setFilter] = useState<FilterKey>("all");
   const [category, setCategory] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
+  // 稳定回调：进度更新重渲染不会让 NewTaskDialog 重挂 / 重新抢焦点
+  const closeNew = useCallback(() => setShowNew(false), []);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [initError, setInitError] = useState<string | null>(null);
@@ -113,20 +115,51 @@ export default function App() {
   // ── 订阅引擎事件 ──
   useEffect(() => {
     let un: (() => void) | undefined;
+    let disposed = false;
+    // 进度事件批量合并：250ms 内的更新只触发一次 setState，
+    // 避免高频进度把整个列表反复重渲染；终态/删除立即提交
+    let pending = new Map<string, Task>();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const flush = () => {
+      timer = undefined;
+      if (pending.size === 0) return;
+      const batch = pending;
+      pending = new Map();
+      setTasks((prev) => {
+        let next = prev;
+        for (const t of batch.values()) {
+          const i = next.findIndex((x) => x.id === t.id);
+          if (i === -1) next = [t, ...next];
+          else {
+            const arr = next.slice();
+            arr[i] = t;
+            next = arr;
+          }
+        }
+        return next;
+      });
+    };
+    const scheduleFlush = (immediate: boolean) => {
+      if (immediate) {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+        flush();
+      } else if (timer === undefined) {
+        timer = setTimeout(flush, 250);
+      }
+    };
     subscribe((e) => {
       switch (e?.type) {
         case "taskUpdated": {
           const t = e.payload as Task;
-          setTasks((prev) => {
-            const i = prev.findIndex((x) => x.id === t.id);
-            if (i === -1) return [t, ...prev];
-            const next = prev.slice();
-            next[i] = t;
-            return next;
-          });
+          // 合并同一任务的连续进度；非下载态（完成/暂停/错误/排队）立即提交
+          pending.set(t.id, t);
+          scheduleFlush(t.state !== "downloading" && t.state !== "probing");
           break;
         }
         case "taskRemoved":
+          pending.delete(e.payload as string);
           setTasks((prev) => prev.filter((x) => x.id !== e.payload));
           break;
         case "settingsUpdated":
@@ -136,8 +169,18 @@ export default function App() {
           toast(String(e.payload));
           break;
       }
-    }).then((f) => (un = f));
-    return () => un?.();
+    })
+      .then((f) => {
+        // 订阅完成前组件已卸载（开发 StrictMode 双挂载常见）：立刻退订
+        if (disposed) f();
+        else un = f;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      if (timer !== undefined) clearTimeout(timer);
+      un?.();
+    };
   }, [toast]);
 
   // ── 主题 / 皮肤 / 按钮风格 ──
@@ -561,7 +604,7 @@ export default function App() {
       {showNew && (
         <NewTaskDialog
           settings={settings}
-          onClose={() => setShowNew(false)}
+          onClose={closeNew}
           onDone={toast}
         />
       )}

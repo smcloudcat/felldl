@@ -786,15 +786,22 @@ impl Engine {
     }
 
     /// 清空已完成
-    pub fn clear_completed(&self) {
-        let ids: Vec<String> = {
+    pub async fn clear_completed(&self) {
+        let entries: Vec<(String, bool)> = {
             let map = self.tasks.lock();
             map.iter()
                 .filter(|(_, r)| r.task.lock().state == TaskState::Completed)
-                .map(|(k, _)| k.clone())
+                .map(|(k, r)| (k.clone(), r.task.lock().kind == TaskKind::Bt))
                 .collect()
         };
-        for id in ids {
+        for (id, is_bt) in entries {
+            // BT 任务先从 rqbit 会话移除，否则种子会留在后台继续做种、
+            // 且 UI 已不可见（资源泄漏）
+            if is_bt {
+                if let Some(rt) = self.tasks.lock().get(&id).cloned() {
+                    self.bt_remove(&rt, false).await;
+                }
+            }
             self.tasks.lock().remove(&id);
             self.store.delete_task(&id);
             self.emit(EngineEvent::TaskRemoved(id));
@@ -875,7 +882,11 @@ impl Engine {
 
         // 大小未知、0 字节、或明确不支持分段 → 单流下载
         if total.unwrap_or(0) == 0 || !supports_range {
-            self.run_stream_single(&rt, &cancel).await?;
+            // 返回 false 表示用户取消（已保存断点），不能当作下载完成
+            let completed = self.run_stream_single(&rt, &cancel).await?;
+            if !completed {
+                return Ok(());
+            }
             {
                 let mut t = rt.task.lock();
                 if t.size.is_none() {
@@ -945,9 +956,13 @@ impl Engine {
             let global = self.global_limiter.clone();
             let tx = tx.clone();
             let etag = etag.clone();
-            let (referer, cookie) = {
+            let (referer, cookie, basic) = {
                 let t = rt.task.lock();
-                (t.referer.clone(), t.cookie.clone())
+                let basic = match (t.username.as_deref(), t.password.as_deref()) {
+                    (Some(u), Some(p)) if !u.is_empty() => Some((u.to_string(), p.to_string())),
+                    _ => None,
+                };
+                (t.referer.clone(), t.cookie.clone(), basic)
             };
             let cancel2 = cancel.clone();
             let seg_ua = task_ua.clone();
@@ -967,6 +982,7 @@ impl Engine {
                         etag,
                         referer,
                         cookie,
+                        basic,
                         ua: seg_ua,
                     },
                     cancel2,
@@ -1059,21 +1075,23 @@ impl Engine {
     }
 
     /// 无 Range 支持 / 大小未知时的单流下载
+    /// 返回 true = 正常完成；false = 用户取消（断点已保存）
     async fn run_stream_single(
         self: &Arc<Self>,
         rt: &Arc<Runtime>,
         cancel: &CancellationToken,
-    ) -> Result<()> {
-        let (url, save_path, referer, cookie) = {
+    ) -> Result<bool> {
+        let (url, save_path, referer, cookie, task_snapshot) = {
             let t = rt.task.lock();
             (
                 t.url.clone(),
                 t.save_path.clone(),
                 t.referer.clone(),
                 t.cookie.clone(),
+                t.clone(),
             )
         };
-        let client = self.client(None)?;
+        let client = self.client(Some(&task_snapshot))?;
         let start = rt.downloaded.load(Ordering::Relaxed);
         let mut req = client.get(&url);
         if start > 0 {
@@ -1084,6 +1102,12 @@ impl Engine {
         }
         if let Some(c) = cookie {
             req = apply_auth_cookie(req, c.as_str());
+        }
+        if let (Some(u), Some(p)) = (
+            task_snapshot.username.as_deref().filter(|s| !s.is_empty()),
+            task_snapshot.password.as_deref(),
+        ) {
+            req = req.basic_auth(u, Some(p));
         }
         let resp = req.send().await.context("请求失败")?;
         if !resp.status().is_success() {
@@ -1120,7 +1144,7 @@ impl Engine {
                     drop(t);
                     let _ = self.store.save_task(&snap);
                     self.emit(EngineEvent::TaskUpdated(snap));
-                    return Ok(());
+                    return Ok(false);
                 }
                 chunk = stream.next() => {
                     match chunk {
@@ -1145,7 +1169,7 @@ impl Engine {
             }
             t.downloaded = offset;
         }
-        Ok(())
+        Ok(true)
     }
 
     pub(crate) fn finish_task(&self, rt: &Arc<Runtime>) -> Result<()> {
@@ -1172,13 +1196,12 @@ impl Engine {
         if reschedule {
             t.state = TaskState::Scheduled;
             t.scheduled_at = Some(now_ms() + t.interval_secs as i64 * 1000);
-            // 清零进度并删除旧文件，下次到点重新完整下载
+            // 清零进度等待下一轮；**保留已下载文件**，到点后按 ETag/大小
+            // 重新校验，内容未变化则无需重下（避免同步期间文件消失）
             t.downloaded = 0;
             t.segments.clear();
-            t.completed_at = None;
+            t.completed_at = Some(now_ms());
             rt.downloaded.store(0, Ordering::Relaxed);
-            let path = t.save_path.clone();
-            let _ = std::fs::remove_file(&path);
         }
 
         let snap = t.clone();
@@ -1391,6 +1414,7 @@ struct SegmentJob {
     etag: Option<String>,
     referer: Option<String>,
     cookie: Option<String>,
+    basic: Option<(String, String)>,
     ua: Option<String>,
 }
 
@@ -1447,6 +1471,9 @@ async fn fetch_segment(
     }
     if let Some(c) = &job.cookie {
         req = apply_auth_cookie(req, c);
+    }
+    if let Some((u, p)) = &job.basic {
+        req = req.basic_auth(u, Some(p));
     }
     let resp = req.send().await?;
     let status = resp.status();

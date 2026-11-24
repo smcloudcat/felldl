@@ -98,7 +98,7 @@ async fn remove_task(state: State<'_, AppState>, id: String, delete_file: bool) 
 
 #[tauri::command]
 async fn clear_completed(state: State<'_, AppState>) -> Result<(), String> {
-    state.engine.clear_completed();
+    state.engine.clear_completed().await;
     Ok(())
 }
 

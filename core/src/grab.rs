@@ -833,11 +833,27 @@ impl Engine {
         let cancel = rt.cancel.lock().clone();
         tokio::spawn(async move {
             let res = me.clone().hls_run(&rt, &media, &client, &cancel).await;
-            if let Err(e) = res {
-                let msg = format!("{e:#}");
-                if !cancel.is_cancelled() {
+            match res {
+                // 取消退出：清理 running 与任务状态（与 pause() 竞争时幂等），
+                // 避免取消后永久占用并发槽
+                Err(_) if cancel.is_cancelled() => {
+                    *rt.running.lock() = false;
+                    let mut t = rt.task.lock();
+                    if t.state.is_active() {
+                        t.state = TaskState::Paused;
+                        t.speed = 0;
+                        t.downloaded = rt.downloaded.load(Ordering::Relaxed);
+                    }
+                    let snap = t.clone();
+                    drop(t);
+                    let _ = me.store.save_task(&snap);
+                    me.emit(EngineEvent::TaskUpdated(snap));
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
                     me.fail_task(&task_id, msg);
                 }
+                Ok(()) => {}
             }
         });
         Ok(id)

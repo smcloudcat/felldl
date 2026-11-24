@@ -329,17 +329,43 @@ pub(crate) async fn download(
         let handle = tokio::task::spawn_blocking(move || {
             ftp_connect_and_run(target, secure, start, &file, &engine2, &rt2, &flag2, limit)
         });
-        tokio::pin!(handle);
+        // 桥接：blocking worker 无论何时退出，都兜底清理 running 与任务状态，
+        // 避免暂停路径因 worker 卡在阻塞 IO 里而永久占用并发槽。
+        let bridge_cancel = cancel.clone();
+        let rt3 = rt.clone();
+        let engine3 = engine.clone();
+        let flag3 = flag.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<Result<Outcome>>();
+        tokio::spawn(async move {
+            let res = match handle.await {
+                Ok(inner) => inner,
+                Err(e) => Err(anyhow!("FTP 任务异常: {e}")),
+            };
+            // worker 已真正退出：清理运行标记；若是取消触发的退出，落 Paused
+            *rt3.running.lock() = false;
+            if flag3.load(Ordering::Relaxed) || bridge_cancel.is_cancelled() {
+                let mut t = rt3.task.lock();
+                if t.state.is_active() {
+                    t.state = TaskState::Paused;
+                    t.speed = 0;
+                    t.downloaded = rt3.downloaded.load(Ordering::Relaxed);
+                }
+                let snap = t.clone();
+                drop(t);
+                let _ = engine3.store.save_task(&snap);
+                engine3.emit(EngineEvent::TaskUpdated(snap));
+            }
+            let _ = tx.send(res);
+        });
         tokio::select! {
-            res = &mut handle => match res {
-                Ok(inner) => inner.map_err(|e| anyhow!("FTP 任务异常: {e:#}"))?,
-                Err(e) => return Err(anyhow!("FTP 任务异常: {e}")),
-            },
+            res = rx => {
+                let inner = res.map_err(|e| anyhow!("FTP 任务异常: {e}"))?;
+                inner.map_err(|e| anyhow!("FTP 任务异常: {e:#}"))?
+            }
             _ = cancel.cancelled() => {
                 flag.store(true, Ordering::Relaxed);
-                // 等 worker 真正退出（最多 5 秒），确保文件句柄与连接释放
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), &mut handle).await;
-                return Ok(()); // pause()/cancel() 负责落 Paused 状态
+                // bridge 任务会在 worker 退出后清理 running / 落 Paused
+                return Ok(());
             }
         }
     };

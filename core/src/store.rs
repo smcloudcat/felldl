@@ -4,16 +4,27 @@ use crate::model::{Settings, Task, TaskState};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct Store {
     pub root: PathBuf,
+    /// 串行化所有写入：多个 worker（FTP/SFTP/BT/后台 tick）并发保存同一任务时，
+    /// 避免交错写 tmp/重命名导致记录丢失。
+    write_lock: Mutex<()>,
+    /// 唯一 tmp 文件后缀，避免并发写同一 tmp 互相覆盖
+    tmp_seq: AtomicU64,
 }
 
 impl Store {
     pub fn new(root: impl Into<PathBuf>) -> io::Result<Self> {
         let root = root.into();
         fs::create_dir_all(root.join("tasks"))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            write_lock: Mutex::new(()),
+            tmp_seq: AtomicU64::new(0),
+        })
     }
 
     fn tasks_dir(&self) -> PathBuf {
@@ -31,11 +42,25 @@ impl Store {
     pub fn save_task(&self, task: &Task) -> io::Result<()> {
         let data = serde_json::to_vec_pretty(task)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        write_atomic(&self.task_path(&task.id), &data)
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        write_atomic(&self.task_path(&task.id), &data, &self.tmp_seq)
     }
 
     pub fn delete_task(&self, id: &str) {
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let _ = fs::remove_file(self.task_path(id));
+        // 顺带清掉可能残留的 tmp，避免垃圾文件
+        let seq_dir = self.tasks_dir();
+        if let Ok(rd) = fs::read_dir(&seq_dir) {
+            let prefix = format!("{id}.json");
+            for entry in rd.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(&prefix) && name.ends_with(".tmp") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
     }
 
     pub fn load_tasks(&self) -> Vec<Task> {
@@ -74,7 +99,8 @@ impl Store {
     pub fn save_settings(&self, s: &Settings) -> io::Result<()> {
         let data = serde_json::to_vec_pretty(s)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        write_atomic(&self.settings_path(), &data)
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        write_atomic(&self.settings_path(), &data, &self.tmp_seq)
     }
 
     pub fn load_settings(&self) -> Settings {
@@ -88,21 +114,45 @@ impl Store {
     }
 }
 
-fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
+fn write_atomic(path: &Path, data: &[u8], seq: &AtomicU64) -> io::Result<()> {
+    // 唯一 tmp 名：并发写者不会互相覆盖
+    let unique = seq.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()))
+        .with_extension(format!("{unique}.tmp"));
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(&tmp, data)?;
-    // Windows 上 rename 到已存在文件会失败，先删目标
+    // Windows 上用 MoveFileExW 原子替换已存在目标；Unix rename 本身就是原子替换
     #[cfg(windows)]
     {
-        if path.exists() {
-            let _ = fs::remove_file(path);
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn MoveFileExW(lp_existing: *const u16, lp_new: *const u16, dw_flags: u32) -> i32;
+        }
+        const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+        let to_wide =
+            |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(std::iter::once(0)).collect() };
+        let src = to_wide(&tmp);
+        let dst = to_wide(path);
+        if unsafe { MoveFileExW(src.as_ptr(), dst.as_ptr(), MOVEFILE_REPLACE_EXISTING) } == 0 {
+            let err = io::Error::last_os_error();
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        match fs::rename(&tmp, path) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                Err(e)
+            }
         }
     }
-    fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 #[cfg(test)]
