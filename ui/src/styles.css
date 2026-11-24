@@ -1372,3 +1372,51 @@ textarea {
   color: var(--text-mute);
   opacity: 0.85;
 }
+
+/* ── 更新提示横幅 ── */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.update-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 6px;
+  padding: 2px 7px;
+}
+.update-text {
+  font-size: 13px;
+  flex: 1;
+  min-width: 0;
+}
+.update-muted {
+  font-size: 12px;
+  color: var(--text-mute);
+  margin-left: 4px;
+}
+.update-btn {
+  padding: 6px 14px;
+  font-size: 12px;
+}
+.update-close {
+  background: none;
+  border: none;
+  color: var(--text-mute);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+.update-close:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Settings } from "./types";
+import type { Settings, UpdateInfo } from "./types";
 import { api } from "./bridge";
 import {
   IconCopy,
@@ -46,6 +46,27 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   const [apiInfo, setApiInfo] = useState<{ port: number; token: string; running: boolean } | null>(
     null
   );
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateErr, setUpdateErr] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  // 进入设置页时静默检查一次，顺带把当前版本号填上
+  useEffect(() => {
+    let alive = true;
+    api
+      .checkUpdate()
+      .then((info) => {
+        if (!alive) return;
+        setUpdateInfo(info);
+        setUpdateErr(null);
+      })
+      .catch((e) => {
+        if (alive) setUpdateErr(typeof e === "string" ? e : "检查更新失败");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => setDraft(settings), [settings]);
 
@@ -86,6 +107,25 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       toast("令牌已复制");
     } catch {
       toast("复制失败", "error");
+    }
+  }
+
+  async function checkUpdate() {
+    setChecking(true);
+    setUpdateErr(null);
+    try {
+      const info = await api.checkUpdate();
+      setUpdateInfo(info);
+      if (info.has_update) {
+        toast(`发现新版本 v${info.latest_version}`);
+      } else {
+        toast(`已是最新版本 v${info.current_version}`);
+      }
+    } catch (e: any) {
+      setUpdateErr(typeof e === "string" ? e : "检查更新失败");
+      toast(typeof e === "string" ? e : "检查更新失败", "error");
+    } finally {
+      setChecking(false);
     }
   }
 
@@ -390,6 +430,74 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
             </button>
           ))}
         </div>
+      </div>
+
+      {/* 关于与更新 */}
+      <div className="card">
+        <div className="card-head">
+          <div className="card-icon">
+            <IconGlobe size={15} />
+          </div>
+          <div className="card-title">关于与更新</div>
+        </div>
+        <div className="card-sub">
+          Felldl v{updateInfo?.current_version ?? "…"} · 通过 GitHub Releases 检查新版本
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="btn btn-soft" onClick={checkUpdate} disabled={checking} type="button">
+            {checking ? "检查中…" : "检查更新"}
+          </button>
+          {updateInfo && (
+            <span style={{ fontSize: 12, color: "var(--text-mute)" }}>
+              {updateInfo.has_update
+                ? `发现新版本 v${updateInfo.latest_version}`
+                : `已是最新（远端 v${updateInfo.latest_version || "-"}）`}
+            </span>
+          )}
+          {updateInfo?.has_update && (
+            <button
+              className="btn btn-primary"
+              onClick={() =>
+                api.openUrl(updateInfo.release_url).catch(() => toast("打开链接失败", "error"))
+              }
+              type="button"
+            >
+              前往发布页下载
+            </button>
+          )}
+          {updateErr && (
+            <div
+              style={{
+                marginTop: 10,
+                fontSize: 12,
+                lineHeight: 1.6,
+                color: "var(--accent-danger, #e5484d)",
+                wordBreak: "break-word",
+              }}
+            >
+              ⚠ {updateErr}
+            </div>
+          )}
+        </div>
+        {updateInfo?.has_update && updateInfo.notes && (
+          <div
+            style={{
+              marginTop: 12,
+              fontSize: 12,
+              lineHeight: 1.6,
+              whiteSpace: "pre-wrap",
+              color: "var(--text-mute)",
+              background: "var(--bg-soft, rgba(127,127,127,0.08))",
+              borderRadius: 10,
+              padding: "10px 12px",
+              maxHeight: 160,
+              overflowY: "auto",
+            }}
+          >
+            {updateInfo.notes.slice(0, 1200)}
+          </div>
+        )}
       </div>
 
       {/* 保存栏 */}

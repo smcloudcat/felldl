@@ -89,3 +89,20 @@ export type FilterKey =
 export function isActive(s: TaskState): boolean {
   return s === "downloading" || s === "probing";
 }
+
+// ── 检查更新 ──
+export interface UpdateAsset {
+  name: string;
+  download_url: string;
+  size: number;
+}
+
+export interface UpdateInfo {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  release_url: string;
+  notes: string;
+  published_at: string;
+  assets: UpdateAsset[];
+}

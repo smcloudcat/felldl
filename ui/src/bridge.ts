@@ -5,7 +5,7 @@
  *   1. 开发时在没有 Tauri 环境（纯浏览器）下也能跑，用假数据预览界面
  *   2. 换实现时只改这一处
  */
-import type { AddTaskRequest, Settings, Task } from "./types";
+import type { AddTaskRequest, Settings, Task, UpdateInfo } from "./types";
 
 type UnlistenFn = () => void;
 
@@ -63,6 +63,8 @@ export const api = {
 
   getApiInfo: () =>
     invoke("get_api_info") as Promise<{ port: number; token: string; running: boolean }>,
+  checkUpdate: () => invoke("check_update") as Promise<UpdateInfo>,
+  openUrl: (url: string) => invoke("open_url", { url }) as Promise<void>,
   setTaskSpeedLimit: (id: string, limit: number) =>
     invoke("set_task_speed_limit", { id, limit }) as Promise<void>,
 };

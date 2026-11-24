@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FilterKey, Settings, Task } from "./types";
+import type { FilterKey, Settings, Task, UpdateInfo } from "./types";
 import { api, subscribe } from "./bridge";
 import { TaskCard } from "./TaskCard";
 import { NewTaskDialog } from "./NewTaskDialog";
@@ -47,6 +47,8 @@ export default function App() {
   const [initError, setInitError] = useState<string | null>(null);
   const [slowHint, setSlowHint] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
   const toastId = useRef(0);
 
   const toast = useCallback((msg: string, kind: "ok" | "error" = "ok") => {
@@ -85,6 +87,21 @@ export default function App() {
       clearTimeout(timer);
     };
   }, [toast, reloadKey]);
+
+  // ── 启动后自动检查更新（静默：失败不打扰） ──
+  useEffect(() => {
+    if (!settings) return;
+    let alive = true;
+    api
+      .checkUpdate()
+      .then((info) => {
+        if (alive && info?.has_update) setUpdateInfo(info);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [settings, reloadKey]);
 
   // ── 订阅引擎事件 ──
   useEffect(() => {
@@ -418,6 +435,37 @@ export default function App() {
         </header>
 
         <div className="content">
+          {/* 更新提示横幅 */}
+          {view === "downloads" &&
+            updateInfo?.has_update &&
+            !updateDismissed && (
+              <div className="update-banner">
+                <span className="update-badge">NEW</span>
+                <div className="update-text">
+                  发现新版本 <b>v{updateInfo.latest_version}</b>
+                  <span className="update-muted">
+                    （当前 v{updateInfo.current_version}）
+                  </span>
+                </div>
+                <button
+                  className="btn btn-primary update-btn"
+                  onClick={() =>
+                    api
+                      .openUrl(updateInfo.release_url)
+                      .catch(() => toast("打开链接失败", "error"))
+                  }
+                >
+                  去更新
+                </button>
+                <button
+                  className="icon-btn update-close"
+                  aria-label="关闭更新提示"
+                  onClick={() => setUpdateDismissed(true)}
+                >
+                  ✕
+                </button>
+              </div>
+            )}
           {view === "settings" ? (
             <SettingsPage
               settings={settings}

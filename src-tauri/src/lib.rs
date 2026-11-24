@@ -164,6 +164,167 @@ async fn open_file(path: String) -> Result<(), String> {
     open_path(&path)
 }
 
+// ───────────────────────── 检查更新 ─────────────────────────
+
+const UPDATE_RELEASE_API: &str =
+    "https://api.github.com/repos/smcloudcat/felldl/releases?per_page=10";
+
+#[derive(serde::Serialize, Clone)]
+pub struct UpdateAsset {
+    pub name: String,
+    pub download_url: String,
+    pub size: u64,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct UpdateInfo {
+    pub current_version: String,
+    pub latest_version: String,
+    pub has_update: bool,
+    pub release_url: String,
+    pub notes: String,
+    pub published_at: String,
+    pub assets: Vec<UpdateAsset>,
+}
+
+/// "v1.2.3" / "1.2.3" → [1, 2, 3]
+fn parse_ver(v: &str) -> Vec<u32> {
+    v.trim()
+        .trim_start_matches('v')
+        .split('.')
+        .map(|s| s.trim().parse().unwrap_or(0))
+        .collect()
+}
+
+fn version_gt(a: &str, b: &str) -> bool {
+    let (a, b) = (parse_ver(a), parse_ver(b));
+    let n = a.len().max(b.len());
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
+#[tauri::command]
+async fn check_update() -> Result<UpdateInfo, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(12))
+        .user_agent("felldl-updater")
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(UPDATE_RELEASE_API)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("网络请求失败: {e}"))?;
+    // 私有仓库的 releases 匿名访问会 404，给出明确提示而不是笼统报错
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err("无法读取发布信息（仓库可能为私有，或还没有发布任何 Release）".into());
+    }
+    let resp = resp
+        .error_for_status()
+        .map_err(|e| format!("GitHub 返回错误: {e}"))?;
+    let resp: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+
+    // 从列表中挑最新的非草稿、非预发布版本（比 releases/latest 缓存更友好）
+    let rel = resp
+        .as_array()
+        .and_then(|arr| {
+            arr.iter()
+                .find(|r| !r["draft"].as_bool().unwrap_or(false) && !r["prerelease"].as_bool().unwrap_or(false))
+        })
+        .ok_or_else(|| "还没有可用的正式版本".to_string())?;
+
+    // 去掉 tag 常见的 v 前缀，展示时统一为 vX.Y.Z 由前端拼
+    let latest = rel["tag_name"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches('v')
+        .to_string();
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let assets = rel["assets"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|a| UpdateAsset {
+                    name: a["name"].as_str().unwrap_or("").to_string(),
+                    download_url: a["browser_download_url"].as_str().unwrap_or("").to_string(),
+                    size: a["size"].as_u64().unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(UpdateInfo {
+        has_update: version_gt(&latest, &current),
+        current_version: current,
+        latest_version: latest,
+        release_url: rel["html_url"].as_str().unwrap_or("").to_string(),
+        notes: rel["body"].as_str().unwrap_or("").to_string(),
+        published_at: rel["published_at"].as_str().unwrap_or("").to_string(),
+        assets,
+    })
+}
+
+/// 用系统默认方式打开链接（桌面浏览器 / 移动端外部浏览器）
+#[tauri::command]
+async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    // 只放行 http(s)，避免被当成本地协议跳转
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("仅支持 http/https 链接".into());
+    }
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::{parse_ver, version_gt};
+
+    #[test]
+    fn version_compare_basic() {
+        assert!(version_gt("v0.2.0", "0.1.0"));
+        assert!(version_gt("0.1.1", "0.1.0"));
+        assert!(version_gt("1.0", "0.9.9"));
+        assert!(!version_gt("0.1.0", "v0.1.0"));
+        assert!(!version_gt("0.1.0", "0.1.1"));
+        assert!(!version_gt("0.1", "0.1.0")); // 缺位补 0，视为相等
+    }
+
+    #[test]
+    fn parse_ver_shapes() {
+        assert_eq!(parse_ver("v1.2.3"), vec![1, 2, 3]);
+        assert_eq!(parse_ver("2.0"), vec![2, 0]);
+        assert_eq!(parse_ver(""), vec![0]);
+    }
+
+    /// 实测 GitHub Releases 接口解析（列表接口应返回数组）
+    #[tokio::test]
+    async fn github_endpoint_reachable() {
+        let body = reqwest::Client::new()
+            .get(crate::UPDATE_RELEASE_API)
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "felldl-updater")
+            .timeout(std::time::Duration::from_secs(12))
+            .send()
+            .await
+            .expect("请求 GitHub 失败");
+        assert!(body.status().is_success(), "releases 列表应可访问");
+        let json: serde_json::Value = body.json().await.expect("解析 JSON 失败");
+        let arr = json.as_array().expect("应返回数组");
+        assert!(!arr.is_empty(), "至少存在一个 release");
+        assert!(arr[0]["tag_name"].is_string(), "tag_name 缺失");
+    }
+}
+
 #[tauri::command]
 async fn show_in_folder(path: String) -> Result<(), String> {
     reveal_path(&path)
@@ -356,6 +517,8 @@ pub fn run() {
             open_file,
             show_in_folder,
             pick_folder,
+            check_update,
+            open_url,
         ])
         .run(tauri::generate_context!())
         .expect("Felldl 启动失败");
