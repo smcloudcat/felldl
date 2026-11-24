@@ -798,7 +798,8 @@ impl Engine {
             // BT 任务先从 rqbit 会话移除，否则种子会留在后台继续做种、
             // 且 UI 已不可见（资源泄漏）
             if is_bt {
-                if let Some(rt) = self.tasks.lock().get(&id).cloned() {
+                let rt = { self.tasks.lock().get(&id).cloned() };
+                if let Some(rt) = rt {
                     self.bt_remove(&rt, false).await;
                 }
             }
