@@ -17,6 +17,26 @@ use reqwest::header::{
     LAST_MODIFIED, RANGE, REFERER, USER_AGENT,
 };
 use reqwest::{Client, StatusCode};
+
+/// 将用户填写的 Cookie / 令牌应用到请求：
+/// - 以 "Bearer " 开头，或形如 "Authorization: <value>" 的值 → 作为 Authorization 头发送
+/// - 其余 → 作为 Cookie 头发送
+fn apply_auth_cookie(req: reqwest::RequestBuilder, c: &str) -> reqwest::RequestBuilder {
+    let t = c.trim();
+    let lower = t.to_lowercase();
+    if lower.starts_with("bearer ") || lower.starts_with("authorization:") {
+        let v = if lower.starts_with("authorization:") {
+            t.split_once(':').map(|x| x.1.trim().to_string()).unwrap_or_default()
+        } else {
+            t.to_string()
+        };
+        if let Ok(hv) = reqwest::header::HeaderValue::from_str(&v) {
+            return req.header(reqwest::header::AUTHORIZATION, hv);
+        }
+        return req;
+    }
+    req.header(COOKIE, t)
+}
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -582,7 +602,7 @@ impl Engine {
             req = req.header(REFERER, r);
         }
         if let Some(c) = cookie {
-            req = req.header(COOKIE, c);
+            req = apply_auth_cookie(req, c);
         }
         if let (Some(u), Some(p)) = auth {
             req = req.basic_auth(u, Some(p));
@@ -1063,7 +1083,7 @@ impl Engine {
             req = req.header(REFERER, r);
         }
         if let Some(c) = cookie {
-            req = req.header(COOKIE, c);
+            req = apply_auth_cookie(req, c.as_str());
         }
         let resp = req.send().await.context("请求失败")?;
         if !resp.status().is_success() {
@@ -1426,7 +1446,7 @@ async fn fetch_segment(
         req = req.header(REFERER, r);
     }
     if let Some(c) = &job.cookie {
-        req = req.header(COOKIE, c);
+        req = apply_auth_cookie(req, c);
     }
     let resp = req.send().await?;
     let status = resp.status();

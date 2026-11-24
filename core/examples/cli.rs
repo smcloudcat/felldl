@@ -70,6 +70,10 @@ async fn main() -> anyhow::Result<()> {
             cookie: None,
             headers: Default::default(),
             mirrors: Vec::new(),
+            username: None,
+            password: None,
+            category: None,
+            interval_secs: 0,
 })
         .await?;
 

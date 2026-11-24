@@ -39,6 +39,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
   });
   const [referer, setReferer] = useState("");
+  const [cookie, setCookie] = useState("");
   const [mirrorsText, setMirrorsText] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -116,6 +117,7 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
         speed_limit: limit > 0 ? limit * 1024 : null,
         scheduled_at: scheduledAt,
         referer: referer.trim() || null,
+        cookie: cookie.trim() || null,
         mirrors: mirrorUrls,
         username: username.trim() || null,
         password: password || null,
@@ -303,6 +305,18 @@ export function NewTaskDialog({ settings, initialUrls, onClose, onDone }: Props)
                   spellCheck={false}
                 />
                 <div className="field-hint">{t("dlg.refererHint")}</div>
+              </div>
+              <div className="field">
+                <label className="field-label">🍪 {t("dlg.cookie")}</label>
+                <textarea
+                  className="textarea"
+                  style={{ minHeight: 48 }}
+                  placeholder="sessionid=xxx; token=yyy"
+                  value={cookie}
+                  onChange={(e) => setCookie(e.target.value)}
+                  spellCheck={false}
+                />
+                <div className="field-hint">{t("dlg.cookieHint")}</div>
               </div>
               <div className="field">
                 <label className="field-label">🪞 {t("dlg.mirrors")}</label>
