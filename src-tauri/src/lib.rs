@@ -328,6 +328,7 @@ fn header_u64(resp: &reqwest::Response, name: &str) -> Option<u64> {
 async fn fetch_api(client: &reqwest::Client, etag: Option<&str>) -> Result<ApiOutcome, String> {
     let mut rb = client
         .get(UPDATE_RELEASE_API)
+        .timeout(std::time::Duration::from_secs(8))
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28");
     if let Some(e) = etag {
@@ -401,6 +402,7 @@ fn unescape_xml(s: &str) -> String {
 async fn fetch_atom(client: &reqwest::Client) -> Result<UpdateInfo, String> {
     let resp = client
         .get(UPDATE_ATOM)
+        .timeout(std::time::Duration::from_secs(6))
         .header("Accept", "application/atom+xml, application/xml;q=0.9, */*;q=0.5")
         .send()
         .await
@@ -454,15 +456,16 @@ fn parse_atom(text: &str) -> Result<UpdateInfo, String> {
 /// 最低一级兜底：仓库根目录的 version.json（随发布更新）
 /// 走 raw.githubusercontent / jsDelivr CDN，不经过 GitHub API，不受匿名配额限制
 const UPDATE_VERSION_JSON: [&str; 2] = [
-    "https://raw.githubusercontent.com/smcloudcat/felldl/master/version.json",
-    // jsDelivr 国内访问更稳，但缓存最久约 12 小时，因此排在 raw 之后
+    // jsDelivr 国内基本秒回；分支缓存最长约 12 小时，作为最低优先级兜底可以接受
     "https://cdn.jsdelivr.net/gh/smcloudcat/felldl@master/version.json",
+    // raw 内容最新，但国内时通常连不上，所以排在后面并给更短超时
+    "https://raw.githubusercontent.com/smcloudcat/felldl/master/version.json",
 ];
 
 async fn fetch_version_json(client: &reqwest::Client) -> Result<UpdateInfo, String> {
     let mut last_err = String::from("version.json 源均不可用");
     for url in UPDATE_VERSION_JSON {
-        let resp = match client.get(url).send().await {
+        let resp = match client.get(url).timeout(std::time::Duration::from_secs(4)).send().await {
             Ok(r) => r,
             Err(e) => {
                 last_err = format!("{url} 请求失败: {e}");
@@ -567,8 +570,13 @@ async fn check_update(app: tauri::AppHandle, force: Option<bool>) -> Result<Upda
         Err(e) => e,
     };
 
-    // ③ API 不可用（多为匿名 60 次/小时限流）：改用 Releases 订阅
-    let atom_err = match fetch_atom(&client).await {
+    // ③④ API 不可用时并行试两条兜底：
+    //   · Releases Atom 订阅（github.com 普通页面，不受 API 限额）
+    //   · 仓库里的 version.json（jsDelivr / raw CDN，不经过 GitHub API）
+    // 并行跑，最坏等待从「相加」变成「取最长」，用户少等一半时间。
+    let (atom_res, json_res) = tokio::join!(fetch_atom(&client), fetch_version_json(&client));
+
+    let atom_err = match atom_res {
         Ok(mut info) => {
             info.note = Some("GitHub API 请求受限，已改用 Releases 订阅获取（信息略有延迟）".into());
             cache.checked_at = now;
@@ -578,10 +586,7 @@ async fn check_update(app: tauri::AppHandle, force: Option<bool>) -> Result<Upda
         }
         Err(e) => e,
     };
-
-    // ④ 订阅也拿不到（github.com 被墙/被限速）：读仓库里的 version.json
-    //    走 raw / jsDelivr CDN，既不消耗 API 配额，国内通常也能访问
-    let json_err = match fetch_version_json(&client).await {
+    let json_err = match json_res {
         Ok(mut info) => {
             info.note = Some("GitHub 接口不可用，已改用 version.json 源获取".into());
             cache.checked_at = now;
@@ -748,6 +753,56 @@ mod update_tests {
         assert!(broken.info.is_none(), "损坏的缓存应退回默认值");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 实测 ETag 复用：第二次带 If-None-Match 应拿到 304（不消耗配额）
+    #[tokio::test]
+    async fn if_none_match_returns_304() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(12))
+            .user_agent("felldl-updater")
+            .build()
+            .unwrap();
+        let first = match client
+            .get(crate::UPDATE_RELEASE_API)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("网络不可用，跳过: {e}");
+                return;
+            }
+        };
+        if first.status() != reqwest::StatusCode::OK {
+            eprintln!("匿名配额不可用（{}），跳过", first.status());
+            return;
+        }
+        let etag = match first
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+        {
+            Some(e) => e,
+            None => {
+                eprintln!("响应没有 ETag，跳过");
+                return;
+            }
+        };
+        let second = client
+            .get(crate::UPDATE_RELEASE_API)
+            .header("Accept", "application/vnd.github+json")
+            .header("If-None-Match", etag)
+            .send()
+            .await
+            .expect("第二次请求失败");
+        assert_eq!(
+            second.status(),
+            reqwest::StatusCode::NOT_MODIFIED,
+            "带 If-None-Match 应返回 304"
+        );
     }
 
     /// 实测 version.json 兜底源（仓库还没推 version.json 或网络不通时跳过）
