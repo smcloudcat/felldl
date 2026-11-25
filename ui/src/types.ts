@@ -92,6 +92,14 @@ export interface Settings {
   task_meta: string[];
   dns_mode: "system" | "custom" | string;
   dns_servers: string;
+  /** 自定义背景图本地路径（空 = 不使用） */
+  ui_background: string;
+  /** 背景模糊半径 px（0~40） */
+  ui_blur: number;
+  /** 背景遮罩浓度 %（0~90） */
+  ui_dim: number;
+  /** 面板不透明度 %（40~100） */
+  ui_glass: number;
 }
 
 export interface AddTaskRequest {

@@ -6,6 +6,7 @@ import { NewTaskDialog } from "./NewTaskDialog";
 import { SettingsPage } from "./SettingsPage";
 import { GrabPage } from "./GrabPage";
 import { cx, formatSpeed, isActive } from "./format";
+import { applyAppearance } from "./appearance";
 import { useI18n } from "./i18n";
 import {
   IconBolt,
@@ -218,13 +219,23 @@ export default function App() {
       document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
       document.documentElement.setAttribute("data-skin", settings.ui_skin || "blue");
       document.documentElement.setAttribute("data-btn", settings.btn_style || "rounded");
+      // 毛玻璃 / 背景图：必须在 data-theme 之后应用（遮罩色跟随主题）
+      applyAppearance(settings);
     };
     apply();
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const onMq = () => settings.theme === "system" && apply();
     mq.addEventListener("change", onMq);
     return () => mq.removeEventListener("change", onMq);
-  }, [settings?.theme, settings?.ui_skin, settings?.btn_style]);
+  }, [
+    settings?.theme,
+    settings?.ui_skin,
+    settings?.btn_style,
+    settings?.ui_background,
+    settings?.ui_blur,
+    settings?.ui_dim,
+    settings?.ui_glass,
+  ]);
 
   // ── 统计 ──
   const stats = useMemo(() => {

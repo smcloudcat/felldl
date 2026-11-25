@@ -177,6 +177,18 @@ pub struct Settings {
     /// 自定义 DNS 服务器，逗号/空格分隔，如 "1.1.1.1, 8.8.8.8"
     #[serde(default)]
     pub dns_servers: String,
+    /// 自定义背景图片的本地路径（空 = 不使用）
+    #[serde(default)]
+    pub ui_background: String,
+    /// 背景模糊半径（px，0~40）
+    #[serde(default = "default_ui_blur")]
+    pub ui_blur: u32,
+    /// 背景遮罩浓度（0~90，百分比）
+    #[serde(default = "default_ui_dim")]
+    pub ui_dim: u32,
+    /// 面板不透明度（40~100，百分比，越小越通透）
+    #[serde(default = "default_ui_glass")]
+    pub ui_glass: u32,
 }
 
 /// 下载分类规则
@@ -218,6 +230,15 @@ fn default_task_meta() -> Vec<String> {
 }
 fn default_dns_mode() -> String {
     "system".into()
+}
+fn default_ui_blur() -> u32 {
+    18
+}
+fn default_ui_dim() -> u32 {
+    32
+}
+fn default_ui_glass() -> u32 {
+    78
 }
 
 fn default_download_dir() -> String {
@@ -266,6 +287,10 @@ impl Default for Settings {
             task_meta: default_task_meta(),
             dns_mode: default_dns_mode(),
             dns_servers: String::new(),
+            ui_background: String::new(),
+            ui_blur: default_ui_blur(),
+            ui_dim: default_ui_dim(),
+            ui_glass: default_ui_glass(),
         }
     }
 }

@@ -222,6 +222,10 @@ impl Engine {
         }
         s.max_concurrent_tasks = s.max_concurrent_tasks.clamp(1, 16);
         s.default_connections = s.default_connections.clamp(1, 64);
+        // 界面毛玻璃参数：收窄到合理区间，避免前端传入极端值把界面糊死
+        s.ui_blur = s.ui_blur.min(40);
+        s.ui_dim = s.ui_dim.min(90);
+        s.ui_glass = s.ui_glass.clamp(40, 100);
         *self.http_token.write() = s.api_token.clone();
         self.global_limiter.set_limit(s.global_speed_limit);
         let _ = std::fs::create_dir_all(&s.download_dir);

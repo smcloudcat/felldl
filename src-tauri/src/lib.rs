@@ -755,6 +755,40 @@ mod update_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 背景图 base64 编解码：与真实图片字节完全一致，非法输入要报错
+    #[test]
+    fn background_base64_roundtrip() {
+        use super::{b64_decode, b64_encode, image_mime};
+
+        // 覆盖三种 padding 情况（长度 %3 = 0/1/2）
+        for data in [
+            b"".to_vec(),
+            b"a".to_vec(),
+            b"ab".to_vec(),
+            b"abc".to_vec(),
+            (0u8..=255).collect::<Vec<u8>>(),
+        ] {
+            let enc = b64_encode(&data);
+            assert_eq!(b64_decode(&enc).unwrap(), data, "编码应可无损还原");
+        }
+        // 标准向量，确认没有写错字母表
+        assert_eq!(b64_encode(b"Man"), "TWFu");
+        assert_eq!(b64_encode(b"Ma"), "TWE=");
+
+        // 前端传的是完整 data URL，也要能兼容
+        assert_eq!(
+            b64_decode("data:image/png;base64,TWFu").unwrap(),
+            b"Man".to_vec()
+        );
+        assert!(b64_decode("!!!").is_err());
+        assert!(b64_decode("TWF").is_err(), "长度不是 4 的倍数应报错");
+
+        assert_eq!(image_mime("/a/b/c.PNG"), "image/png");
+        assert_eq!(image_mime("x.jpeg"), "image/jpeg");
+        assert_eq!(image_mime("x.webp"), "image/webp");
+        assert_eq!(image_mime("x.unknown"), "image/png");
+    }
+
     /// 实测 ETag 复用：第二次带 If-None-Match 应拿到 304（不消耗配额）
     #[tokio::test]
     async fn if_none_match_returns_304() {
@@ -890,6 +924,162 @@ async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
         let _ = app;
         Ok(None)
     }
+}
+
+// ───────────────────────── 自定义背景图 ─────────────────────────
+// 前端用 <input type=file> 读图（桌面 / 安卓都可用系统选择器），把 base64 传过来，
+// 这里落盘到应用数据目录，启动时再读回 data URL。
+// 刻意不把图片塞进 settings.json：几 MB 的 base64 会让每次读写设置都变慢。
+
+const BACKGROUND_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+const B64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn b64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64_TABLE[(n >> 18) as usize & 63] as char);
+        out.push(B64_TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            B64_TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64_TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn b64_val(c: u8) -> Option<u8> {
+    match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
+    // 兼容完整 data URL：data:image/png;base64,xxxx
+    let s = s.splitn(2, "base64,").last().unwrap_or(s);
+    let bytes: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if bytes.len() % 4 != 0 {
+        return Err("图片数据不完整".into());
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        let mut n = 0u32;
+        let mut pad = 0;
+        for (i, &c) in chunk.iter().enumerate() {
+            if c == b'=' {
+                pad += 1;
+                n <<= 6;
+                continue;
+            }
+            let v = b64_val(c).ok_or_else(|| "图片数据格式错误".to_string())?;
+            n = (n << 6) | v as u32;
+            let _ = i;
+        }
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Ok(out)
+}
+
+fn image_mime(path: &str) -> &'static str {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        "svg" => "image/svg+xml",
+        _ => "image/png",
+    }
+}
+
+/// 保存背景图：`data` 可以是纯 base64 或 `data:image/png;base64,...`
+#[tauri::command]
+async fn save_background(
+    app: tauri::AppHandle,
+    data: String,
+    ext: String,
+) -> Result<String, String> {
+    let payload = data.splitn(2, "base64,").last().unwrap_or(&data);
+    let bytes = b64_decode(payload)?;
+    if bytes.is_empty() {
+        return Err("图片内容为空".into());
+    }
+    if bytes.len() > BACKGROUND_MAX_BYTES {
+        return Err(format!(
+            "图片过大（{:.1} MB），请选择小于 {} MB 的图片",
+            bytes.len() as f64 / 1024.0 / 1024.0,
+            BACKGROUND_MAX_BYTES / 1024 / 1024
+        ));
+    }
+    let ext = {
+        let e = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+        match e.as_str() {
+            "jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp" | "avif" | "svg" => e,
+            _ => "png".to_string(),
+        }
+    };
+    let dir = data_dir(&app);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    // 只保留一张背景图：先清掉旧的，避免换图后残留占空间
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("ui-background.") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let path = dir.join(format!("ui-background.{ext}"));
+    std::fs::write(&path, &bytes).map_err(|e| format!("写入图片失败: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// 读回背景图，返回可直接用于 CSS `url()` 的 data URL
+#[tauri::command]
+async fn read_background(path: String) -> Result<String, String> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取背景图失败: {e}"))?;
+    Ok(format!("data:{};base64,{}", image_mime(&path), b64_encode(&bytes)))
+}
+
+/// 删除已保存的背景图文件
+#[tauri::command]
+async fn clear_background(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = data_dir(&app);
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("ui-background.") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn open_path(_path: &str) -> Result<(), String> {
@@ -1133,6 +1323,9 @@ pub fn run() {
             open_file,
             show_in_folder,
             pick_folder,
+            save_background,
+            read_background,
+            clear_background,
             check_update,
             open_url,
             analyze_url,

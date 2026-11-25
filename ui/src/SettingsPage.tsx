@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Settings, UpdateInfo } from "./types";
 import { api } from "./bridge";
 import { useI18n, setLang } from "./i18n";
@@ -17,8 +17,10 @@ import {
   IconX,
   IconDownload,
   IconZap,
+  IconImage,
 } from "./icons";
 import { cx } from "./format";
+import { applyAppearance, forgetBackground, primeBackground } from "./appearance";
 
 interface Props {
   settings: Settings;
@@ -44,6 +46,43 @@ function Switch({
   );
 }
 
+/** 带数值回显的滑块（背景模糊 / 遮罩 / 面板透明度） */
+function Slider({
+  label,
+  value,
+  min,
+  max,
+  suffix,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  suffix?: string;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div className="field">
+      <label className="field-label">
+        {label}
+        <span className="slider-value">
+          {value}
+          {suffix}
+        </span>
+      </label>
+      <input
+        className="range"
+        type="range"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+    </div>
+  );
+}
+
 export function SettingsPage({ settings, onChange, toast }: Props) {
   const { t, lang } = useI18n();
   const [draft, setDraft] = useState<Settings>(settings);
@@ -57,6 +96,84 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   const [ifaces, setIfaces] = useState<string[]>([]);
   const [dnsTesting, setDnsTesting] = useState(false);
   const [dnsResult, setDnsResult] = useState<string | null>(null);
+  const [bgBusy, setBgBusy] = useState(false);
+
+  // ── 设置页锚点导航 ──
+  const navGroups = [
+    { id: "sg-download", label: t("set.group.download"), Icon: IconDownload },
+    { id: "sg-network", label: t("set.group.network"), Icon: IconGlobe },
+    { id: "sg-integration", label: t("set.group.integration"), Icon: IconShield },
+    { id: "sg-category", label: t("set.group.category"), Icon: IconFolder },
+    { id: "sg-interface", label: t("set.group.interface"), Icon: IconSliders },
+    { id: "sg-about", label: t("set.group.about"), Icon: IconZap },
+  ];
+  const [activeGroup, setActiveGroup] = useState("sg-download");
+  const navRef = useRef<HTMLDivElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  // 滚动时高亮当前分组（.content 才是真正的滚动容器）
+  useEffect(() => {
+    const container = navRef.current?.closest(".content") as HTMLElement | null;
+    if (!container) return;
+    const onScroll = () => {
+      const line = container.getBoundingClientRect().top + 72;
+      let cur = "sg-download";
+      for (const g of navGroups) {
+        const el = document.getElementById(g.id);
+        if (el && el.getBoundingClientRect().top <= line) cur = g.id;
+      }
+      setActiveGroup(cur);
+    };
+    onScroll();
+    container.addEventListener("scroll", onScroll, { passive: true });
+    return () => container.removeEventListener("scroll", onScroll);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 外观实时预览：拖动滑块立刻见效；离开设置页或关闭时还原为已保存值
+  useEffect(() => {
+    applyAppearance(draft);
+    return () => applyAppearance(settings);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft.ui_background, draft.ui_blur, draft.ui_dim, draft.ui_glass]);
+
+  function jumpTo(id: string) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "start" });
+    setActiveGroup(id);
+  }
+
+  async function pickBackground(file: File | null | undefined) {
+    if (!file) return;
+    setBgBusy(true);
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result || ""));
+        fr.onerror = () => reject(new Error(t("set.bgReadFail")));
+        fr.readAsDataURL(file);
+      });
+      const ext = (file.name.split(".").pop() || "png").toLowerCase();
+      const path = await api.saveBackground(dataUrl, ext);
+      primeBackground(path, dataUrl);
+      patch({ ui_background: path });
+      applyAppearance({ ...draft, ui_background: path });
+      toast(t("set.bgPicked"));
+    } catch (e: any) {
+      toast(typeof e === "string" ? e : String(e?.message ?? e), "error");
+    } finally {
+      setBgBusy(false);
+    }
+  }
+
+  function removeBackground() {
+    // 只改设置，先不删文件：用户可能点「放弃」反悔，真删了背景就回不来了。
+    // 文件由下一次保存新图时统一清理（后端 save_background 会清掉旧图）。
+    forgetBackground(draft.ui_background);
+    patch({ ui_background: "" });
+    applyAppearance({ ...draft, ui_background: "" });
+  }
 
   async function testDns() {
     const servers = draft.dns_servers.trim();
@@ -163,7 +280,32 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
 
   return (
     <div className="settings">
-      <section className="settings-group">
+      {/* 锚点导航：吸顶一排分类 chip */}
+      <div className="settings-nav" ref={navRef}>
+        {navGroups.map(({ id, label, Icon }) => (
+          <button
+            key={id}
+            type="button"
+            className={cx("settings-nav-chip", activeGroup === id && "active")}
+            onClick={() => jumpTo(id)}
+          >
+            <Icon />
+            {label}
+          </button>
+        ))}
+      </div>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = "";
+          pickBackground(f);
+        }}
+      />
+      <section className="settings-group" id="sg-download">
         <div className="settings-group-head">
           <IconDownload size={13} />
           <span>{t("set.group.download")}</span>
@@ -291,7 +433,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       
         </div>
       </section>
-      <section className="settings-group">
+      <section className="settings-group" id="sg-network">
         <div className="settings-group-head">
           <IconGlobe size={13} />
           <span>{t("set.group.network")}</span>
@@ -478,7 +620,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       
         </div>
       </section>
-      <section className="settings-group">
+      <section className="settings-group" id="sg-integration">
         <div className="settings-group-head">
           <IconShield size={13} />
           <span>{t("set.group.integration")}</span>
@@ -587,7 +729,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       
         </div>
       </section>
-      <section className="settings-group">
+      <section className="settings-group" id="sg-category">
         <div className="settings-group-head">
           <IconFolder size={13} />
           <span>{t("set.group.category")}</span>
@@ -684,7 +826,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       
         </div>
       </section>
-      <section className="settings-group">
+      <section className="settings-group" id="sg-interface">
         <div className="settings-group-head">
           <IconSliders size={13} />
           <span>{t("set.group.interface")}</span>
@@ -718,6 +860,77 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
                 {label}
               </button>
             ))}
+          </div>
+
+        {/* 背景图与磨砂 */}
+          <div className="field" style={{ marginTop: 16 }}>
+            <label className="field-label">
+              <IconImage size={14} />
+              {t("set.bgTitle")}
+            </label>
+            <div className="bg-row">
+              <div className={cx("bg-thumb", !draft.ui_background && "is-empty")}>
+                {!draft.ui_background && <IconImage size={17} />}
+              </div>
+              <div className="bg-actions">
+                <div className="bg-actions-btns">
+                  <button
+                    type="button"
+                    className="btn btn-soft btn-sm"
+                    disabled={bgBusy}
+                    onClick={() => fileRef.current?.click()}
+                  >
+                    {bgBusy
+                      ? t("set.bgLoading")
+                      : draft.ui_background
+                        ? t("set.bgChange")
+                        : t("set.bgPick")}
+                  </button>
+                  {draft.ui_background && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={removeBackground}
+                    >
+                      {t("set.bgRemove")}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="field-hint">{t("set.bgSub")}</div>
+          </div>
+
+          <div className="field-grid-2" style={{ marginTop: 14 }}>
+            <Slider
+              label={t("set.blur")}
+              value={draft.ui_blur}
+              min={0}
+              max={40}
+              suffix="px"
+              onChange={(v) => patch({ ui_blur: v })}
+            />
+            <Slider
+              label={t("set.dim")}
+              value={draft.ui_dim}
+              min={0}
+              max={90}
+              suffix="%"
+              onChange={(v) => patch({ ui_dim: v })}
+            />
+          </div>
+          <div style={{ marginTop: 12 }}>
+            <Slider
+              label={t("set.glass")}
+              value={draft.ui_glass}
+              min={40}
+              max={100}
+              suffix="%"
+              onChange={(v) => patch({ ui_glass: v })}
+            />
+            <div className="field-hint" style={{ marginTop: 5 }}>
+              {t("set.glassHint")}
+            </div>
           </div>
 
         {/* 界面自定义 */}
@@ -840,7 +1053,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       
         </div>
       </section>
-      <section className="settings-group">
+      <section className="settings-group" id="sg-about">
         <div className="settings-group-head">
           <IconZap size={13} />
           <span>{t("set.group.about")}</span>

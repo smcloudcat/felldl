@@ -94,6 +94,12 @@ export const api = {
   // 用指定 DNS 服务器解析域名（设置页测试用）
   testDns: (servers: string, host: string) =>
     invoke("test_dns", { servers, host }) as Promise<string[]>,
+
+  // 自定义背景图：图片以 base64 传后端落盘，读取时返回 data URL
+  saveBackground: (data: string, ext: string) =>
+    invoke("save_background", { data, ext }) as Promise<string>,
+  readBackground: (path: string) => invoke("read_background", { path }) as Promise<string>,
+  clearBackground: () => invoke("clear_background") as Promise<void>,
 };
 
 /** 订阅引擎事件 */

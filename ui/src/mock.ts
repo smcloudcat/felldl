@@ -126,6 +126,10 @@ let settings: Settings = {
   task_meta: ["size", "speed", "eta", "mirrors", "date"],
   dns_mode: "system",
   dns_servers: "",
+  ui_background: "",
+  ui_blur: 18,
+  ui_dim: 32,
+  ui_glass: 78,
 };
 
 // 每 400ms 推进下载进度
@@ -242,6 +246,13 @@ export const mockEngine = {
         return { ...settings };
       case "pick_folder":
         return "/Users/you/Downloads";
+      case "save_background":
+        // 浏览器预览模式不落盘，直接回一个假路径
+        return "/mock/bg-" + Date.now() + "." + (args?.ext || "png");
+      case "read_background":
+        return "";
+      case "clear_background":
+        return null;
       case "get_api_info":
         return { port: settings.api_port, token: settings.api_token, running: true };
       case "list_interfaces":

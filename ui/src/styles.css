@@ -26,6 +26,22 @@
   --sidebar-w: 224px;
   --header-h: 60px;
 
+  /* ── 毛玻璃参数（运行时由「设置 → 界面 → 背景与磨砂」注入）──
+     --panel-a   面板不透明度，越小越通透
+     --glass-blur 背景模糊半径，同时用于顶栏/侧栏的 backdrop-filter */
+  --panel-a: 78%;
+  --glass-blur: 18px;
+  --bg-image: none;
+  --bg-dim-rgb: 2, 6, 23;
+  --bg-dim-a: 0;
+  --bg-scale: 1.05;
+
+  /* 面板底色：在所在一层的 bg-elev 上做半透明，图片 / 氛围光透上来 */
+  --panel: color-mix(in srgb, var(--bg-elev) var(--panel-a), transparent);
+  --panel-sunken: color-mix(in srgb, var(--bg-sunken) var(--panel-a), transparent);
+  /* 输入框底色比卡片再实一点，保证长文本可读 */
+  --panel-field: color-mix(in srgb, var(--bg-sunken) 92%, transparent);
+
   /* 系统安全区：桌面为 0，安卓由下方 [data-platform="android"] 兜底 */
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -128,22 +144,53 @@ body {
   transition: background 0.35s var(--ease), color 0.35s var(--ease);
 }
 
-/* 背景氛围光 */
+/* ── 背景层一：自定义图片（可选）──
+   整张图只模糊一次，其它面板只是半透明 —— 比给每张卡片都加
+   backdrop-filter 便宜得多，长列表 / 安卓 WebView 也不会掉帧。 */
 body::before {
+  content: "";
+  position: fixed;
+  inset: -48px;
+  pointer-events: none;
+  z-index: 0;
+  background-image: var(--bg-image);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  filter: blur(var(--glass-blur)) saturate(118%);
+  transform: scale(var(--bg-scale));
+  opacity: 0;
+  transition: opacity 0.4s var(--ease), filter 0.28s var(--ease);
+}
+html.has-bg-image body::before {
+  opacity: 1;
+}
+
+/* ── 背景层二：遮罩 + 氛围光 ──
+   有图片时压一层亮/暗罩保证文字对比度（深浅主题罩色相反） */
+body::after {
   content: "";
   position: fixed;
   inset: 0;
   pointer-events: none;
   z-index: 0;
   background:
+    linear-gradient(
+      rgba(var(--bg-dim-rgb), var(--bg-dim-a)),
+      rgba(var(--bg-dim-rgb), var(--bg-dim-a))
+    ),
     radial-gradient(1000px 600px at 88% -12%, rgba(14, 165, 233, 0.14), transparent 62%),
     radial-gradient(760px 520px at 4% 104%, rgba(20, 184, 166, 0.11), transparent 58%);
 }
 
-[data-theme="dark"] body::before {
+[data-theme="dark"] body::after {
   background:
-    radial-gradient(1000px 600px at 88% -12%, rgba(14, 165, 233, 0.13), transparent 62%),
-    radial-gradient(760px 520px at 4% 104%, rgba(20, 184, 166, 0.09), transparent 58%);
+    linear-gradient(
+      rgba(var(--bg-dim-rgb), var(--bg-dim-a)),
+      rgba(var(--bg-dim-rgb), var(--bg-dim-a))
+    ),
+    radial-gradient(1000px 600px at 88% -12%, rgba(14, 165, 233, 0.16), transparent 62%),
+    radial-gradient(760px 520px at 4% 104%, rgba(20, 184, 166, 0.1), transparent 58%);
 }
 
 ::-webkit-scrollbar {
@@ -206,8 +253,8 @@ textarea {
   padding: calc(16px + var(--safe-top)) 12px 16px;
   gap: 4px;
   background: var(--sidebar-bg);
-  backdrop-filter: blur(22px) saturate(150%);
-  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(150%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(150%);
   border-right: 1px solid var(--border);
   transition: width 0.3s var(--ease), padding 0.3s var(--ease);
 }
@@ -393,8 +440,8 @@ textarea {
   padding-top: var(--safe-top);
   border-bottom: 1px solid var(--border);
   background: var(--surface-glass);
-  backdrop-filter: blur(20px) saturate(150%);
-  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(150%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(150%);
   user-select: none;
 }
 .header-title {
@@ -535,6 +582,7 @@ textarea {
 
 .task-card {
   background: var(--bg-elev);
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   padding: 13px 15px;
@@ -905,6 +953,10 @@ textarea {
 
 .dialog {
   background: var(--bg-elev);
+  background: var(--panel);
+  /* 对话框浮在内容之上，真正的 backdrop-filter 才有意义（区域小、代价可控） */
+  backdrop-filter: blur(calc(var(--glass-blur) * 0.9)) saturate(150%);
+  -webkit-backdrop-filter: blur(calc(var(--glass-blur) * 0.9)) saturate(150%);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-lg);
@@ -995,6 +1047,7 @@ textarea {
   border-radius: var(--r-sm);
   border: 1px solid var(--border-strong);
   background: var(--bg-sunken);
+  background: var(--panel-field);
   color: var(--text);
   font-size: 13px;
   transition: border-color 0.16s, box-shadow 0.16s, background 0.16s;
@@ -1039,6 +1092,7 @@ textarea {
   display: inline-flex;
   padding: 3px;
   background: var(--bg-sunken);
+  background: var(--panel-sunken);
   border-radius: var(--r-sm);
   border: 1px solid var(--border);
   gap: 2px;
@@ -1137,6 +1191,70 @@ textarea {
   animation: cardIn 0.34s var(--ease-out);
 }
 
+/* 设置页锚点导航：吸顶的一排分类 chip，点一下跳到对应分组 */
+.settings-nav {
+  position: sticky;
+  top: -18px;
+  z-index: 6;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 10px 0 9px;
+  margin: -10px 0 0;
+  border-radius: 0 0 var(--r-md) var(--r-md);
+  box-shadow: 0 9px 18px -16px rgba(0, 0, 0, 0.55);
+  scrollbar-width: none;
+  /* 和卡片同一套底色，滚动时像一条浮在内容上的磨砂条 */
+  background: var(--bg-elev);
+  background: var(--panel);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
+}
+.settings-nav::-webkit-scrollbar {
+  display: none;
+}
+.settings-nav-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  background: var(--panel);
+  color: var(--text-soft);
+  font-size: 12.2px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: background 0.16s, color 0.16s, border-color 0.16s, transform 0.16s;
+}
+.settings-nav-chip svg {
+  width: 13px;
+  height: 13px;
+  opacity: 0.85;
+}
+.settings-nav-chip:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.settings-nav-chip.active {
+  color: #fff;
+  border-color: transparent;
+  background: var(--brand-grad);
+  box-shadow: var(--shadow-brand);
+}
+.settings-nav-chip.active svg {
+  opacity: 1;
+}
+
+/* 分组标题吸顶时不被导航条遮住 */
+.settings-group {
+  scroll-margin-top: 58px;
+}
+
 /* 设置分组：一组一个语义区块，组内卡片按可用宽度自动分列 */
 .settings-group {
   display: flex;
@@ -1213,6 +1331,8 @@ textarea {
 
 .card {
   background: var(--bg-elev);
+  /* 上一条是 color-mix 不被支持时的降级；现代 WebView 走半透明磨砂 */
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   padding: 17px 19px;
@@ -1850,4 +1970,83 @@ textarea {
   gap: 8px;
   padding: 12px 0 calc(12px + var(--safe-bottom));
   background: linear-gradient(to top, var(--bg) 55%, transparent);
+  background: linear-gradient(
+    to top,
+    color-mix(in srgb, var(--bg) 92%, transparent) 55%,
+    transparent
+  );
+}
+
+/* ═══════════ 自定义背景图下的细节打磨 ═══════════ */
+/* 有图片时，面板边界和阴影都要更硬一点，否则磨砂层会「糊在一起」 */
+html.has-bg-image {
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.2);
+}
+html.has-bg-image[data-theme="light"] {
+  --border: rgba(15, 23, 42, 0.1);
+  --border-strong: rgba(15, 23, 42, 0.2);
+}
+html.has-bg-image .card,
+html.has-bg-image .task-card,
+html.has-bg-image .dialog,
+html.has-bg-image .settings-nav-chip {
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+html.has-bg-image[data-theme="light"] .card,
+html.has-bg-image[data-theme="light"] .task-card,
+html.has-bg-image[data-theme="light"] .dialog {
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+/* 图片层在动效/缩放时不必每帧重绘 */
+html.has-bg-image body::before {
+  will-change: filter;
+}
+
+/* ── 背景图选择行 / 滑块 ── */
+.bg-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.bg-thumb {
+  width: 96px;
+  height: 60px;
+  flex-shrink: 0;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border-strong);
+  background-image: var(--bg-image);
+  background-size: cover;
+  background-position: center;
+  box-shadow: var(--shadow-sm);
+}
+.bg-thumb.is-empty {
+  display: grid;
+  place-items: center;
+  background-image: var(--brand-grad-soft);
+  color: var(--text-mute);
+}
+.bg-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.bg-actions-btns {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.slider-value {
+  margin-left: auto;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--brand-1);
+  font-variant-numeric: tabular-nums;
+}
+.range {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--brand-1);
+  cursor: pointer;
 }
