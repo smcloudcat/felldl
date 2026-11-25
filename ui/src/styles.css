@@ -26,6 +26,10 @@
   --sidebar-w: 224px;
   --header-h: 60px;
 
+  /* 系统安全区：桌面为 0，安卓由下方 [data-platform="android"] 兜底 */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+
   --ease: cubic-bezier(0.32, 0.72, 0, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
@@ -94,6 +98,14 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+}
+
+/* Android 15 起强制 edge-to-edge：WebView 里 env(safe-area-inset-top) 常常是 0，
+   状态栏会压在界面顶部（新建下载按钮被 WiFi / 电量图标盖住）。
+   这里给一个稳妥的兜底高度，env 有值时取较大者。 */
+html[data-platform="android"] {
+  --safe-top: max(env(safe-area-inset-top, 0px), 26px);
+  --safe-bottom: max(env(safe-area-inset-bottom, 0px), 6px);
 }
 
 html,
@@ -191,7 +203,7 @@ textarea {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  padding: 16px 12px;
+  padding: calc(16px + var(--safe-top)) 12px 16px;
   gap: 4px;
   background: var(--sidebar-bg);
   backdrop-filter: blur(22px) saturate(150%);
@@ -302,11 +314,33 @@ textarea {
 }
 
 .sidebar-footer {
-  margin-top: auto;
-  padding-top: 12px;
+  flex-shrink: 0;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* 导航滚动区：内容多时只滚这里，底部速度卡永远可见 */
+.sidebar-nav {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 -6px;
+  padding: 0 6px 4px;
+  overscroll-behavior: contain;
+}
+.sidebar-nav::-webkit-scrollbar {
+  width: 6px;
+}
+.sidebar-nav::-webkit-scrollbar-thumb {
+  border-width: 1px;
 }
 
 /* 侧边栏速度卡片 */
@@ -350,12 +384,13 @@ textarea {
 }
 
 .header {
-  height: var(--header-h);
+  height: calc(var(--header-h) + var(--safe-top));
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 0 22px;
+  padding-top: var(--safe-top);
   border-bottom: 1px solid var(--border);
   background: var(--surface-glass);
   backdrop-filter: blur(20px) saturate(150%);
@@ -1095,11 +1130,85 @@ textarea {
 /* ═══════════ 设置页 ═══════════ */
 
 .settings {
-  max-width: 700px;
+  max-width: 760px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 22px;
   animation: cardIn 0.34s var(--ease-out);
+}
+
+/* 设置分组：一组一个语义区块，组内卡片按可用宽度自动分列 */
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.settings-group-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-left: 2px;
+  font-size: 11.5px;
+  font-weight: 750;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+  color: var(--text-mute);
+  user-select: none;
+}
+.settings-group-head svg {
+  width: 13px;
+  height: 13px;
+  opacity: 0.9;
+  color: var(--brand-1);
+}
+.settings-group-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+  margin-left: 4px;
+}
+.settings-group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+  align-items: start;
+  gap: 14px;
+}
+.settings-group-grid > .card-wide {
+  grid-column: 1 / -1;
+}
+
+/* 并排两栏字段（连接数 / 并发数、代理账号密码） */
+.field-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.proxy-row {
+  display: grid;
+  grid-template-columns: 108px minmax(0, 1fr) 84px;
+  gap: 8px;
+}
+
+/* 分类编辑行：宽屏一行排开，窄屏自动堆叠，避免输入框被挤成一条 */
+.cat-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1.1fr) 32px;
+  gap: 6px;
+  align-items: center;
+}
+@media (max-width: 700px) {
+  .cat-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 30px;
+  }
+  .cat-row > input:nth-child(3),
+  .cat-row > input:nth-child(4) {
+    grid-column: span 1;
+  }
+  .cat-row > .icon-btn {
+    grid-column: 3;
+    grid-row: 1;
+  }
 }
 
 .card {
@@ -1223,8 +1332,8 @@ textarea {
     transition: transform 0.34s var(--ease);
     background: var(--bg-elev);
     box-shadow: var(--shadow-lg);
-    padding-top: max(16px, env(safe-area-inset-top));
-    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    padding-top: calc(16px + var(--safe-top));
+    padding-bottom: calc(16px + var(--safe-bottom));
     border-right: 1px solid var(--border-strong);
   }
   .sidebar.open {
@@ -1243,8 +1352,8 @@ textarea {
   }
   .header {
     padding: 0 10px 0 14px;
-    padding-top: env(safe-area-inset-top);
-    height: calc(var(--header-h) + env(safe-area-inset-top));
+    padding-top: var(--safe-top);
+    height: calc(var(--header-h) + var(--safe-top));
     gap: 8px;
   }
   /* 移动端隐藏 header 里的次要按钮，让标题和主操作有空间 */
@@ -1255,7 +1364,7 @@ textarea {
     font-size: 15px;
   }
   .content {
-    padding: 12px 12px max(22px, env(safe-area-inset-bottom));
+    padding: 12px 12px calc(22px + var(--safe-bottom));
   }
   .task-card {
     padding: 11px 12px;
@@ -1302,7 +1411,7 @@ textarea {
     display: inline-flex;
     position: fixed;
     right: 16px;
-    bottom: max(20px, env(safe-area-inset-bottom));
+    bottom: calc(20px + var(--safe-bottom));
     z-index: 60;
     width: 54px;
     height: 54px;
@@ -1323,7 +1432,7 @@ textarea {
     height: 23px;
   }
   .toast-wrap {
-    bottom: max(84px, calc(env(safe-area-inset-bottom) + 84px));
+    bottom: calc(84px + var(--safe-bottom));
   }
   .settings {
     max-width: none;
@@ -1639,7 +1748,7 @@ textarea {
 @media (min-width: 600px) and (max-width: 820px) {
   .sidebar {
     width: min(76vw, 320px);
-    padding: 18px 14px max(16px, env(safe-area-inset-bottom));
+    padding: 18px 14px calc(16px + var(--safe-bottom));
   }
   .sidebar .nav-item {
     padding: 11px 12px;
@@ -1650,7 +1759,7 @@ textarea {
     padding-right: max(14px, env(safe-area-inset-right));
   }
   .content {
-    padding: 16px max(20px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom))
+    padding: 16px max(20px, env(safe-area-inset-right)) calc(28px + var(--safe-bottom))
       max(20px, env(safe-area-inset-left));
   }
   .task-list {
@@ -1675,10 +1784,10 @@ textarea {
     width: 58px;
     height: 58px;
     right: max(24px, env(safe-area-inset-right));
-    bottom: max(24px, env(safe-area-inset-bottom));
+    bottom: calc(24px + var(--safe-bottom));
   }
   .toast-wrap {
-    bottom: max(96px, calc(env(safe-area-inset-bottom) + 96px));
+    bottom: calc(96px + var(--safe-bottom));
   }
   .settings {
     max-width: none;
@@ -1714,16 +1823,11 @@ textarea {
   }
 }
 
-/* 大屏平板 / 桌面：设置页与抓取页两列，宽卡片独占整行 */
+/* 大屏平板 / 桌面：设置页分组内并排两列，抓取页两列 */
 @media (min-width: 860px) {
   .settings {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-items: start;
-    gap: 14px;
     max-width: 1080px;
   }
-  .settings > .card-wide,
   .settings-save {
     grid-column: 1 / -1;
   }
@@ -1744,6 +1848,6 @@ textarea {
   z-index: 5;
   display: flex;
   gap: 8px;
-  padding: 12px 0 max(12px, env(safe-area-inset-bottom));
+  padding: 12px 0 calc(12px + var(--safe-bottom));
   background: linear-gradient(to top, var(--bg) 55%, transparent);
 }

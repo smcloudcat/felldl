@@ -406,81 +406,87 @@ export default function App() {
           </div>
         </div>
 
-        <div className="nav-section">{t("nav.downloads")}</div>
-        {FILTERS.map(({ key, label, icon: Icon }) => (
-          <button
-            key={key}
-            className={cx("nav-item", view === "downloads" && filter === key && "active")}
-            onClick={() => {
-              setView("downloads");
-              setFilter(key);
-              setSidebarOpen(false);
-            }}
-          >
-            <Icon />
-            {label}
-            {stats.counts[key] > 0 && <span className="nav-count">{stats.counts[key]}</span>}
-          </button>
-        ))}
-
-        {(settings.categories?.length ?? 0) > 0 && (
-          <>
-            <div className="nav-section">{t("set.categories")}</div>
+        {/* 导航区可滚动，底部速度卡始终固定可见 */}
+        <nav className="sidebar-nav">
+          <div className="nav-section">{t("nav.downloads")}</div>
+          {FILTERS.map(({ key, label, icon: Icon }) => (
             <button
-              className={cx("nav-item", view === "downloads" && category === null && filter === "all" && "active")}
+              key={key}
+              className={cx("nav-item", view === "downloads" && filter === key && "active")}
               onClick={() => {
                 setView("downloads");
-                setCategory(null);
-                setFilter("all");
+                setFilter(key);
                 setSidebarOpen(false);
               }}
             >
-              <IconDownload />
-              {t("filter.all")}
+              <Icon />
+              {label}
+              {stats.counts[key] > 0 && <span className="nav-count">{stats.counts[key]}</span>}
             </button>
-            {settings.categories.map((c) => {
-              const count = tasks.filter((t) => t.category === c.name).length;
-              return (
-                <button
-                  key={c.name}
-                  className={cx("nav-item", view === "downloads" && category === c.name && "active")}
-                  onClick={() => {
-                    setView("downloads");
-                    setCategory(c.name);
-                    setFilter("all");
-                    setSidebarOpen(false);
-                  }}
-                >
-                  <IconFolder />
-                  {c.name}
-                  {count > 0 && <span className="nav-count">{count}</span>}
-                </button>
-              );
-            })}
-          </>
-        )}
+          ))}
 
-        <div className="nav-section">{t("nav.tools")}</div>
-        <button
-          className={cx("nav-item", view === "grab" && "active")}
-          onClick={() => {
-            setView("grab");
-            setSidebarOpen(false);
-          }}
-        >
-          <IconGlobe />
-          {t("nav.grab")}
-        </button>
-        <button
-          className={cx("nav-item", view === "settings" && "active")}
-          onClick={() => {
-            setView("settings");
-            setSidebarOpen(false);
-          }}
-        >
-          <IconSettings />
-          {t("nav.settings")}
-        </button>
+          {(settings.categories?.length ?? 0) > 0 && (
+            <>
+              <div className="nav-section">{t("set.categories")}</div>
+              <button
+                className={cx(
+                  "nav-item",
+                  view === "downloads" && category === null && filter === "all" && "active"
+                )}
+                onClick={() => {
+                  setView("downloads");
+                  setCategory(null);
+                  setFilter("all");
+                  setSidebarOpen(false);
+                }}
+              >
+                <IconDownload />
+                {t("filter.all")}
+              </button>
+              {settings.categories.map((c) => {
+                const count = tasks.filter((t) => t.category === c.name).length;
+                return (
+                  <button
+                    key={c.name}
+                    className={cx("nav-item", view === "downloads" && category === c.name && "active")}
+                    onClick={() => {
+                      setView("downloads");
+                      setCategory(c.name);
+                      setFilter("all");
+                      setSidebarOpen(false);
+                    }}
+                  >
+                    <IconFolder />
+                    {c.name}
+                    {count > 0 && <span className="nav-count">{count}</span>}
+                  </button>
+                );
+              })}
+            </>
+          )}
+
+          <div className="nav-section">{t("nav.tools")}</div>
+          <button
+            className={cx("nav-item", view === "grab" && "active")}
+            onClick={() => {
+              setView("grab");
+              setSidebarOpen(false);
+            }}
+          >
+            <IconGlobe />
+            {t("nav.grab")}
+          </button>
+          <button
+            className={cx("nav-item", view === "settings" && "active")}
+            onClick={() => {
+              setView("settings");
+              setSidebarOpen(false);
+            }}
+          >
+            <IconSettings />
+            {t("nav.settings")}
+          </button>
+        </nav>
 
         <div className="sidebar-footer">
           <div className="speed-card">
