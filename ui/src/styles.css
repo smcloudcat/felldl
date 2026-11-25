@@ -2050,3 +2050,97 @@ html.has-bg-image body::before {
   accent-color: var(--brand-1);
   cursor: pointer;
 }
+
+/* ── 关于卡：更新进度 / 链接入口 / 协议弹窗 ── */
+.update-progress {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.update-progress-track {
+  height: 6px;
+  border-radius: var(--r-full);
+  background: var(--track);
+  overflow: hidden;
+}
+.update-progress-bar {
+  height: 100%;
+  border-radius: var(--r-full);
+  background: var(--brand-grad);
+  transition: width 0.25s var(--ease);
+}
+.update-progress-text {
+  font-size: 11.5px;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+}
+
+.about-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.about-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--r-full);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  background: var(--panel);
+  color: var(--text-soft);
+  font-size: 12.2px;
+  font-weight: 600;
+  transition: color 0.16s, border-color 0.16s, transform 0.16s;
+}
+.about-link:hover {
+  color: var(--brand-1);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.about-link svg {
+  width: 13px;
+  height: 13px;
+  opacity: 0.85;
+}
+.about-link-url {
+  font-weight: 500;
+  color: var(--text-mute);
+  font-size: 11.5px;
+}
+
+/* 协议正文 */
+.legal-body {
+  gap: 16px;
+  max-height: 62vh;
+}
+.legal-heading {
+  font-size: 12.8px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.legal-text {
+  font-size: 12.6px;
+  line-height: 1.75;
+  color: var(--text-soft);
+}
+
+/* 没有 Content-Length 时的「不确定进度」：来回跑的滑块 */
+.update-progress-track.indeterminate .update-progress-bar {
+  width: 38%;
+  animation: indeterminate 1.25s var(--ease) infinite;
+}
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-105%);
+  }
+  100% {
+    transform: translateX(275%);
+  }
+}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Settings, UpdateInfo } from "./types";
-import { api } from "./bridge";
+import { api, subscribeUpdateProgress } from "./bridge";
 import { useI18n, setLang } from "./i18n";
 import {
   IconCopy,
@@ -18,9 +18,11 @@ import {
   IconDownload,
   IconZap,
   IconImage,
+  IconCode,
 } from "./icons";
 import { cx } from "./format";
 import { applyAppearance, forgetBackground, primeBackground } from "./appearance";
+import { PRIVACY, TERMS } from "./legal";
 
 interface Props {
   settings: Settings;
@@ -44,6 +46,23 @@ function Switch({
       type="button"
     />
   );
+}
+
+/** 从更新信息里挑出当前平台该装的包；资产列表为空（来自兜底源）时按发布命名规则拼地址 */
+export function pickUpdateAsset(info: UpdateInfo): { url: string; name: string } | null {
+  const ver = (info.latest_version || "").replace(/^v/, "").trim();
+  const android = document.documentElement.dataset.platform === "android";
+  const suffix = android ? "android-arm64.apk" : "win-x64.exe";
+  const hit = (info.assets || []).find(
+    (a) => a.download_url && a.name.toLowerCase().endsWith(suffix)
+  );
+  if (hit) return { url: hit.download_url, name: hit.name };
+  if (!ver) return null;
+  const name = `Felldl-${ver}-${suffix}`;
+  return {
+    url: `https://github.com/smcloudcat/felldl/releases/download/v${ver}/${name}`,
+    name,
+  };
 }
 
 /** 带数值回显的滑块（背景模糊 / 遮罩 / 面板透明度） */
@@ -97,6 +116,63 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   const [dnsTesting, setDnsTesting] = useState(false);
   const [dnsResult, setDnsResult] = useState<string | null>(null);
   const [bgBusy, setBgBusy] = useState(false);
+
+  // ── 应用内直接更新 ──
+  const [phase, setPhase] = useState<"idle" | "download" | "apply">("idle");
+  const updating = phase !== "idle";
+  const [percent, setPercent] = useState(0);
+  const [sizeHint, setSizeHint] = useState("");
+  // 有些 CDN 不给 Content-Length：此时不显示百分比，改走「不确定进度」样式
+  const [hasTotal, setHasTotal] = useState(false);
+  // 协议弹窗：null / privacy / terms
+  const [legal, setLegal] = useState<"privacy" | "terms" | null>(null);
+
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let dead = false;
+    subscribeUpdateProgress((p) => {
+      setPercent(p.percent || 0);
+      setHasTotal(p.total > 0);
+      if (p.total > 0) {
+        const mb = (n: number) => (n / 1024 / 1024).toFixed(1);
+        setSizeHint(`${mb(p.downloaded)} / ${mb(p.total)} MB`);
+      }
+    })
+      .then((f) => (dead ? f() : (un = f)))
+      .catch(() => {});
+    return () => {
+      dead = true;
+      un?.();
+    };
+  }, []);
+
+  async function instantUpdate() {
+    if (!updateInfo) return;
+    const asset = pickUpdateAsset(updateInfo);
+    if (!asset) {
+      toast(t("set.updateNoAsset"), "error");
+      return;
+    }
+    setPhase("download");
+    setPercent(0);
+    setSizeHint("");
+    setHasTotal(false);
+    try {
+      const path = await api.downloadUpdate(asset.url, asset.name);
+      setPhase("apply");
+      const mode = await api.applyUpdate(path);
+      // Windows 走「退出→覆盖→重启」，这一步之后进程就没了；
+      // 其它平台返回 opened / manual，提示用户手动确认安装
+      if (mode !== "restarting") {
+        setPhase("idle");
+        toast(t("set.manualInstall", { p: path }));
+      }
+    } catch (e: any) {
+      setPhase("idle");
+      setPercent(0);
+      toast(typeof e === "string" ? e : String(e?.message ?? e), "error");
+    }
+  }
 
   // ── 设置页锚点导航 ──
   const navGroups = [
@@ -277,6 +353,8 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   }
 
   const limitMB = Math.round((draft.global_speed_limit / 1024 / 1024) * 10) / 10;
+  // 协议文本随语言切换；未打开弹窗时也算好，省去 JSX 里判空
+  const doc = legal === "terms" ? TERMS[lang] : PRIVACY[lang];
 
   return (
     <div className="settings">
@@ -1070,7 +1148,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
           <div className="card-sub">{t("set.aboutSub", { v: updateInfo?.current_version ?? "…" })}</div>
 
           <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
-            <button className="btn btn-soft" onClick={checkUpdate} disabled={checking} type="button">
+            <button className="btn btn-soft" onClick={checkUpdate} disabled={checking || updating} type="button">
               {checking ? t("set.checking") : t("set.checkUpdate")}
             </button>
             {updateInfo && (
@@ -1086,46 +1164,96 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
               </span>
             )}
             {updateInfo?.has_update && (
-              <button
-                className="btn btn-primary"
-                onClick={() =>
-                  api.openUrl(updateInfo.release_url).catch(() => toast(t("upd.openFail"), "error"))
-                }
-                type="button"
-              >
-                {t("set.goDownload")}
-              </button>
-            )}
-            {updateErr && (
-              <div
-                style={{
-                  marginTop: 10,
-                  fontSize: 12,
-                  lineHeight: 1.6,
-                  color: "var(--accent-danger, #e5484d)",
-                  wordBreak: "break-word",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  flexWrap: "wrap",
-                }}
-              >
-                <span>⚠ {updateErr}</span>
-                {/* 查不到也能自己去看：直接打开 Release 页面 */}
+              <>
+                {/* 一键更新：下载更新包 → 替换当前程序并重启 */}
+                <button
+                  className="btn btn-primary"
+                  onClick={instantUpdate}
+                  disabled={updating}
+                  type="button"
+                  title={t("set.instantHint")}
+                >
+                  <IconZap size={13} />
+                  {updating
+                    ? phase === "apply"
+                      ? t("set.restarting")
+                      : t("set.updating")
+                    : t("set.instantUpdate")}
+                </button>
                 <button
                   className="btn btn-ghost btn-sm"
-                  type="button"
                   onClick={() =>
-                    api
-                      .openUrl("https://github.com/smcloudcat/felldl/releases")
-                      .catch(() => toast(t("upd.openFail"), "error"))
+                    api.openUrl(updateInfo.release_url).catch(() => toast(t("upd.openFail"), "error"))
                   }
+                  type="button"
                 >
-                  {t("set.openReleases")}
+                  {t("set.goDownload")}
                 </button>
-              </div>
+              </>
             )}
           </div>
+
+          {updateInfo?.has_update && !updating && (
+            <div className="field-hint" style={{ marginTop: 8 }}>
+              {t("set.updateHint")}
+            </div>
+          )}
+
+          {/* 下载进度 */}
+          {updating && (
+            <div className="update-progress">
+              <div className={cx("update-progress-track", phase === "download" && !hasTotal && "indeterminate")}>
+                <div
+                  className="update-progress-bar"
+                  style={
+                    phase === "apply" || hasTotal
+                      ? { width: `${phase === "apply" ? 100 : percent}%` }
+                      : undefined
+                  }
+                />
+              </div>
+              <div className="update-progress-text">
+                {phase === "apply"
+                  ? t("set.restarting")
+                  : [
+                      hasTotal ? `${percent.toFixed(1)}%` : t("set.updating"),
+                      sizeHint,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+              </div>
+            </div>
+          )}
+
+          {updateErr && (
+            <div
+              style={{
+                marginTop: 10,
+                fontSize: 12,
+                lineHeight: 1.6,
+                color: "var(--accent-danger, #e5484d)",
+                wordBreak: "break-word",
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                flexWrap: "wrap",
+              }}
+            >
+              <span>⚠ {updateErr}</span>
+              {/* 查不到也能自己去看：直接打开 Release 页面 */}
+              <button
+                className="btn btn-ghost btn-sm"
+                type="button"
+                onClick={() =>
+                  api
+                    .openUrl("https://github.com/smcloudcat/felldl/releases")
+                    .catch(() => toast(t("upd.openFail"), "error"))
+                }
+              >
+                {t("set.openReleases")}
+              </button>
+            </div>
+          )}
           {updateInfo?.has_update && updateInfo.notes && (
             <div
               style={{
@@ -1144,9 +1272,72 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
               {updateInfo.notes.slice(0, 1200)}
             </div>
           )}
+
+          {/* 博客 / 协议等入口 */}
+          <div className="about-links">
+            <button
+              type="button"
+              className="about-link"
+              onClick={() => api.openUrl("https://lwcat.cn").catch(() => toast(t("upd.openFail"), "error"))}
+            >
+              <IconGlobe size={13} />
+              {t("set.blog")}
+              <span className="about-link-url">lwcat.cn</span>
+            </button>
+            <button type="button" className="about-link" onClick={() => setLegal("privacy")}>
+              <IconShield size={13} />
+              {t("set.privacy")}
+            </button>
+            <button type="button" className="about-link" onClick={() => setLegal("terms")}>
+              <IconLayers size={13} />
+              {t("set.terms")}
+            </button>
+            <button
+              type="button"
+              className="about-link"
+              onClick={() =>
+                api
+                  .openUrl("https://github.com/smcloudcat/felldl")
+                  .catch(() => toast(t("upd.openFail"), "error"))
+              }
+            >
+              <IconCode size={13} />
+              {t("set.repo")}
+            </button>
+          </div>
         </div>
         </div>
       </section>
+
+      {legal && (
+        <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && setLegal(null)}>
+          <div className="dialog" role="dialog" aria-modal="true">
+            <div className="dialog-head">
+              <div style={{ flex: 1 }}>
+                <div className="dialog-title">{doc.title}</div>
+                <div className="dialog-desc">{t("set.legalUpdated", { d: doc.updated })}</div>
+              </div>
+              <button className="icon-btn" onClick={() => setLegal(null)} aria-label={t("dlg.close")}>
+                <IconX />
+              </button>
+            </div>
+            <div className="dialog-body legal-body">
+              {doc.sections.map((s, i) => (
+                <div key={i}>
+                  <div className="legal-heading">{s.heading}</div>
+                  <div className="legal-text">{s.body}</div>
+                </div>
+              ))}
+            </div>
+            <div className="dialog-foot">
+              <div className="spacer" />
+              <button className="btn btn-primary" onClick={() => setLegal(null)} type="button">
+                {t("set.legalClose")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* 保存栏 */}
       {dirty && (
         <div className="settings-save">

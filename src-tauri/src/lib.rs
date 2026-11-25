@@ -789,6 +789,19 @@ mod update_tests {
         assert_eq!(image_mime("x.unknown"), "image/png");
     }
 
+    /// 更新包文件名过滤：只留 basename，挡住路径穿越
+    #[test]
+    fn update_file_name_is_sanitized() {
+        use super::safe_file_name;
+        assert_eq!(safe_file_name("Felldl-0.3.8-win-x64.exe"), "Felldl-0.3.8-win-x64.exe");
+        assert_eq!(safe_file_name("../../evil/x.exe"), "x.exe");
+        assert_eq!(safe_file_name("..\\..\\windows\\system32\\y.exe"), "y.exe");
+        assert_eq!(safe_file_name("a b@c.exe"), "a_b_c.exe");
+        // 全是点 / 空名不能当文件名用，退回固定名
+        assert_eq!(safe_file_name("..."), "felldl-update.bin");
+        assert_eq!(safe_file_name(""), "felldl-update.bin");
+    }
+
     /// 实测 ETag 复用：第二次带 If-None-Match 应拿到 304（不消耗配额）
     #[tokio::test]
     async fn if_none_match_returns_304() {
@@ -1082,6 +1095,162 @@ async fn clear_background(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ───────────────────────── 应用内直接更新 ─────────────────────────
+// 更新包只有便携 exe / apk，没有安装器：
+//   1. download_update 把新版本下载到应用数据目录，边下边发进度事件
+//   2. apply_update（Windows）写一个延迟脚本：等本进程退出 → 覆盖旧 exe → 启动新 exe
+//      （运行中的 exe 无法直接覆盖，所以必须借「退出后再拷贝」这一步）
+
+#[derive(Clone, serde::Serialize)]
+struct UpdateProgress {
+    downloaded: u64,
+    total: u64,
+    percent: f64,
+}
+
+/// 只取文件名部分并过滤危险字符，防止路径穿越
+fn safe_file_name(name: &str) -> String {
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .trim();
+    let cleaned: String = base
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() || cleaned.starts_with('.') {
+        "felldl-update.bin".into()
+    } else {
+        cleaned
+    }
+}
+
+#[tauri::command]
+async fn download_update(
+    app: tauri::AppHandle,
+    url: String,
+    file_name: String,
+) -> Result<String, String> {
+    if !url.starts_with("https://") {
+        return Err("更新地址必须是 https".into());
+    }
+    let dir = data_dir(&app).join("updates");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("创建更新目录失败: {e}"))?;
+    let path = dir.join(safe_file_name(&file_name));
+
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("Felldl/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("创建下载客户端失败: {e}"))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("连接更新源失败: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("更新源返回 HTTP {}", resp.status().as_u16()));
+    }
+    let total = resp.content_length().unwrap_or(0);
+
+    let mut file = tokio::fs::File::create(&path)
+        .await
+        .map_err(|e| format!("创建文件失败: {e}"))?;
+    let mut downloaded: u64 = 0;
+    let mut last_emit = std::time::Instant::now();
+    let mut resp = resp;
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("下载中断: {e}"))? {
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            .await
+            .map_err(|e| format!("写入失败: {e}"))?;
+        downloaded += chunk.len() as u64;
+        // 200ms 节流：进度条够顺滑，又不至于刷爆事件总线
+        if last_emit.elapsed().as_millis() >= 200 || downloaded == total {
+            last_emit = std::time::Instant::now();
+            let _ = app.emit(
+                "update://progress",
+                UpdateProgress {
+                    downloaded,
+                    total,
+                    percent: if total > 0 {
+                        (downloaded as f64 / total as f64 * 100.0).min(100.0)
+                    } else {
+                        0.0
+                    },
+                },
+            );
+        }
+    }
+    tokio::io::AsyncWriteExt::flush(&mut file)
+        .await
+        .map_err(|e| format!("写入失败: {e}"))?;
+    drop(file);
+
+    // 有些 CDN 走 chunked、没有 Content-Length：结尾补一发，前端才知道已经下完
+    let _ = app.emit(
+        "update://progress",
+        UpdateProgress {
+            downloaded,
+            total: total.max(downloaded),
+            percent: 100.0,
+        },
+    );
+
+    if total > 0 && downloaded < total {
+        return Err(format!("下载不完整（{downloaded}/{total} 字节）"));
+    }
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// 应用更新：Windows 走「延迟脚本覆盖 + 重启」，其它平台交给系统安装
+#[tauri::command]
+async fn apply_update(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    if !std::path::Path::new(&path).exists() {
+        return Err("更新包不存在，请重新下载".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let exe = std::env::current_exe().map_err(|e| format!("定位当前程序失败: {e}"))?;
+        let bat = data_dir(&app).join("apply-update.cmd");
+        // timeout 等待本进程退出；copy 失败（比如装在 Program Files）就直接跑新文件
+        let script = format!(
+            "@echo off\r\n\
+             chcp 65001 >nul\r\n\
+             timeout /t 2 /nobreak >nul\r\n\
+             copy /y \"{new}\" \"{old}\" >nul 2>&1\r\n\
+             if exist \"{old}\" (start \"\" \"{old}\") else (start \"\" \"{new}\")\r\n\
+             del /f /q \"%~f0\" >nul 2>&1\r\n",
+            new = path,
+            old = exe.to_string_lossy()
+        );
+        std::fs::write(&bat, script).map_err(|e| format!("写入更新脚本失败: {e}"))?;
+        std::process::Command::new("cmd")
+            .args(["/C", &bat.to_string_lossy().to_string()])
+            .spawn()
+            .map_err(|e| format!("启动更新程序失败: {e}"))?;
+        app.exit(0);
+        Ok("restarting".into())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 安卓：调起系统安装器；失败就让用户自己去文件管理器点安装
+        use tauri_plugin_opener::OpenerExt;
+        match app.opener().open_path(&path, None::<&str>) {
+            Ok(_) => Ok("opened".into()),
+            Err(_) => Ok("manual".into()),
+        }
+    }
+}
+
 fn open_path(_path: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -1327,6 +1496,8 @@ pub fn run() {
             read_background,
             clear_background,
             check_update,
+            download_update,
+            apply_update,
             open_url,
             analyze_url,
             grab_site,

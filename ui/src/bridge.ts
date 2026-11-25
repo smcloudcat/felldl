@@ -67,6 +67,11 @@ export const api = {
   checkUpdate: (force?: boolean) =>
     invoke("check_update", { force: force ?? false }) as Promise<UpdateInfo>,
   openUrl: (url: string) => invoke("open_url", { url }) as Promise<void>,
+
+  // 应用内直接更新：下载更新包（进度走 update://progress 事件）→ 应用并重启
+  downloadUpdate: (url: string, fileName: string) =>
+    invoke("download_update", { url, fileName }) as Promise<string>,
+  applyUpdate: (path: string) => invoke("apply_update", { path }) as Promise<string>,
   setTaskSpeedLimit: (id: string, limit: number) =>
     invoke("set_task_speed_limit", { id, limit }) as Promise<void>,
 
@@ -105,4 +110,17 @@ export const api = {
 /** 订阅引擎事件 */
 export function subscribe(cb: (e: EngineEvent) => void): Promise<UnlistenFn> {
   return listen<EngineEvent>("engine://event", (evt) => cb(evt.payload));
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  total: number;
+  percent: number;
+}
+
+/** 订阅更新包下载进度 */
+export function subscribeUpdateProgress(
+  cb: (p: UpdateProgress) => void
+): Promise<UnlistenFn> {
+  return listen<UpdateProgress>("update://progress", (evt) => cb(evt.payload));
 }

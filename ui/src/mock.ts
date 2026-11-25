@@ -6,10 +6,26 @@
  */
 import type { AddTaskRequest, Settings, Task } from "./types";
 
-const listeners = new Set<(e: { payload: any }) => void>();
+type Listener = (e: { payload: any }) => void;
+const listeners = new Map<string, Set<Listener>>();
 
+function listenersOf(evt: string) {
+  let set = listeners.get(evt);
+  if (!set) {
+    set = new Set();
+    listeners.set(evt, set);
+  }
+  return set;
+}
+
+/** 引擎事件（App 订阅的是 engine://event） */
 function emit(payload: any) {
-  listeners.forEach((cb) => cb({ payload }));
+  listenersOf("engine://event").forEach((cb) => cb({ payload }));
+}
+
+/** 按事件名发事件（更新包下载进度等） */
+function emitEvent(evt: string, payload: any) {
+  listenersOf(evt).forEach((cb) => cb({ payload }));
 }
 
 let counter = 0;
@@ -246,6 +262,38 @@ export const mockEngine = {
         return { ...settings };
       case "pick_folder":
         return "/Users/you/Downloads";
+      case "check_update":
+        // 预览模式固定返回「有新版本」，方便看更新按钮与进度条
+        return {
+          current_version: "0.3.7",
+          latest_version: "0.3.9",
+          has_update: true,
+          release_url: "https://github.com/smcloudcat/felldl/releases",
+          notes: "预览模式：这是假的更新说明，真机里会显示 Release 正文。",
+          published_at: "2026-11-25T00:00:00Z",
+          assets: [
+            {
+              name: "Felldl-0.3.9-win-x64.exe",
+              download_url: "https://example.invalid/Felldl-0.3.9-win-x64.exe",
+              size: 11000000,
+            },
+          ],
+        };
+      case "download_update": {
+        const total = 11000000;
+        for (let i = 1; i <= 10; i++) {
+          await new Promise((r) => setTimeout(r, 120));
+          emitEvent("update://progress", {
+            downloaded: (total / 10) * i,
+            total,
+            percent: i * 10,
+          });
+        }
+        return "/tmp/Felldl-0.3.9-win-x64.exe";
+      }
+      case "apply_update":
+        // 预览模式不重启，走「已下载，请手动安装」分支
+        return "manual";
       case "save_background":
         // 浏览器预览模式不落盘，直接回一个假路径
         return "/mock/bg-" + Date.now() + "." + (args?.ext || "png");
@@ -267,8 +315,9 @@ export const mockEngine = {
         return null;
     }
   },
-  async listen(_evt: string, cb: (e: { payload: any }) => void) {
-    listeners.add(cb);
-    return () => listeners.delete(cb);
+  async listen(evt: string, cb: (e: { payload: any }) => void) {
+    const set = listenersOf(evt);
+    set.add(cb);
+    return () => set.delete(cb);
   },
 };
