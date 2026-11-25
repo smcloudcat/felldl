@@ -140,9 +140,13 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
     setChecking(true);
     setUpdateErr(null);
     try {
-      const info = await api.checkUpdate();
+      // force=true：用户主动点击时不用 10 分钟的本地缓存；
+      // 底层带 ETag，内容没变时 GitHub 返回 304，不消耗调用配额
+      const info = await api.checkUpdate(true);
       setUpdateInfo(info);
-      if (info?.has_update) {
+      if (info?.note) {
+        toast(info.note);
+      } else if (info?.has_update) {
         toast(t("set.newFound", { v: info.latest_version }));
       } else {
         toast(t("set.latest", { v: info?.current_version ?? "…" }));
@@ -863,6 +867,11 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
                   : t("set.latestRemote", { v: updateInfo.latest_version || "-" })}
               </span>
             )}
+            {updateInfo?.note && (
+              <span style={{ fontSize: 11.5, color: "var(--text-mute)", opacity: 0.85 }}>
+                · {updateInfo.note}
+              </span>
+            )}
             {updateInfo?.has_update && (
               <button
                 className="btn btn-primary"
@@ -882,9 +891,25 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
                   lineHeight: 1.6,
                   color: "var(--accent-danger, #e5484d)",
                   wordBreak: "break-word",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  flexWrap: "wrap",
                 }}
               >
-                ⚠ {updateErr}
+                <span>⚠ {updateErr}</span>
+                {/* 查不到也能自己去看：直接打开 Release 页面 */}
+                <button
+                  className="btn btn-ghost btn-sm"
+                  type="button"
+                  onClick={() =>
+                    api
+                      .openUrl("https://github.com/smcloudcat/felldl/releases")
+                      .catch(() => toast(t("upd.openFail"), "error"))
+                  }
+                >
+                  {t("set.openReleases")}
+                </button>
               </div>
             )}
           </div>

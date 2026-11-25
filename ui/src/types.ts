@@ -151,4 +151,6 @@ export interface UpdateInfo {
   notes: string;
   published_at: string;
   assets: UpdateAsset[];
+  /** 结果来自缓存或降级来源时的说明（正常联网查询时不返回） */
+  note?: string;
 }

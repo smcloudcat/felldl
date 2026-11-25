@@ -63,7 +63,9 @@ export const api = {
 
   getApiInfo: () =>
     invoke("get_api_info") as Promise<{ port: number; token: string; running: boolean }>,
-  checkUpdate: () => invoke("check_update") as Promise<UpdateInfo>,
+  // force=true 时忽略本地缓存直接问 GitHub（带 ETag，内容没变不消耗配额）
+  checkUpdate: (force?: boolean) =>
+    invoke("check_update", { force: force ?? false }) as Promise<UpdateInfo>,
   openUrl: (url: string) => invoke("open_url", { url }) as Promise<void>,
   setTaskSpeedLimit: (id: string, limit: number) =>
     invoke("set_task_speed_limit", { id, limit }) as Promise<void>,
