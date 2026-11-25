@@ -265,7 +265,7 @@ export const mockEngine = {
       case "check_update":
         // 预览模式固定返回「有新版本」，方便看更新按钮与进度条
         return {
-          current_version: "0.3.7",
+          current_version: "0.3.8",
           latest_version: "0.3.9",
           has_update: true,
           release_url: "https://github.com/smcloudcat/felldl/releases",

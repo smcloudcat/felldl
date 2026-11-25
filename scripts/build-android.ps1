@@ -1,9 +1,10 @@
-# Felldl Android APK 一键构建脚本
+﻿# Felldl Android APK 一键构建脚本
 #
 # 用法：
 #   .\scripts\build-android.ps1                # debug APK（含调试符号，体积大，便于排查）
 #   .\scripts\build-android.ps1 -Release       # release APK（已签名，体积小，适合分发）
 #   .\scripts\build-android.ps1 -Abi armv7     # 构建 armv7（32 位老机型）
+#   .\scripts\build-android.ps1 -Release -Abi x86_64   # 模拟器用 x86_64 包
 #
 # 前置：先运行 .\scripts\setup-android.ps1
 #
@@ -15,7 +16,7 @@
 
 param(
     [switch]$Release,
-    [ValidateSet("arm64", "armv7")]
+    [ValidateSet("arm64", "armv7", "x86_64")]
     [string]$Abi = "arm64"
 )
 
@@ -54,10 +55,12 @@ if ((Test-Path $cargoBin) -and ($env:Path -notlike "*$cargoBin*")) {
     $env:Path = "$cargoBin;$env:Path"
 }
 
-foreach ($tool in @("cargo", "cargo-ndk")) {
-    try { & $tool --version | Out-Null } catch {
-        Write-Host "[!] 缺少 $tool" -ForegroundColor Red
-        if ($tool -eq "cargo-ndk") { Write-Host "    请运行： cargo install cargo-ndk" -ForegroundColor Yellow }
+# cargo-ndk 是 cargo 子命令：直接执行 cargo-ndk.exe 会以退出码 1 报「只能通过 cargo ndk 调用」
+foreach ($check in @(@("cargo", "cargo --version"), @("cargo-ndk", "cargo ndk --version"))) {
+    Invoke-Expression $check[1] *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[!] 缺少 $($check[0])" -ForegroundColor Red
+        if ($check[0] -eq "cargo-ndk") { Write-Host "    请运行： cargo install cargo-ndk" -ForegroundColor Yellow }
         exit 1
     }
 }
@@ -66,6 +69,7 @@ foreach ($tool in @("cargo", "cargo-ndk")) {
 $abiMap = @{
     "arm64" = @{ RustTarget = "arm64-v8a"; GradleFlavor = "Arm64"; RustArch = "aarch64" }
     "armv7" = @{ RustTarget = "armeabi-v7a"; GradleFlavor = "Arm"; RustArch = "armv7" }
+    "x86_64" = @{ RustTarget = "x86_64"; GradleFlavor = "X86_64"; RustArch = "x86_64" }
 }
 $cfg = $abiMap[$Abi]
 Write-Host "[OK] 目标 ABI: $($cfg.RustTarget)" -ForegroundColor Green
@@ -87,11 +91,21 @@ try {
 
 # ── 5. 编译 Rust .so 并输出到 jniLibs ────────────────────
 $jniDir = "src-tauri\gen\android\app\src\main\jniLibs"
-$profileArgs = if ($Release) { @("--release") } else { @() }
 $profileLabel = if ($Release) { "release" } else { "debug" }
 Write-Host "[..] 编译 Rust（$profileLabel, $($cfg.RustTarget)）..." -ForegroundColor Yellow
-cargo ndk -t $cfg.RustTarget -o $jniDir build @profileArgs -p felldl
-if ($LASTEXITCODE -ne 0) { Write-Host "[!] Rust 编译失败" -ForegroundColor Red; exit 1 }
+# --platform 24：NDK r26+ 默认 minSdk 更高，不显式指定会出现 getifaddrs 未定义
+# 参数用数组一次性拼好再 splat：散着写 @var 在 PowerShell 5.1 下会被拆坏
+$rustArgs = @("ndk", "--platform", "24", "-t", $cfg.RustTarget, "-o", $jniDir, "build")
+if ($Release) { $rustArgs += @("--release", "--features", "custom-protocol") }
+$rustArgs += @("-p", "felldl")
+# PowerShell 5.1 会把原生命令写到 stderr 的正常日志当成 NativeCommandError；
+# 这里临时放宽，失败仍以 $LASTEXITCODE 判定
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& cargo @rustArgs
+$rustExit = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+if ($rustExit -ne 0) { Write-Host "[!] Rust 编译失败" -ForegroundColor Red; exit 1 }
 
 # ── 6. release 签名准备 ──────────────────────────────────
 if ($Release) {
@@ -114,6 +128,8 @@ $skipTask = "rustBuild$($cfg.GradleFlavor)$(if ($Release) { 'Release' } else { '
 Write-Host "[..] Gradle 打包：$gradleTask ..." -ForegroundColor Yellow
 
 Push-Location "src-tauri\gen\android"
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 try {
     .\gradlew.bat $gradleTask `
         "-PabiList=$($cfg.RustTarget)" `
@@ -122,7 +138,7 @@ try {
         "-x" $skipTask `
         --no-daemon --no-configuration-cache
     $gradleOk = ($LASTEXITCODE -eq 0)
-} finally { Pop-Location }
+} finally { $ErrorActionPreference = $prevEap; Pop-Location }
 
 if (-not $gradleOk) { Write-Host "[!] Gradle 构建失败，请检查上方日志" -ForegroundColor Red; exit 1 }
 

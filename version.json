@@ -1,6 +1,6 @@
 {
-  "version": "0.3.7",
-  "release_url": "https://github.com/smcloudcat/felldl/releases/tag/v0.3.7",
-  "published_at": "2026-11-25T05:10:00Z",
-  "notes": "修复检查更新在 GitHub API 限额时报 403：加本地缓存与 ETag，并提供 Releases 订阅 / version.json 两级兜底。"
+  "version": "0.3.8",
+  "release_url": "https://github.com/smcloudcat/felldl/releases/tag/v0.3.8",
+  "published_at": "2026-11-25T08:30:00Z",
+  "notes": "外观支持自定义背景图与磨砂参数，设置页新增锚点导航；关于页支持应用内直接更新（下载即替换重启），并内置博客入口、隐私条款与用户协议。"
 }
