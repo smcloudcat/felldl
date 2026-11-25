@@ -1614,3 +1614,136 @@ textarea {
   background: var(--brand-grad-soft);
   color: var(--brand-1);
 }
+
+/* ════════════════ 平板适配 ════════════════
+   竖屏平板（600~820dp）走抽屉导航但要吃满屏宽、双列卡片；
+   横屏平板（821~1180dp）侧栏收窄、内容双列自适应；
+   设置页 / 抓取页在 ≥860dp 时排成两列。 */
+
+/* 横屏：避开刘海与手势条的安全区 */
+@media (orientation: landscape) {
+  .header {
+    padding-left: max(22px, env(safe-area-inset-left));
+    padding-right: max(22px, env(safe-area-inset-right));
+  }
+  .content {
+    padding-left: max(22px, env(safe-area-inset-left));
+    padding-right: max(22px, env(safe-area-inset-right));
+  }
+  .sidebar {
+    padding-left: max(12px, env(safe-area-inset-left));
+  }
+}
+
+/* 竖屏平板 / 大屏手机：仍是移动布局，但用满屏宽并双列排卡片 */
+@media (min-width: 600px) and (max-width: 820px) {
+  .sidebar {
+    width: min(76vw, 320px);
+    padding: 18px 14px max(16px, env(safe-area-inset-bottom));
+  }
+  .sidebar .nav-item {
+    padding: 11px 12px;
+    font-size: 14px;
+  }
+  .header {
+    padding-left: max(18px, env(safe-area-inset-left));
+    padding-right: max(14px, env(safe-area-inset-right));
+  }
+  .content {
+    padding: 16px max(20px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom))
+      max(20px, env(safe-area-inset-left));
+  }
+  .task-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    align-items: start;
+  }
+  .task-card {
+    padding: 13px 15px;
+  }
+  .task-name {
+    font-size: 13.6px;
+  }
+  .dialog {
+    max-width: 620px;
+  }
+  .dialog.wide {
+    max-width: 720px;
+  }
+  .btn-primary.mobile-fab {
+    width: 58px;
+    height: 58px;
+    right: max(24px, env(safe-area-inset-right));
+    bottom: max(24px, env(safe-area-inset-bottom));
+  }
+  .toast-wrap {
+    bottom: max(96px, calc(env(safe-area-inset-bottom) + 96px));
+  }
+  .settings {
+    max-width: none;
+  }
+}
+
+/* 横屏平板：侧栏收窄，任务卡按可用宽度自动分列 */
+@media (min-width: 821px) and (max-width: 1180px) {
+  :root {
+    --sidebar-w: 216px;
+  }
+  .sidebar {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  .task-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 12px;
+    align-items: start;
+  }
+  /* 平板多为触屏：操作按钮放大到易点范围 */
+  .task-actions .icon-btn {
+    width: 32px;
+    height: 32px;
+  }
+  .task-actions {
+    gap: 2px;
+  }
+  .settings,
+  .grab-page {
+    max-width: 100%;
+  }
+}
+
+/* 大屏平板 / 桌面：设置页与抓取页两列，宽卡片独占整行 */
+@media (min-width: 860px) {
+  .settings {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    gap: 14px;
+    max-width: 1080px;
+  }
+  .settings > .card-wide,
+  .settings-save {
+    grid-column: 1 / -1;
+  }
+  .grab-page {
+    display: grid;
+    /* auto-fit：只有表单时占满整行，出现结果卡后自动并排两列 */
+    grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr));
+    align-items: start;
+    gap: 14px;
+    max-width: 1180px;
+  }
+}
+
+/* 设置页保存栏（原先写在行内样式里，抽出来方便平板跨列） */
+.settings-save {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  gap: 8px;
+  padding: 12px 0 max(12px, env(safe-area-inset-bottom));
+  background: linear-gradient(to top, var(--bg) 55%, transparent);
+}

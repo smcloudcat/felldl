@@ -451,7 +451,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       </div>
 
       {/* 下载分类 */}
-      <div className="card">
+      <div className="card card-wide">
         <div className="card-head">
           <div className="card-icon">
             <IconFolder size={15} />
@@ -794,7 +794,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       </div>
 
       {/* 关于与更新 */}
-      <div className="card">
+      <div className="card card-wide">
         <div className="card-head">
           <div className="card-icon">
             <IconGlobe size={15} />
@@ -861,16 +861,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
 
       {/* 保存栏 */}
       {dirty && (
-        <div
-          style={{
-            position: "sticky",
-            bottom: 0,
-            display: "flex",
-            gap: 8,
-            padding: "12px 0",
-            background: "linear-gradient(to top, var(--bg) 55%, transparent)",
-          }}
-        >
+        <div className="settings-save">
           <div className="spacer" style={{ flex: 1 }} />
           <button className="btn btn-ghost" onClick={() => setDraft(settings)}>
             {t("set.discard")}
