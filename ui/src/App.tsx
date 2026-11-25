@@ -45,6 +45,8 @@ export default function App() {
   const [filter, setFilter] = useState<FilterKey>("all");
   const [category, setCategory] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
+  // 删除确认：仅移除任务 / 连文件一起删
+  const [delTarget, setDelTarget] = useState<Task | null>(null);
   // 稳定回调：进度更新重渲染不会让 NewTaskDialog 重挂 / 重新抢焦点
   const closeNew = useCallback(() => setShowNew(false), []);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -296,16 +298,22 @@ export default function App() {
     [toast]
   );
 
-  const handleRemove = useCallback(
-    async (id: string) => {
+  // 删除默认保留文件；用户点「连同文件」时才真正删盘
+  const handleRemove = useCallback((task: Task) => setDelTarget(task), []);
+
+  const confirmRemove = useCallback(
+    async (deleteFile: boolean) => {
+      const task = delTarget;
+      if (!task) return;
+      setDelTarget(null);
       try {
-        await api.remove(id, false);
-        toast(t("act.taskRemoved"));
+        await api.remove(task.id, deleteFile);
+        toast(deleteFile ? t("act.taskAndFileRemoved") : t("act.taskRemoved"));
       } catch (e) {
         toast(String(e), "error");
       }
     },
-    [toast, t]
+    [delTarget, toast, t]
   );
 
   const handleOpen = useCallback(
@@ -642,6 +650,14 @@ export default function App() {
         </button>
       )}
 
+      {delTarget && (
+        <DeleteDialog
+          task={delTarget}
+          onCancel={() => setDelTarget(null)}
+          onRemove={confirmRemove}
+        />
+      )}
+
       {showNew && (
         <NewTaskDialog
           settings={settings}
@@ -657,6 +673,60 @@ export default function App() {
             {t.msg}
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/** 删除任务确认：只删记录，还是连本地文件（含未下完的半成品）一起删 */
+function DeleteDialog({
+  task,
+  onCancel,
+  onRemove,
+}: {
+  task: Task;
+  onCancel: () => void;
+  onRemove: (deleteFile: boolean) => void;
+}) {
+  const { t } = useI18n();
+  const done = task.state === "completed";
+  return (
+    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onCancel()}>
+      <div className="dialog del-dialog" role="dialog" aria-modal="true">
+        <div className="dialog-head">
+          <div className="del-icon">
+            <IconTrash size={17} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div className="dialog-title">{t("del.title")}</div>
+            <div className="dialog-desc">
+              {done ? t("del.descDone") : t("del.descPartial")}
+            </div>
+          </div>
+        </div>
+        <div className="dialog-body">
+          <div className="del-file">
+            <div className="del-file-name" title={task.file_name}>
+              {task.file_name}
+            </div>
+            <div className="del-file-path" title={task.save_path}>
+              {task.save_path}
+            </div>
+          </div>
+          {!done && <div className="field-hint warn">{t("del.partialHint")}</div>}
+        </div>
+        <div className="dialog-foot">
+          <button className="btn" type="button" onClick={onCancel}>
+            {t("dlg.cancel")}
+          </button>
+          <div className="spacer" />
+          <button className="btn" type="button" onClick={() => onRemove(false)}>
+            {t("del.keepFile")}
+          </button>
+          <button className="btn btn-danger" type="button" onClick={() => onRemove(true)}>
+            {t("del.withFile")}
+          </button>
+        </div>
       </div>
     </div>
   );

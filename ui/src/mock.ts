@@ -146,6 +146,9 @@ let settings: Settings = {
   ui_blur: 18,
   ui_dim: 32,
   ui_glass: 78,
+  mirror_enabled: false,
+  mirror_mode: "auto",
+  mirror_custom: "",
 };
 
 // 每 400ms 推进下载进度
@@ -262,10 +265,18 @@ export const mockEngine = {
         return { ...settings };
       case "pick_folder":
         return "/Users/you/Downloads";
+      case "app_version":
+        return "0.3.8";
+      case "all_files_access":
+        return true;
+      case "request_all_files_access":
+        return null;
+      case "dir_writable":
+        return true;
       case "check_update":
         // 预览模式固定返回「有新版本」，方便看更新按钮与进度条
         return {
-          current_version: "0.3.8",
+          current_version: "0.3.9",
           latest_version: "0.3.9",
           has_update: true,
           release_url: "https://github.com/smcloudcat/felldl/releases",

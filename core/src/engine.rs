@@ -400,6 +400,37 @@ impl Engine {
             Err(e) => {
                 // 探测失败也建任务，标记错误便于用户重试
                 let mut t = self.build_task(&req, ProbeInfo::default(), &s);
+                // 直连不通但开了镜像：用镜像的探测结果兜底建任务，
+                // 否则「镜像加速」恰好在最需要它的时候用不上。
+                if s.mirror_enabled {
+                    let cands = crate::mirror::candidates(&t.url, &s);
+                    let hits = self
+                        .probe_mirrors(
+                            cands,
+                            req.referer.as_deref(),
+                            req.cookie.as_deref(),
+                            (req.username.as_deref(), req.password.as_deref()),
+                        )
+                        .await;
+                    if let Some((_, info)) = hits.first() {
+                        t.size = info.size;
+                        t.etag = info.etag.clone();
+                        t.supports_range = info.supports_range;
+                        t.mirrors = hits.into_iter().map(|(u, _)| u).collect();
+                        t.error = None;
+                        t.state = TaskState::Queued;
+                        let scheduled = req.scheduled_at.filter(|&ms| ms > now_ms());
+                        if scheduled.is_some() {
+                            t.state = TaskState::Scheduled;
+                            t.scheduled_at = scheduled;
+                        }
+                        self.insert_task(t.clone());
+                        if scheduled.is_none() && s.auto_start {
+                            let _ = self.resume(&t.id).await;
+                        }
+                        return Ok(t.id);
+                    }
+                }
                 t.state = TaskState::Error;
                 t.error = Some(format!("{e:#}"));
                 self.insert_task(t.clone());
@@ -431,6 +462,38 @@ impl Engine {
                     }
                 }
                 Err(_) => continue,
+            }
+        }
+        // 镜像加速：开启时给 GitHub / HuggingFace 之类站点附带候选镜像。
+        // 并发探测，只保留「支持分段 + 大小一致 + ETag 一致」的镜像，
+        // 否则 If-Range 校验会被镜像自己的 ETag 打回，浪费一次重试。
+        if s.mirror_enabled && t.supports_range && t.mirrors.len() < 4 {
+            let cands = crate::mirror::candidates(&t.url, &s);
+            let main_size = t.size;
+            let main_etag = t.etag.clone();
+            let hits = self
+                .probe_mirrors(
+                    cands,
+                    req.referer.as_deref(),
+                    req.cookie.as_deref(),
+                    (req.username.as_deref(), req.password.as_deref()),
+                )
+                .await;
+            for (m, info) in hits {
+                // 只保留「同大小 + 同 ETag」的镜像，否则 If-Range 会被打回
+                if let (Some(a), Some(b)) = (info.size, main_size) {
+                    if a != b {
+                        continue;
+                    }
+                }
+                if let (Some(a), Some(b)) = (&info.etag, &main_etag) {
+                    if !a.is_empty() && !b.is_empty() && a != b {
+                        continue;
+                    }
+                }
+                if m != t.url && !t.mirrors.contains(&m) && t.mirrors.len() < 4 {
+                    t.mirrors.push(m);
+                }
             }
         }
         let scheduled = req.scheduled_at.filter(|&ms| ms > now_ms());
@@ -618,6 +681,37 @@ impl Engine {
     ///
     /// 注意 UA 回退：不少镜像站（如清华 TUNA）的反盗链会直接 403 掉
     /// 「浏览器 UA + Range」的请求。配置的 UA 被拒时会自动回退到下载器 UA。
+    /// 并发探测镜像候选（每个 5 秒上限），返回可用的 (镜像地址, 探测信息)
+    async fn probe_mirrors(
+        &self,
+        cands: Vec<String>,
+        referer: Option<&str>,
+        cookie: Option<&str>,
+        auth: (Option<&str>, Option<&str>),
+    ) -> Vec<(String, ProbeInfo)> {
+        if cands.is_empty() {
+            return Vec::new();
+        }
+        let futs = cands.into_iter().take(3).map(|m| async move {
+            let info = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.probe(&m, referer, cookie, auth),
+            )
+            .await
+            .ok()?
+            .ok()?;
+            if !info.supports_range {
+                return None;
+            }
+            Some((m, info))
+        });
+        futures_util::future::join_all(futs)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
     async fn probe(
         &self,
         url: &str,
@@ -857,7 +951,7 @@ impl Engine {
         self.tasks.lock().remove(id);
         self.store.delete_task(id);
         if delete_file {
-            let _ = std::fs::remove_file(&path);
+            remove_downloaded(&path).await;
         }
         self.emit(EngineEvent::TaskRemoved(id.to_string()));
         Ok(())
@@ -1569,6 +1663,23 @@ struct SegmentJob {
     cookie: Option<String>,
     basic: Option<(String, String)>,
     ua: Option<String>,
+}
+
+/// 删除下载产物：分片下载直接写目标文件，未完成的也是同一个路径；
+/// Windows 上文件句柄可能还没释放，所以带几次退避重试。
+async fn remove_downloaded(path: &str) {
+    if path.trim().is_empty() {
+        return;
+    }
+    for i in 0..8u64 {
+        match std::fs::remove_file(path) {
+            Ok(()) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(60 * (i + 1))).await,
+        }
+    }
+    // 可能是 BT 之类的目录
+    let _ = std::fs::remove_dir_all(path);
 }
 
 async fn download_segment(job: SegmentJob, cancel: CancellationToken) -> Result<()> {

@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-  <external-path name="my_images" path="." />
-  <cache-path name="my_cache_images" path="." />
+  <!-- name 必须与 src/android.rs 里的映射保持一致 -->
+  <external-files-path name="ext_files" path="." />
+  <external-cache-path name="ext_cache" path="." />
+  <files-path name="files" path="." />
+  <cache-path name="cache" path="." />
+  <!-- 公共存储：Download / Movies / DCIM 等 -->
+  <external-path name="sd" path="." />
 </paths>

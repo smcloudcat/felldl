@@ -32,7 +32,7 @@ interface Props {
   meta?: string[];
   onPause: (id: string) => void;
   onResume: (id: string) => void;
-  onRemove: (id: string) => void;
+  onRemove: (task: Task) => void;
   onOpen: (task: Task) => void;
   onReveal: (task: Task) => void;
 }
@@ -275,7 +275,7 @@ function TaskCardInner({ task, meta, onPause, onResume, onRemove, onOpen, onReve
             className={cx("icon-btn", confirmDel && "danger")}
             onClick={() => {
               if (confirmDel) {
-                onRemove(task.id);
+                onRemove(task);
                 setConfirmDel(false);
               } else {
                 setConfirmDel(true);

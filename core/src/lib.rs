@@ -13,6 +13,7 @@ pub mod dns;
 pub mod engine;
 pub mod grab;
 pub mod metalink;
+pub mod mirror;
 pub mod model;
 pub mod remote;
 pub mod store;

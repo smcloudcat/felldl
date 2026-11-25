@@ -67,6 +67,12 @@ export const api = {
   checkUpdate: (force?: boolean) =>
     invoke("check_update", { force: force ?? false }) as Promise<UpdateInfo>,
   openUrl: (url: string) => invoke("open_url", { url }) as Promise<void>,
+  appVersion: () => invoke("app_version") as Promise<string>,
+
+  // 安卓存储：是否已获得「所有文件访问」/ 申请授权 / 目录可写性自检
+  allFilesAccess: () => invoke("all_files_access") as Promise<boolean>,
+  requestAllFilesAccess: () => invoke("request_all_files_access") as Promise<void>,
+  dirWritable: (path: string) => invoke("dir_writable", { path }) as Promise<boolean>,
 
   // 应用内直接更新：下载更新包（进度走 update://progress 事件）→ 应用并重启
   downloadUpdate: (url: string, fileName: string) =>

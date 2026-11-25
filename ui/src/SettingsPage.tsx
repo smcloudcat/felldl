@@ -102,6 +102,15 @@ function Slider({
   );
 }
 
+/** 安卓常用下载目录（系统不允许任意选目录，给几个现成的） */
+const ANDROID_DIRS = [
+  { key: "set.dirDownload", path: "/storage/emulated/0/Download" },
+  { key: "set.dirMovies", path: "/storage/emulated/0/Movies" },
+  { key: "set.dirDcim", path: "/storage/emulated/0/DCIM" },
+  { key: "set.dirPictures", path: "/storage/emulated/0/Pictures" },
+  { key: "set.dirDocs", path: "/storage/emulated/0/Documents" },
+];
+
 export function SettingsPage({ settings, onChange, toast }: Props) {
   const { t, lang } = useI18n();
   const [draft, setDraft] = useState<Settings>(settings);
@@ -116,6 +125,12 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   const [dnsTesting, setDnsTesting] = useState(false);
   const [dnsResult, setDnsResult] = useState<string | null>(null);
   const [bgBusy, setBgBusy] = useState(false);
+  // 真实应用版本（来自后端），与「检查更新」的缓存结果解耦
+  const [appVer, setAppVer] = useState("");
+  // 安卓存储：是否已获得「所有文件访问」、当前目录是否可写
+  const [storageOk, setStorageOk] = useState<boolean | null>(null);
+  const [dirOk, setDirOk] = useState<boolean | null>(null);
+  const isAndroid = document.documentElement.dataset.platform === "android";
 
   // ── 应用内直接更新 ──
   const [phase, setPhase] = useState<"idle" | "download" | "apply">("idle");
@@ -268,7 +283,26 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
 
   useEffect(() => {
     api.listInterfaces().then(setIfaces).catch(() => {});
+    api.appVersion().then(setAppVer).catch(() => {});
   }, []);
+
+  // 安卓：目录可写性自检（换目录 / 保存前都跑一遍）
+  useEffect(() => {
+    if (!isAndroid) return;
+    let alive = true;
+    api
+      .dirWritable(draft.download_dir)
+      .then((ok) => alive && setDirOk(ok))
+      .catch(() => alive && setDirOk(false));
+    return () => {
+      alive = false;
+    };
+  }, [draft.download_dir, isAndroid]);
+
+  useEffect(() => {
+    if (!isAndroid) return;
+    api.allFilesAccess().then(setStorageOk).catch(() => setStorageOk(null));
+  }, [isAndroid]);
 
   useEffect(() => {
     let alive = true;
@@ -316,7 +350,26 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
     try {
       const p = await api.pickFolder();
       if (p) patch({ download_dir: p });
+      else if (isAndroid) toast(t("set.androidDirHint"));
     } catch {}
+  }
+
+  /// 安卓切换到预设目录（系统禁止任意选目录，给几个常用公共目录）
+  function usePresetDir(p: string) {
+    patch({ download_dir: p });
+  }
+
+  async function grantStorage() {
+    try {
+      await api.requestAllFilesAccess();
+      toast(t("set.storageSettingsHint"));
+      // 用户回来后重新查一次
+      setTimeout(() => {
+        api.allFilesAccess().then(setStorageOk).catch(() => {});
+      }, 1500);
+    } catch (e: any) {
+      toast(typeof e === "string" ? e : String(e?.message ?? e), "error");
+    }
   }
 
   async function copyToken() {
@@ -410,11 +463,47 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
                 value={draft.download_dir}
                 onChange={(e) => patch({ download_dir: e.target.value })}
                 spellCheck={false}
+                placeholder="/storage/emulated/0/Download"
               />
-              <button className="btn btn-soft" onClick={pickDir} type="button">
-                {t("dlg.browse")}
-              </button>
+              {!isAndroid && (
+                <button className="btn btn-soft" onClick={pickDir} type="button">
+                  {t("dlg.browse")}
+                </button>
+              )}
+              {isAndroid && storageOk !== true && (
+                <button className="btn btn-soft" onClick={grantStorage} type="button">
+                  {t("set.grantStorage")}
+                </button>
+              )}
             </div>
+            {isAndroid && (
+              <>
+                <div className="dir-presets">
+                  {ANDROID_DIRS.map((d) => (
+                    <button
+                      key={d.path}
+                      type="button"
+                      className={cx("dir-chip", draft.download_dir === d.path && "on")}
+                      onClick={() => usePresetDir(d.path)}
+                      title={d.path}
+                    >
+                      {t(d.key)}
+                    </button>
+                  ))}
+                </div>
+                {(storageOk === false || dirOk === false) && (
+                  <div className="field-hint warn">
+                    ⚠{" "}
+                    {storageOk === false
+                      ? t("set.needStorage")
+                      : t("set.dirNotWritable")}
+                  </div>
+                )}
+                {storageOk === true && dirOk === true && (
+                  <div className="field-hint ok">✓ {t("set.storageOk")}</div>
+                )}
+              </>
+            )}
           </div>
 
           <div className="field-grid-2" style={{ marginTop: 14 }}>
@@ -695,7 +784,52 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
           </div>
         </div>
 
-      
+        {/* 镜像加速 */}
+        <div className="card">
+          <div className="card-head">
+            <div className="card-icon">
+              <IconZap size={15} />
+            </div>
+            <div className="card-title">{t("set.mirrorTitle")}</div>
+            <button
+              type="button"
+              className={cx("switch", draft.mirror_enabled && "on")}
+              onClick={() => patch({ mirror_enabled: !draft.mirror_enabled })}
+              title={t("set.mirrorTitle")}
+              aria-label={t("set.mirrorTitle")}
+            />
+          </div>
+          <div className="card-sub">{t("set.mirrorSub")}</div>
+          <div className="field" style={{ marginTop: 12 }}>
+            <label className="field-label">{t("set.mirrorLine")}</label>
+            <select
+              className="select"
+              value={draft.mirror_mode || "auto"}
+              disabled={!draft.mirror_enabled}
+              onChange={(e) => patch({ mirror_mode: e.target.value })}
+            >
+              <option value="auto">{t("set.mirrorAuto")}</option>
+              <option value="ghfast">ghfast.top</option>
+              <option value="ghproxy">ghproxy.net</option>
+              <option value="hf">{t("set.mirrorHf")}</option>
+              <option value="custom">{t("set.mirrorCustom")}</option>
+            </select>
+            {draft.mirror_mode === "custom" && (
+              <input
+                className="input"
+                style={{ marginTop: 8 }}
+                placeholder="https://ghfast.top/"
+                value={draft.mirror_custom}
+                disabled={!draft.mirror_enabled}
+                onChange={(e) => patch({ mirror_custom: e.target.value })}
+                spellCheck={false}
+              />
+            )}
+            <div className="field-hint" style={{ marginTop: 8 }}>
+              {t("set.mirrorHint")}
+            </div>
+          </div>
+        </div>
         </div>
       </section>
       <section className="settings-group" id="sg-integration">
@@ -1145,7 +1279,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
             </div>
             <div className="card-title">{t("set.about")}</div>
           </div>
-          <div className="card-sub">{t("set.aboutSub", { v: updateInfo?.current_version ?? "…" })}</div>
+          <div className="card-sub">{t("set.aboutSub", { v: appVer || updateInfo?.current_version || "…" })}</div>
 
           <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
             <button className="btn btn-soft" onClick={checkUpdate} disabled={checking || updating} type="button">

@@ -16,6 +16,11 @@ use tauri::{
     WindowEvent,
 };
 
+#[cfg(target_os = "android")]
+mod android;
+// 纯路径映射不带 cfg：桌面端也能跑它的单元测试
+mod android_paths;
+
 struct AppState {
     engine: Arc<Engine>,
     api_port: parking_lot_stub::PortCell,
@@ -167,6 +172,11 @@ async fn test_dns(servers: String, host: String) -> Result<Vec<String>, String> 
 }
 
 #[tauri::command]
+fn app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+#[tauri::command]
 async fn get_api_info(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let s = state.engine.settings();
     Ok(serde_json::json!({
@@ -177,8 +187,65 @@ async fn get_api_info(state: State<'_, AppState>) -> Result<serde_json::Value, S
 }
 
 #[tauri::command]
-async fn open_file(path: String) -> Result<(), String> {
-    open_path(&path)
+async fn open_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    // 安卓：file:// 会被系统拒绝，必须走 FileProvider 的 content://
+    #[cfg(target_os = "android")]
+    {
+        return android::open_file(&app, &path);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        open_path(&path)
+    }
+}
+
+/// 安卓「所有文件访问」状态；其它平台恒为 true
+#[tauri::command]
+async fn all_files_access(app: tauri::AppHandle) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        return android::has_all_files_access(&app);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(true)
+    }
+}
+
+#[tauri::command]
+async fn request_all_files_access(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        return android::request_all_files_access(&app);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
+/// 目录是否可写（安卓改下载目录前先自检，免得任务全部失败）
+#[tauri::command]
+fn dir_writable(path: String) -> Result<bool, String> {
+    let p = std::path::Path::new(path.trim());
+    if p.as_os_str().is_empty() {
+        return Ok(false);
+    }
+    let created = std::fs::create_dir_all(p).is_ok();
+    if !created && !p.is_dir() {
+        return Ok(false);
+    }
+    let probe = p.join(format!(".felldl-probe-{}", std::process::id()));
+    match std::fs::write(&probe, b"ok") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(true)
+        }
+        Err(_) => Ok(false),
+    }
 }
 
 // ───────────────────────── 检查更新 ─────────────────────────
@@ -223,6 +290,18 @@ struct UpdateCache {
     etag: Option<String>,
     #[serde(default)]
     info: Option<UpdateInfo>,
+    /// 写缓存时的应用版本。升级后版本号变化 → 整份缓存作废，
+    /// 否则会拿旧版本算出来的 has_update / current_version 给用户看。
+    #[serde(default)]
+    app_version: String,
+}
+
+/// 用当前真实版本刷新一份可能来自缓存的检查结果
+fn refresh_info(mut info: UpdateInfo) -> UpdateInfo {
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    info.has_update = version_gt(&info.latest_version, &current);
+    info.current_version = current;
+    info
 }
 
 enum ApiOutcome {
@@ -246,10 +325,15 @@ fn update_cache_path(app: &tauri::AppHandle) -> std::path::PathBuf {
 }
 
 fn load_cache(path: &std::path::Path) -> UpdateCache {
-    std::fs::read_to_string(path)
+    let cache: UpdateCache = std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // 版本升级后旧缓存里的 latest/current 判断已经过期（会出现「更新完还显示旧版本」）
+    if !cache.app_version.is_empty() && cache.app_version != env!("CARGO_PKG_VERSION") {
+        return UpdateCache::default();
+    }
+    cache
 }
 
 fn save_cache(path: &std::path::Path, cache: &UpdateCache) {
@@ -535,7 +619,7 @@ async fn check_update(app: tauri::AppHandle, force: Option<bool>) -> Result<Upda
     if !force.unwrap_or(false) {
         if let Some(info) = cache.info.clone() {
             if now.saturating_sub(cache.checked_at) < UPDATE_FRESH_SECS {
-                return Ok(info);
+                return Ok(refresh_info(info));
             }
         }
     }
@@ -551,8 +635,9 @@ async fn check_update(app: tauri::AppHandle, force: Option<bool>) -> Result<Upda
         Ok(ApiOutcome::NotModified) => {
             if let Some(info) = cache.info.clone() {
                 cache.checked_at = now;
+                cache.app_version = env!("CARGO_PKG_VERSION").into();
                 save_cache(&path, &cache);
-                return Ok(info);
+                return Ok(refresh_info(info));
             }
             "GitHub 返回 304，但本地没有可用缓存".to_string()
         }
@@ -562,6 +647,7 @@ async fn check_update(app: tauri::AppHandle, force: Option<bool>) -> Result<Upda
                 checked_at: now,
                 etag,
                 info: Some(info),
+                app_version: env!("CARGO_PKG_VERSION").into(),
             };
             save_cache(&path, &cache);
             return Ok(out);
@@ -580,7 +666,9 @@ async fn check_update(app: tauri::AppHandle, force: Option<bool>) -> Result<Upda
         Ok(mut info) => {
             info.note = Some("GitHub API 请求受限，已改用 Releases 订阅获取（信息略有延迟）".into());
             cache.checked_at = now;
+            info = refresh_info(info);
             cache.info = Some(info.clone());
+            cache.app_version = env!("CARGO_PKG_VERSION").into();
             save_cache(&path, &cache);
             return Ok(info);
         }
@@ -590,7 +678,9 @@ async fn check_update(app: tauri::AppHandle, force: Option<bool>) -> Result<Upda
         Ok(mut info) => {
             info.note = Some("GitHub 接口不可用，已改用 version.json 源获取".into());
             cache.checked_at = now;
+            info = refresh_info(info);
             cache.info = Some(info.clone());
+            cache.app_version = env!("CARGO_PKG_VERSION").into();
             save_cache(&path, &cache);
             return Ok(info);
         }
@@ -598,9 +688,10 @@ async fn check_update(app: tauri::AppHandle, force: Option<bool>) -> Result<Upda
     };
 
     // ⑤ 全都不行：24 小时内的旧结果先顶上，至少让用户知道有没有新版本
-    if let Some(mut info) = cache.info.clone() {
+    if let Some(info) = cache.info.clone() {
         let age = now.saturating_sub(cache.checked_at);
         if age < UPDATE_STALE_SECS {
+            let mut info = refresh_info(info);
             info.note = Some(format!(
                 "GitHub 暂时不可访问，以下是 {} 分钟前的检查结果",
                 age / 60
@@ -736,6 +827,7 @@ mod update_tests {
             checked_at: 12345,
             etag: Some("W/\"abc\"".into()),
             info: Some(info),
+            app_version: env!("CARGO_PKG_VERSION").into(),
         };
         save_cache(&path, &cache);
 
@@ -746,6 +838,13 @@ mod update_tests {
         assert_eq!(info.latest_version, "0.3.7");
         assert_eq!(info.assets.len(), 1);
         assert!(info.has_update);
+
+        // 版本升级后旧缓存必须整份作废（否则会看到「更新完还显示旧版本」）
+        let mut stale = load_cache(&path);
+        stale.app_version = "0.0.1".into();
+        save_cache(&path, &stale);
+        let after_upgrade = load_cache(&path);
+        assert!(after_upgrade.info.is_none(), "版本变化后不应复用旧结果");
 
         std::fs::write(&path, "{not json").unwrap();
         let broken = load_cache(&path);
@@ -895,8 +994,16 @@ mod update_tests {
 }
 
 #[tauri::command]
-async fn show_in_folder(path: String) -> Result<(), String> {
-    reveal_path(&path)
+async fn show_in_folder(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        return android::reveal(&app, &path);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        reveal_path(&path)
+    }
 }
 
 /// 列出本机网络接口的 IP 地址（IPv4 + IPv6），用于「绑定网络接口」设置
@@ -1251,6 +1358,7 @@ async fn apply_update(app: tauri::AppHandle, path: String) -> Result<String, Str
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn open_path(_path: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -1280,6 +1388,7 @@ fn open_path(_path: &str) -> Result<(), String> {
     Err("当前平台不支持直接打开文件".into())
 }
 
+#[cfg(not(target_os = "android"))]
 fn reveal_path(path: &str) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -1489,6 +1598,10 @@ pub fn run() {
             update_settings,
             test_dns,
             get_api_info,
+            app_version,
+            all_files_access,
+            request_all_files_access,
+            dir_writable,
             open_file,
             show_in_folder,
             pick_folder,

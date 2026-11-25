@@ -189,6 +189,19 @@ pub struct Settings {
     /// 面板不透明度（40~100，百分比，越小越通透）
     #[serde(default = "default_ui_glass")]
     pub ui_glass: u32,
+    /// 是否为 GitHub 等站点启用镜像加速（默认关闭）
+    #[serde(default)]
+    pub mirror_enabled: bool,
+    /// 镜像线路："auto" | "ghfast" | "ghproxy" | "hf" | "custom"
+    #[serde(default = "default_mirror_mode")]
+    pub mirror_mode: String,
+    /// 自定义镜像前缀（mirror_mode = "custom" 时生效），如 "https://ghfast.top/"
+    #[serde(default)]
+    pub mirror_custom: String,
+}
+
+fn default_mirror_mode() -> String {
+    "auto".into()
 }
 
 /// 下载分类规则
@@ -291,6 +304,9 @@ impl Default for Settings {
             ui_blur: default_ui_blur(),
             ui_dim: default_ui_dim(),
             ui_glass: default_ui_glass(),
+            mirror_enabled: false,
+            mirror_mode: default_mirror_mode(),
+            mirror_custom: String::new(),
         }
     }
 }

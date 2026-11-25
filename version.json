@@ -1,6 +1,6 @@
 {
-  "version": "0.3.8",
-  "release_url": "https://github.com/smcloudcat/felldl/releases/tag/v0.3.8",
-  "published_at": "2026-11-25T08:30:00Z",
-  "notes": "外观支持自定义背景图与磨砂参数，设置页新增锚点导航；关于页支持应用内直接更新（下载即替换重启），并内置博客入口、隐私条款与用户协议。"
+  "version": "0.3.9",
+  "release_url": "https://github.com/smcloudcat/felldl/releases/tag/v0.3.9",
+  "published_at": "2026-11-25T11:10:00Z",
+  "notes": "删除任务可选连同本地文件（含未完成半成品）；GitHub/HuggingFace 下载支持国内镜像加速（默认关闭）；安卓可改下载目录、完成后直接打开文件；修复升级后检查更新仍显示旧版本。"
 }

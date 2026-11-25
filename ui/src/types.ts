@@ -100,6 +100,9 @@ export interface Settings {
   ui_dim: number;
   /** 面板不透明度 %（40~100） */
   ui_glass: number;
+  mirror_enabled: boolean;
+  mirror_mode: "auto" | "ghfast" | "ghproxy" | "hf" | "custom" | string;
+  mirror_custom: string;
 }
 
 export interface AddTaskRequest {
