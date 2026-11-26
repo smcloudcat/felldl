@@ -103,7 +103,10 @@ impl Engine {
             .output_folder()
             .to_string_lossy()
             .to_string();
-        let path = std::path::Path::new(&folder).join(&name);
+        // 顶层名称当作“单个路径组件”处理：sanitize_name 会替换 / \ : 等分隔符、
+        // 去掉首尾点（含 ".."）、处理 Windows 保留名，避免种子名把路径带出 save_dir。
+        let safe_name = crate::util::sanitize_name(&name);
+        let path = std::path::Path::new(&folder).join(&safe_name);
         let display = path.to_string_lossy().to_string();
 
         let t = Task {
@@ -111,7 +114,7 @@ impl Engine {
             url: url.to_string(),
             kind: TaskKind::Bt,
             mirrors: Vec::new(),
-            file_name: crate::util::sanitize_name(&name),
+            file_name: safe_name,
             save_dir: folder,
             save_path: display,
             size: None,
@@ -126,6 +129,7 @@ impl Engine {
             content_type: None,
             referer: None,
             cookie: None,
+            auth_origin: String::new(),
             user_agent: None,
             speed_limit: 0,
             scheduled_at: None,

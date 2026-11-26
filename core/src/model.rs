@@ -410,6 +410,11 @@ pub struct Task {
     pub referer: Option<String>,
     #[serde(default)]
     pub cookie: Option<String>,
+    /// 认证归属：Cookie / 令牌 / Basic 只允许发往与这个 origin（scheme+host+port）
+    /// 一致的地址。`url` 可能是探测后的重定向终址，不能用来判定凭据归属；
+    /// 为空时回退到 `url` 的 origin（兼容旧任务 JSON）。
+    #[serde(default)]
+    pub auth_origin: String,
     /// 探测阶段确认可用的 User-Agent（部分站点会拒绝浏览器 UA，续传需沿用）
     #[serde(default)]
     pub user_agent: Option<String>,

@@ -315,6 +315,7 @@ mod tests {
             content_type: None,
             referer: None,
             cookie: None,
+            auth_origin: String::new(),
             user_agent: None,
             speed_limit: 0,
             scheduled_at: None,

@@ -37,6 +37,63 @@ fn apply_auth_cookie(req: reqwest::RequestBuilder, c: &str) -> reqwest::RequestB
     }
     req.header(COOKIE, t)
 }
+
+/// 一次请求可用的认证材料。核心约束：**只有目标地址与任务原始 origin 一致时**
+/// 才会把 Cookie / 令牌 / Basic 施加到请求上。
+///
+/// 镜像站、CDN 回源、跨域跳转、http/https 互换、端口变化都属于不同 origin，
+/// 默认永远收不到原站凭据；需要镜像认证时必须单独配置镜像自己的凭据。
+#[derive(Clone, Copy, Default)]
+struct Creds<'a> {
+    /// 原始用户地址的 origin（规范化后的 scheme://host:port）
+    origin: &'a str,
+    cookie: Option<&'a str>,
+    basic: Option<(&'a str, &'a str)>,
+}
+
+impl<'a> Creds<'a> {
+    fn new(
+        origin: &'a str,
+        cookie: Option<&'a str>,
+        basic: Option<(&'a str, &'a str)>,
+    ) -> Self {
+        Self { origin, cookie, basic }
+    }
+
+    /// 从任务快照取凭据归属；旧任务没有 auth_origin 时回退到 url 的 origin。
+    fn from_task(t: &'a Task) -> Self {
+        let origin = if t.auth_origin.is_empty() {
+            t.url.as_str()
+        } else {
+            t.auth_origin.as_str()
+        };
+        let basic = match (t.username.as_deref(), t.password.as_deref()) {
+            (Some(u), p) if !u.is_empty() => Some((u, p.unwrap_or(""))),
+            _ => None,
+        };
+        Self::new(origin, t.cookie.as_deref(), basic)
+    }
+
+    /// 目标地址是否允许携带本组凭据（解析失败一律拒绝）
+    fn allows(&self, url: &str) -> bool {
+        !self.origin.is_empty() && util::same_origin(self.origin, url)
+    }
+
+    /// 仅在与原始 origin 一致时附加认证头，否则原样返回（不附带任何凭据）
+    fn apply(&self, req: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+        if !self.allows(url) {
+            return req;
+        }
+        let mut req = req;
+        if let Some(c) = self.cookie {
+            req = apply_auth_cookie(req, c);
+        }
+        if let Some((u, p)) = self.basic {
+            req = req.basic_auth(u, Some(p));
+        }
+        req
+    }
+}
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -390,12 +447,20 @@ impl Engine {
         req.url = clean_url;
         req.username = username.clone();
         req.password = password.clone();
-        let auth = (username.as_deref(), password.as_deref());
+        // 认证归属 = 用户输入的原始地址。镜像、metalink 备源、跨域跳转都是别的
+        // origin，默认收不到这组凭据（避免把 Cookie / 令牌发给第三方站点）。
+        let cred_origin = req.url.clone();
+        let cred_cookie = req.cookie.clone();
+        let creds = Creds::new(
+            &cred_origin,
+            cred_cookie.as_deref(),
+            match (username.as_deref(), password.as_deref()) {
+                (Some(u), p) => Some((u, p.unwrap_or(""))),
+                _ => None,
+            },
+        );
 
-        let probe = match self
-            .probe(&req.url, req.referer.as_deref(), req.cookie.as_deref(), auth)
-            .await
-        {
+        let probe = match self.probe(&req.url, req.referer.as_deref(), creds).await {
             Ok(p) => p,
             Err(e) => {
                 // 探测失败也建任务，标记错误便于用户重试
@@ -405,12 +470,7 @@ impl Engine {
                 if s.mirror_enabled {
                     let cands = crate::mirror::candidates(&t.url, &s);
                     let hits = self
-                        .probe_mirrors(
-                            cands,
-                            req.referer.as_deref(),
-                            req.cookie.as_deref(),
-                            (req.username.as_deref(), req.password.as_deref()),
-                        )
+                        .probe_mirrors(cands, req.referer.as_deref(), creds)
                         .await;
                     if let Some((_, info)) = hits.first() {
                         t.size = info.size;
@@ -447,10 +507,7 @@ impl Engine {
             if m.is_empty() || m == &t.url {
                 continue;
             }
-            match self
-                .probe(m, req.referer.as_deref(), req.cookie.as_deref(), auth)
-                .await
-            {
+            match self.probe(m, req.referer.as_deref(), creds).await {
                 Ok(p) => {
                     let same_size = match (p.size, t.size) {
                         (Some(a), Some(b)) => a == b,
@@ -472,12 +529,7 @@ impl Engine {
             let main_size = t.size;
             let main_etag = t.etag.clone();
             let hits = self
-                .probe_mirrors(
-                    cands,
-                    req.referer.as_deref(),
-                    req.cookie.as_deref(),
-                    (req.username.as_deref(), req.password.as_deref()),
-                )
+                .probe_mirrors(cands, req.referer.as_deref(), creds)
                 .await;
             for (m, info) in hits {
                 // 只保留「同大小 + 同 ETag」的镜像，否则 If-Range 会被打回
@@ -651,6 +703,8 @@ impl Engine {
             content_type: probe.content_type,
             referer: req.referer.clone(),
             cookie: req.cookie.clone(),
+            // 凭据绑定用户输入的原始地址（不是重定向终址），镜像/跨域跳转拿不到
+            auth_origin: util::origin_of(&req.url).unwrap_or_default(),
             user_agent: probe.ua.clone(),
             speed_limit: req.speed_limit.unwrap_or(0),
             scheduled_at: None,
@@ -682,12 +736,13 @@ impl Engine {
     /// 注意 UA 回退：不少镜像站（如清华 TUNA）的反盗链会直接 403 掉
     /// 「浏览器 UA + Range」的请求。配置的 UA 被拒时会自动回退到下载器 UA。
     /// 并发探测镜像候选（每个 5 秒上限），返回可用的 (镜像地址, 探测信息)
+    /// 并发探测镜像候选（每个 5 秒上限），返回可用的 (镜像地址, 探测信息)。
+    /// 镜像通常跨域，`creds` 只会在与原始 origin 一致时才生效。
     async fn probe_mirrors(
         &self,
         cands: Vec<String>,
         referer: Option<&str>,
-        cookie: Option<&str>,
-        auth: (Option<&str>, Option<&str>),
+        creds: Creds<'_>,
     ) -> Vec<(String, ProbeInfo)> {
         if cands.is_empty() {
             return Vec::new();
@@ -695,7 +750,7 @@ impl Engine {
         let futs = cands.into_iter().take(3).map(|m| async move {
             let info = tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                self.probe(&m, referer, cookie, auth),
+                self.probe(&m, referer, creds),
             )
             .await
             .ok()?
@@ -716,13 +771,12 @@ impl Engine {
         &self,
         url: &str,
         referer: Option<&str>,
-        cookie: Option<&str>,
-        auth: (Option<&str>, Option<&str>),
+        creds: Creds<'_>,
     ) -> Result<ProbeInfo> {
         let uas = self.probe_uas();
         let mut last_err = None;
         for ua in &uas {
-            match self.probe_with_ua(url, referer, cookie, ua, auth).await {
+            match self.probe_with_ua(url, referer, ua, creds).await {
                 Ok(info) => return Ok(info),
                 Err(e) => {
                     let retriable = {
@@ -755,9 +809,8 @@ impl Engine {
         &self,
         url: &str,
         referer: Option<&str>,
-        cookie: Option<&str>,
         ua: &str,
-        auth: (Option<&str>, Option<&str>),
+        creds: Creds<'_>,
     ) -> Result<ProbeInfo> {
         let client = self.client_with_ua(None, ua)?;
         let mut req = client
@@ -767,12 +820,8 @@ impl Engine {
         if let Some(r) = referer {
             req = req.header(REFERER, r);
         }
-        if let Some(c) = cookie {
-            req = apply_auth_cookie(req, c);
-        }
-        if let (Some(u), Some(p)) = auth {
-            req = req.basic_auth(u, Some(p));
-        }
+        // 跨 origin（镜像/跨域跳转）不附加任何认证信息
+        let req = creds.apply(req, url);
         let resp = req.send().await.context("连接服务器失败")?;
         let status = resp.status();
         let h = resp.headers();
@@ -938,8 +987,10 @@ impl Engine {
         let Some(rt) = self.tasks.lock().get(id).cloned() else {
             bail!("任务不存在");
         };
-        // BT 任务先从 rqbit 会话移除
-        if rt.task.lock().kind == TaskKind::Bt {
+        let is_bt = rt.task.lock().kind == TaskKind::Bt;
+        // BT 任务先从 rqbit 会话移除；文件删除交给 rqbit 按其受控文件清单处理，
+        // 不能再用通用的路径递归删除（顶层名可能对应原有同名目录）。
+        if is_bt {
             self.bt_remove(&rt, delete_file).await;
         } else {
             rt.cancel.lock().cancel();
@@ -950,7 +1001,7 @@ impl Engine {
         };
         self.tasks.lock().remove(id);
         self.store.delete_task(id);
-        if delete_file {
+        if delete_file && !is_bt {
             remove_downloaded(&path).await;
         }
         self.emit(EngineEvent::TaskRemoved(id.to_string()));
@@ -1182,13 +1233,18 @@ impl Engine {
             let global = self.global_limiter.clone();
             let tx = tx.clone();
             let etag = etag.clone();
-            let (referer, cookie, basic) = {
+            let (referer, cred_origin, cookie, basic) = {
                 let t = rt.task.lock();
                 let basic = match (t.username.as_deref(), t.password.as_deref()) {
                     (Some(u), Some(p)) if !u.is_empty() => Some((u.to_string(), p.to_string())),
                     _ => None,
                 };
-                (t.referer.clone(), t.cookie.clone(), basic)
+                let origin = if t.auth_origin.is_empty() {
+                    t.url.clone()
+                } else {
+                    t.auth_origin.clone()
+                };
+                (t.referer.clone(), origin, t.cookie.clone(), basic)
             };
             let cancel2 = cancel.clone();
             let seg_ua = task_ua.clone();
@@ -1207,6 +1263,7 @@ impl Engine {
                         tx,
                         etag,
                         referer,
+                        cred_origin,
                         cookie,
                         basic,
                         ua: seg_ua,
@@ -1307,13 +1364,12 @@ impl Engine {
         rt: &Arc<Runtime>,
         cancel: &CancellationToken,
     ) -> Result<bool> {
-        let (url, save_path, referer, cookie, task_snapshot) = {
+        let (url, save_path, referer, task_snapshot) = {
             let t = rt.task.lock();
             (
                 t.url.clone(),
                 t.save_path.clone(),
                 t.referer.clone(),
-                t.cookie.clone(),
                 t.clone(),
             )
         };
@@ -1326,15 +1382,9 @@ impl Engine {
         if let Some(r) = referer {
             req = req.header(REFERER, r);
         }
-        if let Some(c) = cookie {
-            req = apply_auth_cookie(req, c.as_str());
-        }
-        if let (Some(u), Some(p)) = (
-            task_snapshot.username.as_deref().filter(|s| !s.is_empty()),
-            task_snapshot.password.as_deref(),
-        ) {
-            req = req.basic_auth(u, Some(p));
-        }
+        // 重定向终址可能已跨域：凭据只在原始 origin 才发送
+        let creds = Creds::from_task(&task_snapshot);
+        let req = creds.apply(req, &url);
         let resp = req.send().await.context("请求失败")?;
         if !resp.status().is_success() {
             bail!("服务器返回 {}", resp.status().as_u16());
@@ -1660,6 +1710,8 @@ struct SegmentJob {
     tx: tokio::sync::mpsc::Sender<(usize, u64)>,
     etag: Option<String>,
     referer: Option<String>,
+    /// 认证归属 origin：镜像地址与它不一致时不发送 cookie / basic
+    cred_origin: String,
     cookie: Option<String>,
     basic: Option<(String, String)>,
     ua: Option<String>,
@@ -1667,19 +1719,34 @@ struct SegmentJob {
 
 /// 删除下载产物：分片下载直接写目标文件，未完成的也是同一个路径；
 /// Windows 上文件句柄可能还没释放，所以带几次退避重试。
+///
+/// 安全边界：只删除“单个文件”。绝不对目录做递归删除——BT 的顶层名称可能
+/// 与用户原有同名目录重合，`remove_dir_all` 会越出任务自有产物范围。
 async fn remove_downloaded(path: &str) {
     if path.trim().is_empty() {
         return;
     }
     for i in 0..8u64 {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_dir() => {
+                // 目录不是本函数的删除对象：交给协议自己的受控清单处理
+                eprintln!("[delete] 跳过目录（不做递归删除）: {path}");
+                return;
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_millis(60 * (i + 1))).await;
+                continue;
+            }
+        }
         match std::fs::remove_file(path) {
             Ok(()) => return,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(60 * (i + 1))).await,
         }
     }
-    // 可能是 BT 之类的目录
-    let _ = std::fs::remove_dir_all(path);
+    eprintln!("[delete] 文件删除失败（已重试）: {path}");
 }
 
 async fn download_segment(job: SegmentJob, cancel: CancellationToken) -> Result<()> {
@@ -1733,12 +1800,13 @@ async fn fetch_segment(
     if let Some(r) = &job.referer {
         req = req.header(REFERER, r);
     }
-    if let Some(c) = &job.cookie {
-        req = apply_auth_cookie(req, c);
-    }
-    if let Some((u, p)) = &job.basic {
-        req = req.basic_auth(u, Some(p));
-    }
+    // 只有与任务原始 origin 一致的地址（主站）才携带凭据；镜像站一律不带
+    let creds = Creds::new(
+        &job.cred_origin,
+        job.cookie.as_deref(),
+        job.basic.as_ref().map(|(u, p)| (u.as_str(), p.as_str())),
+    );
+    let req = creds.apply(req, url);
     let resp = req.send().await?;
     let status = resp.status();
 
@@ -1798,6 +1866,62 @@ fn user_agent_hdr() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 凭据只发给原始 origin：镜像、换端口、http/https 互换都收不到 Cookie/Basic。
+    #[test]
+    fn creds_only_sent_to_original_origin() {
+        use reqwest::header::AUTHORIZATION;
+        let client = Client::new();
+        let creds = Creds::new(
+            "https://example.com/dir/file.zip",
+            Some("sid=abc"),
+            Some(("user", "pass")),
+        );
+
+        let build = |url: &str| {
+            creds
+                .apply(client.get(url), url)
+                .build()
+                .expect("请求应可构造")
+        };
+
+        // 同 origin（路径不同）→ 带凭据
+        let same = build("https://example.com/other/path");
+        assert_eq!(same.headers().get(COOKIE).unwrap(), "sid=abc");
+        assert!(same.headers().get(AUTHORIZATION).is_some());
+
+        // 不同 origin → 完全不带凭据
+        for url in [
+            "https://mirror.example/file.zip",
+            "https://example.com:8443/file.zip",
+            "http://example.com/file.zip",
+            "https://cdn.example.com/file.zip",
+        ] {
+            let r = build(url);
+            assert!(r.headers().get(COOKIE).is_none(), "{url} 不应收到 Cookie");
+            assert!(r.headers().get(AUTHORIZATION).is_none(), "{url} 不应收到 Basic");
+        }
+    }
+
+    /// 删除只允许作用于单个文件：目录（可能含用户原有内容）必须原样保留。
+    #[tokio::test]
+    async fn remove_downloaded_skips_directories() {
+        let root = std::env::temp_dir().join(format!("felldl-del-{}", uuid::Uuid::new_v4()));
+        let keep_dir = root.join("pre-existing");
+        std::fs::create_dir_all(&keep_dir).unwrap();
+        let sentinel = keep_dir.join("keep.txt");
+        std::fs::write(&sentinel, b"do not touch").unwrap();
+        let file = root.join("payload.bin");
+        std::fs::write(&file, b"data").unwrap();
+
+        remove_downloaded(file.to_string_lossy().as_ref()).await;
+        assert!(!file.exists(), "普通文件应被删除");
+
+        remove_downloaded(keep_dir.to_string_lossy().as_ref()).await;
+        assert!(sentinel.exists(), "目录及其内容不得被递归删除");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn plan_segments_full_coverage() {

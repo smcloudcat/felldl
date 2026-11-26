@@ -161,7 +161,14 @@ async fn sftp_worker(
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
     let config = Arc::new(russh::client::Config::default());
-    let mut session = russh::client::connect(config, (target.host.as_str(), target.port), SshHandler)
+    // 主机密钥按 host+port 记忆在应用自己的 known_hosts 里：
+    // 首次连接记录（TOFU），之后密钥变化直接拒绝，避免把口令发给冒充的服务器。
+    let handler = SshHandler {
+        host: target.host.clone(),
+        port: target.port,
+        known_hosts: engine.store.root.join("known_hosts"),
+    };
+    let mut session = russh::client::connect(config, (target.host.as_str(), target.port), handler)
         .await
         .map_err(|e| anyhow!("连接 SFTP 服务器失败: {e}"))?;
     let ok = session
@@ -459,16 +466,51 @@ where
 }
 
 #[derive(Debug)]
-struct SshHandler;
+struct SshHandler {
+    host: String,
+    port: u16,
+    known_hosts: std::path::PathBuf,
+}
 
 impl russh::client::Handler for SshHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::PublicKeyOrCertificate,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        // 首次信任策略（下载器场景可接受）
-        Ok(true)
+        use russh::keys::known_hosts::{check_known_hosts_path, learn_known_hosts_path};
+
+        let key = server_public_key.public_key();
+        match check_known_hosts_path(&self.host, self.port, &key, &self.known_hosts) {
+            // 已记录且一致
+            Ok(true) => Ok(true),
+            // 首次见到该主机：记录后继续（TOFU，仅此一次）
+            Ok(false) => {
+                if let Err(e) = learn_known_hosts_path(&self.host, self.port, &key, &self.known_hosts)
+                {
+                    eprintln!("[sftp] 无法保存主机密钥指纹（本次仍继续）: {e}");
+                } else {
+                    eprintln!(
+                        "[sftp] 首次连接 {}:{}，已记录主机密钥 {}（如非预期请清理 known_hosts）",
+                        self.host,
+                        self.port,
+                        key.fingerprint(russh::keys::HashAlg::Sha256)
+                    );
+                }
+                Ok(true)
+            }
+            // 密钥变化：必须拒绝，不能把密码发给可能被冒充的服务器
+            Err(e) => {
+                eprintln!(
+                    "[sftp] 主机密钥与已记录不一致，已拒绝连接 {}:{}（{}）。如确认服务器已换钥，请清理 {}",
+                    self.host,
+                    self.port,
+                    e,
+                    self.known_hosts.display()
+                );
+                Ok(false)
+            }
+        }
     }
 }

@@ -45,6 +45,8 @@ export interface Task {
   content_type: string | null;
   referer: string | null;
   cookie: string | null;
+  /** 凭据归属 origin（scheme://host:port）：镜像/跨域跳转不会带认证信息 */
+  auth_origin?: string;
   user_agent: string | null;
   speed_limit: number;
   scheduled_at: number | null;

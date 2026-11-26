@@ -6,6 +6,28 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use url::Url;
 
+/// 规范化 origin（scheme + host 小写 + 有效端口），用于判断凭据归属。
+///
+/// 解析失败返回 None —— 调用方必须按“不是同一 origin”处理（fail-closed），
+/// 不能因为地址看起来像同一个站点就把 Cookie / 令牌发出去。
+pub fn origin_of(raw: &str) -> Option<String> {
+    let u = Url::parse(raw.trim()).ok()?;
+    let host = u.host_str()?.to_ascii_lowercase();
+    let port = u.port_or_known_default()?;
+    Some(format!("{}://{}:{}", u.scheme(), host, port))
+}
+
+/// 两个地址是否属于同一个 origin：scheme、host、有效端口全部一致。
+///
+/// 端口不同、http/https 互换、子域、换域名都算不同 origin，
+/// 因此镜像站与跨域重定向默认拿不到原站认证信息。
+pub fn same_origin(a: &str, b: &str) -> bool {
+    match (origin_of(a), origin_of(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
+}
+
 /// 从 Content-Disposition 解析文件名，支持 filename* (RFC 5987) 与 filename
 pub fn filename_from_disposition(header: &str) -> Option<String> {
     if header.is_empty() {
@@ -322,6 +344,49 @@ mod tests {
     #[test]
     fn sanitize_reserved() {
         assert_eq!(sanitize_name("CON.txt"), "_CON.txt");
+    }
+
+    /// 凭据归属：只有 scheme/host/port 完全一致才允许携带认证信息。
+    #[test]
+    fn same_origin_rules() {
+        // 同站同端口（含路径不同、默认端口显式写出的情况）
+        assert!(same_origin("https://a.com/f.zip", "https://a.com/other?x=1"));
+        assert!(same_origin("https://a.com/f.zip", "https://A.COM/f.zip"));
+        assert!(same_origin("https://a.com:443/f.zip", "https://a.com/g"));
+        // 端口、协议、子域、域名不同 → 不同 origin
+        assert!(!same_origin("https://a.com/f", "https://a.com:8443/f"));
+        assert!(!same_origin("https://a.com/f", "http://a.com/f"));
+        assert!(!same_origin("https://a.com/f", "https://cdn.a.com/f"));
+        assert!(!same_origin("https://a.com/f", "https://mirror.org/f"));
+        // 解析失败一律视为不同 origin（fail-closed）
+        assert!(!same_origin("not a url", "not a url"));
+        assert!(!same_origin("https://a.com/f", ""));
+        assert_eq!(origin_of("https://A.com:8443/x").as_deref(), Some("https://a.com:8443"));
+        assert_eq!(origin_of("http://a.com/x").as_deref(), Some("http://a.com:80"));
+    }
+
+    /// 种子/文件名里常见的路径穿越写法必须退化成单个安全组件。
+    #[test]
+    fn sanitize_blocks_path_traversal() {
+        for raw in [
+            "..",
+            "../..",
+            r"..\..\Windows\System32",
+            "/etc/passwd",
+            r"C:\Windows\notepad.exe",
+            r"\\server\share\x",
+        ] {
+            let s = sanitize_name(raw);
+            assert!(!s.is_empty(), "{raw} 不应变成空名");
+            assert!(!s.contains('/'), "{raw} → {s} 仍含 /");
+            assert!(!s.contains('\\'), "{raw} → {s} 仍含 \\");
+            assert_ne!(s, ".", "{raw} 不应保留为 .");
+            assert_ne!(s, "..", "{raw} 不应保留为 ..");
+            assert!(
+                std::path::Path::new(&s).components().count() == 1,
+                "{raw} → {s} 必须只有单个路径组件"
+            );
+        }
     }
 
     #[test]

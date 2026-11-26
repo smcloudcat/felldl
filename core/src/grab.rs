@@ -1057,6 +1057,7 @@ impl Engine {
             content_type: Some("video/mp2t".into()),
             referer: None,
             cookie: None,
+            auth_origin: String::new(),
             user_agent: None,
             speed_limit: 0,
             scheduled_at: None,
