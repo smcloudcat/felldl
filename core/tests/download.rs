@@ -1208,8 +1208,9 @@ async fn cancel_with_delete_removes_part_file() {
     let part = part_of(&save_path);
     assert!(part.exists(), "下载中应有 .part");
 
+    // 不再额外 sleep：cancel 必须自己等在途 worker 退出后再删，
+    // 否则 Windows 上句柄未关闭会让 .part 删不掉
     engine.cancel(&id, true).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(!part.exists(), "删除任务后 .part 必须一并清理");
     assert!(
         !std::path::Path::new(&save_path).exists(),

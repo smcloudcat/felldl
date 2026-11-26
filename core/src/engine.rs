@@ -175,6 +175,9 @@ pub(crate) struct Runtime {
     /// 2) 删除任务后 worker 迟到写回 Paused/Completed，任务在磁盘和 UI 上复活；
     /// 3) 旧 worker 的 Error 覆盖用户刚点的暂停。
     pub(crate) generation: AtomicU64,
+    /// 正在被删除：从发起删除到记录消失之间，任何 worker 都不许再改状态/广播。
+    /// 删除期间用户要的是「它消失」，不是「它先暂停了一下」。
+    pub(crate) deleting: std::sync::atomic::AtomicBool,
 }
 
 impl Runtime {
@@ -221,6 +224,7 @@ impl Runtime {
             task: Mutex::new(task),
             task_limiter: Mutex::new(None),
             generation: AtomicU64::new(0),
+            deleting: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -1056,10 +1060,20 @@ impl Engine {
         let is_bt = rt.task.lock().kind == TaskKind::Bt;
         // BT 任务先从 rqbit 会话移除；文件删除交给 rqbit 按其受控文件清单处理，
         // 不能再用通用的路径递归删除（顶层名可能对应原有同名目录）。
+        // 从这一刻起该任务只允许「消失」：worker 收尾时的暂停/错误写入与事件都被丢弃
+        rt.deleting.store(true, Ordering::SeqCst);
         if is_bt {
             self.bt_remove(&rt, delete_file).await;
         } else {
             rt.cancel.lock().cancel();
+            // 等在途 worker 真正退出再删文件：Windows 上句柄没关时删除会失败，
+            // 结果是「任务删了，目录里还留着一个 .part」；Unix 上也避免删完又被写回。
+            // 有界等待（3 秒），卡在阻塞 IO 里的 worker 不会把 UI 拖死——
+            // 超时后照常继续，正确性由运行代号 + 存储墓碑保证。
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while *rt.running.lock() && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
         }
         // 让在途 worker 立即作废：删除后它的任何状态写入 / 事件广播都被丢弃，
         // 否则用户删掉的任务会以「暂停中」的身份重新出现在列表和磁盘上。
@@ -1121,7 +1135,7 @@ impl Engine {
     where
         F: FnOnce(&mut Task),
     {
-        if !rt.is_current(generation) {
+        if !rt.is_current(generation) || rt.deleting.load(Ordering::SeqCst) {
             return false;
         }
         let mut t = rt.task.lock();
