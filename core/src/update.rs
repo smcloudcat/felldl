@@ -173,6 +173,18 @@ impl VerifiedUpdate {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// 把已校验的文件移动到最终位置：同一个 inode 改名，内容不再变化，
+    /// 因此校验结果继续有效。跨盘改名会失败，由调用方决定退化为复制后重校验。
+    pub fn move_to(mut self, dest: &Path) -> Result<Self> {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::rename(&self.path, dest)
+            .with_context(|| format!("移动更新包失败: {} → {}", self.path.display(), dest.display()))?;
+        self.path = dest.to_path_buf();
+        Ok(self)
+    }
 }
 
 /// 校验已下载的产物：长度 + SHA256 必须与清单声明一致。
