@@ -48,23 +48,6 @@ function Switch({
   );
 }
 
-/** 从更新信息里挑出当前平台该装的包；资产列表为空（来自兜底源）时按发布命名规则拼地址 */
-export function pickUpdateAsset(info: UpdateInfo): { url: string; name: string } | null {
-  const ver = (info.latest_version || "").replace(/^v/, "").trim();
-  const android = document.documentElement.dataset.platform === "android";
-  const suffix = android ? "android-arm64.apk" : "win-x64.exe";
-  const hit = (info.assets || []).find(
-    (a) => a.download_url && a.name.toLowerCase().endsWith(suffix)
-  );
-  if (hit) return { url: hit.download_url, name: hit.name };
-  if (!ver) return null;
-  const name = `Felldl-${ver}-${suffix}`;
-  return {
-    url: `https://github.com/smcloudcat/felldl/releases/download/v${ver}/${name}`,
-    name,
-  };
-}
-
 /** 带数值回显的滑块（背景模糊 / 遮罩 / 面板透明度） */
 function Slider({
   label,
@@ -163,12 +146,8 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
 
   async function instantUpdate() {
     if (!updateInfo) return;
-    // 只做「有没有可更新」的前置判断；下载地址来自后端验签过的清单
-    const asset = pickUpdateAsset(updateInfo);
-    if (!asset) {
-      toast(t("set.updateNoAsset"), "error");
-      return;
-    }
+    // 不再在前端按文件名猜「有没有适配包」：平台/ABI 由后端按签名清单里的
+    // platform + arch 权威选择，前端猜错会直接拦掉一次本来能成功的更新。
     setPhase("download");
     setPercent(0);
     setSizeHint("");
@@ -185,9 +164,9 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
     } catch (e: any) {
       setPhase("idle");
       setPercent(0);
-      const msg = typeof e === "string" ? e : String(e?.message ?? e);
+      const raw = typeof e === "string" ? e : String(e?.message ?? e);
       // 安卓首次更新需要用户允许「安装未知应用」：直接把人带到设置页
-      if (msg.startsWith("install.need_permission")) {
+      if (raw.startsWith("install.need_permission")) {
         toast(t("set.needInstallPermission"), "error");
         try {
           await api.openInstallPermissionSettings();
@@ -195,7 +174,8 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
           /* 打开失败就只剩提示，用户可以自己去系统设置里开 */
         }
       } else {
-        toast(msg, "error");
+        // 后端错误带 `install.xxx:` 机器前缀，展示时剥掉
+        toast(raw.replace(/^install\.[a-z_]+:\s*/, ""), "error");
       }
     }
   }

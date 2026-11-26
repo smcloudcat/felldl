@@ -96,6 +96,40 @@ fn data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().join("felldl"))
 }
 
+/// 清掉上次留下的更新包（含未下完的 `.part`）。
+///
+/// 为什么可以无脑删：安装入口只认 `VerifiedUpdates` 里的内存 token，
+/// 进程一退出 token 就没了，磁盘上的旧包再也不会被用到。
+/// 安卓安装过程中本进程会被系统杀掉，能在启动时跑到这里，说明安装已结束或已被取消。
+fn cleanup_update_cache(app: &tauri::AppHandle) {
+    let freed = remove_files_in(&data_dir(app).join("updates"));
+    if freed > 0 {
+        eprintln!(
+            "[update] 已清理更新缓存 {:.1} MB",
+            freed as f64 / 1024.0 / 1024.0
+        );
+    }
+}
+
+/// 删除目录下的普通文件，返回释放的字节数；子目录保留（不是我们创建的，不动）。
+fn remove_files_in(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut freed: u64 = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if std::fs::remove_file(&path).is_ok() {
+            freed += size;
+        }
+    }
+    freed
+}
+
 // ───────────────────────── 命令 ─────────────────────────
 
 #[tauri::command]
@@ -1494,6 +1528,13 @@ async fn apply_update(
     verified: State<'_, VerifiedUpdates>,
     token: String,
 ) -> Result<String, String> {
+    // 安卓：没有「安装未知应用」授权时，连 token 都不该消费——
+    // 用户去设置里授权回来后还能直接重试，不必把几十 MB 的更新包再下一遍。
+    #[cfg(target_os = "android")]
+    if !android::can_install_packages(&app)? {
+        return Err("install.need_permission: 需要允许「安装未知应用」才能更新".into());
+    }
+
     let update = verified
         .take(&token)
         .ok_or_else(|| "更新包未通过校验或已失效，请重新下载".to_string())?;
@@ -1549,15 +1590,12 @@ async fn apply_update(
         let pkg = app.config().identifier.clone();
         let path = update.path().to_string_lossy().to_string();
 
-        if !android::can_install_packages(&app)? {
-            return Err("install.need_permission: 需要允许「安装未知应用」才能更新".into());
-        }
         let installed = android::installed_apk_info(&app, &pkg)
-            .map_err(|e| format!("读取已安装版本信息失败：{e}"))?;
+            .map_err(|e| format!("install.failed: 读取已安装版本信息失败：{e}"))?;
         let apk = android::apk_info(&app, &path)
-            .map_err(|e| format!("更新包不可用：{e}"))?;
+            .map_err(|e| format!("install.failed: 更新包不可用：{e}"))?;
         apk_update::verify_installable(&pkg, &installed, &apk, update.version_code)
-            .map_err(|e| format!("更新包校验失败：{e}"))?;
+            .map_err(|e| format!("install.rejected: {e}"))?;
         android::install_apk(&app, &path)?;
         Ok("installing".into())
     }
@@ -1573,6 +1611,7 @@ async fn apply_update(
 }
 
 /// 下载中的临时文件路径（与 `felldl_core::util::part_path` 保持一致）
+#[cfg_attr(target_os = "android", allow(dead_code))] // 安卓没有「打开/定位文件」的桌面分支
 fn in_progress_part(p: &std::path::Path) -> std::path::PathBuf {
     let name = p
         .file_name()
@@ -1732,6 +1771,9 @@ pub fn run() {
             let handle = app.handle().clone();
             let dir = data_dir(&handle);
             std::fs::create_dir_all(&dir).ok();
+            // 更新包只在「安装那一刻」有用：安卓装完会在新进程里回来，
+            // Windows 的 helper 也已经把 exe 换走了。每次启动清一次，避免几十 MB 常驻。
+            cleanup_update_cache(&handle);
 
             // 引擎 + 后台循环
             let engine = tauri::async_runtime::block_on(async {
@@ -1999,5 +2041,41 @@ mod verified_update_tests {
             current_platform()
         );
         assert!(!current_arch().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod update_cache_tests {
+    use super::remove_files_in;
+
+    fn temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("felldl-update-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn removes_only_regular_files_and_reports_bytes() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(dir.join("keep")).unwrap();
+        std::fs::write(dir.join("new.apk"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.join("new.apk.part"), vec![0u8; 23]).unwrap();
+        std::fs::write(dir.join("keep").join("inside.txt"), b"x").unwrap();
+
+        assert_eq!(remove_files_in(&dir), 123, "应统计被删文件的总字节数");
+        assert!(!dir.join("new.apk").exists(), "装完/放弃的更新包应被清理");
+        assert!(!dir.join("new.apk.part").exists(), "半截包也应清理");
+        assert!(
+            dir.join("keep").join("inside.txt").exists(),
+            "不是本模块创建的子目录不做递归删除"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_dir_is_not_an_error() {
+        let missing =
+            std::env::temp_dir().join(format!("felldl-none-{}", uuid::Uuid::new_v4()));
+        assert_eq!(remove_files_in(&missing), 0);
     }
 }

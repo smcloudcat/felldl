@@ -1,5 +1,6 @@
 package com.felldl.app
 
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInfo
@@ -75,7 +76,17 @@ object ApkInstaller {
         "ERR:无法打开安装权限设置：${e.message}"
     }
 
-    /** 用 content:// URI 拉起系统安装器（必须带读权限，否则安装器打不开文件） */
+    /**
+     * 用 content:// URI 拉起系统安装器（必须带读权限，否则安装器打不开文件）。
+     *
+     * 错误按类型加前缀，便于上层给不同提示：
+     * - `install.no_handler`：系统没有能处理 apk 的安装器；
+     * - `install.uri_denied`：URI 授权/权限被拒（FileProvider 配置或 grant flag 有问题）；
+     * - `install.failed`：其它未知失败。
+     *
+     * 不用 `resolveActivity` 预检：target 30+ 的包可见性会让它误报 null，
+     * 直接 startActivity 并捕获 ActivityNotFoundException 更准。
+     */
     @JvmStatic
     fun install(ctx: Context, uri: String, mime: String): String = try {
         val intent = Intent(Intent.ACTION_VIEW)
@@ -85,8 +96,12 @@ object ApkInstaller {
         )
         ctx.startActivity(intent)
         "OK:"
+    } catch (e: ActivityNotFoundException) {
+        "ERR:install.no_handler: 系统没有可用的安装器"
+    } catch (e: SecurityException) {
+        "ERR:install.uri_denied: 系统拒绝了安装器读取更新包的权限"
     } catch (e: Exception) {
-        "ERR:无法启动系统安装器：${e.message}"
+        "ERR:install.failed: ${e.message}"
     }
 
     private fun signFlags(): Int =

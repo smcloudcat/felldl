@@ -57,8 +57,13 @@ android {
         applicationId = "com.felldl.app"
         minSdk = 24
         targetSdk = 36
-        versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
-        versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        // 不提供默认值：以前缺文件会静默变成 1.0 / 1，升级时 versionCode 不涨，
+        // Android 直接拒装且很难查。宁可在这里构建失败，也不要产出装不上的包。
+        versionCode = (tauriProperties.getProperty("tauri.android.versionCode")
+            ?: error("缺少 app/tauri.properties 的 tauri.android.versionCode；请用 scripts/build-android.ps1 构建，或先执行 cargo tauri android build"))
+            .toInt()
+        versionName = tauriProperties.getProperty("tauri.android.versionName")
+            ?: error("缺少 app/tauri.properties 的 tauri.android.versionName；请用 scripts/build-android.ps1 构建")
     }
     buildTypes {
         getByName("debug") {

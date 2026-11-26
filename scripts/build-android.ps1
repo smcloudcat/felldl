@@ -114,6 +114,33 @@ $env:WRY_ANDROID_PACKAGE = $androidPackage
 $env:WRY_ANDROID_LIBRARY = "felldl_lib"
 $env:WRY_ANDROID_KOTLIN_FILES_OUT_DIR = $generatedKotlin
 
+# ── 3.5 版本号：从 tauri.conf.json 生成 tauri.properties ──
+# 不生成的话，Gradle 会退回 app/build.gradle.kts 里的默认值（versionName=1.0 /
+# versionCode=1）：每次升级 versionCode 都不涨，Android 会拒绝安装、商店也无法判新旧。
+# 编码规则与 Tauri CLI 一致：major*1_000_000 + minor*1_000 + patch（0.3.9 → 3009）。
+$tauriConf = Get-Content -LiteralPath (Join-Path $projectRoot "src-tauri\tauri.conf.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+$versionName = "$($tauriConf.version)".Trim()
+if ($versionName -notmatch '^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$') {
+    Write-Host "[!] tauri.conf.json 的 version 不是 x.y.z 形式：$versionName" -ForegroundColor Red
+    exit 1
+}
+$vMajor = [int]$Matches[1]; $vMinor = [int]$Matches[2]; $vPatch = [int]$Matches[3]
+if ($vMinor -ge 1000 -or $vPatch -ge 1000) {
+    Write-Host "[!] version 的次版本/补丁号必须小于 1000，否则 versionCode 会冲突：$versionName" -ForegroundColor Red
+    exit 1
+}
+$versionCode = $vMajor * 1000000 + $vMinor * 1000 + $vPatch
+# 显式要求清单能声明同一个 versionCode；发布时 update-manifest.json 里必须带 version_code
+Write-Host "[OK] 版本: $versionName (versionCode=$versionCode)" -ForegroundColor Green
+
+$tauriProps = Join-Path $androidProject "app\tauri.properties"
+$propsContent = @"
+# 由 scripts/build-android.ps1 根据 src-tauri/tauri.conf.json 生成，请勿手改。
+tauri.android.versionName=$versionName
+tauri.android.versionCode=$versionCode
+"@
+[System.IO.File]::WriteAllText($tauriProps, $propsContent, (New-Object System.Text.UTF8Encoding($false)))
+
 # ── 4. 前端构建 ──────────────────────────────────────────
 Write-Host "[..] 构建前端 ..." -ForegroundColor Yellow
 Push-Location ui
@@ -222,16 +249,62 @@ try {
 
 if (-not $gradleOk) { Write-Host "[!] Gradle 构建失败，请检查上方日志" -ForegroundColor Red; exit 1 }
 
+# ── 7.5 核对产物里的版本号 ───────────────────────────────
+# 只相信 APK 里真正写进去的值：tauri.properties 被覆盖、Gradle 用默认值、
+# 或者打了别的 flavor，都会在这里暴露出来，而不是等用户装不上才发现。
+$aapt2 = Get-ChildItem (Join-Path $sdk "build-tools") -Directory -ErrorAction SilentlyContinue |
+    Sort-Object { try { [version]$_.Name } catch { [version]"0.0.0" } } -Descending |
+    ForEach-Object { Join-Path $_.FullName "aapt2.exe" } |
+    Where-Object { Test-Path -LiteralPath $_ } |
+    Select-Object -First 1
+
 # ── 8. 报告产物 ──────────────────────────────────────────
 Write-Host ""
 Write-Host "=== 构建完成 ===" -ForegroundColor Cyan
 $apkRoot = "src-tauri\gen\android\app\build\outputs\apk"
-$apks = Get-ChildItem $apkRoot -Recurse -Filter "*.apk" -ErrorAction SilentlyContinue |
-    Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-10) }
+# 先按约定路径精确取产物：Gradle 全部 UP-TO-DATE 时 APK 的 mtime 不会变，
+# 用「最近 10 分钟」筛选会把手到擒来的成功判成「没产物」。
+$flavorDir = $cfg.GradleFlavor.ToLower()
+$profileDir = if ($Release) { "release" } else { "debug" }
+$expectedApk = Join-Path $apkRoot (Join-Path $flavorDir (Join-Path $profileDir "app-$flavorDir-$profileDir.apk"))
+$apks = @()
+if (Test-Path -LiteralPath $expectedApk) {
+    $apks = @(Get-Item -LiteralPath $expectedApk)
+} else {
+    $apks = @(Get-ChildItem $apkRoot -Recurse -Filter "*.apk" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending)
+    if ($apks.Count -gt 0) {
+        Write-Host "[!] 未找到预期产物 $expectedApk，改用最新的 APK 核对版本" -ForegroundColor Yellow
+    }
+}
 if ($apks) {
     foreach ($a in $apks) {
+        if ($aapt2) {
+            $badging = & $aapt2 dump badging $a.FullName 2>$null
+            $pkgLine = $badging | Select-String -Pattern "^package:" | Select-Object -First 1
+            # 必须分两次匹配再取值：连续写两条 -and 时 $Matches 只保留最后一条正则的分组
+            $apkCode = -1
+            $apkName = ""
+            if ($pkgLine) {
+                if ($pkgLine.Line -match "versionCode='(\d+)'") { $apkCode = [int]$Matches[1] }
+                if ($pkgLine.Line -match "versionName='([^']+)'") { $apkName = $Matches[1] }
+            }
+            if ($apkCode -ge 0 -and $apkName) {
+                if ($apkCode -ne $versionCode -or $apkName -ne $versionName) {
+                    Write-Host ("[!] {0} 里的版本是 {1} ({2})，与期望的 {3} ({4}) 不一致" -f `
+                        $a.Name, $apkName, $apkCode, $versionName, $versionCode) -ForegroundColor Red
+                    exit 1
+                }
+                Write-Host ("  版本核对通过: {0} (versionCode={1})" -f $apkName, $apkCode) -ForegroundColor Green
+            } else {
+                Write-Host "[!] 无法从 APK 读取 versionCode/versionName，版本未核对" -ForegroundColor Yellow
+            }
+        }
         Write-Host ("  {0}" -f $a.FullName) -ForegroundColor Green
         Write-Host ("  大小: {0} MB" -f [math]::Round($a.Length/1MB, 1)) -ForegroundColor Green
+    }
+    if (-not $aapt2) {
+        Write-Host "[!] 未找到 aapt2（Android build-tools），跳过产物版本核对" -ForegroundColor Yellow
     }
     $first = $apks[0].FullName
     Write-Host ""
@@ -239,4 +312,5 @@ if ($apks) {
     Write-Host "  adb install -r `"$first`"" -ForegroundColor DarkGray
 } else {
     Write-Host "[!] 未找到 APK 产物" -ForegroundColor Red
+    exit 1
 }
