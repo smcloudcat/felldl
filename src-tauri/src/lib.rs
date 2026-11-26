@@ -20,6 +20,8 @@ use tauri::{
 mod android;
 // 纯路径映射不带 cfg：桌面端也能跑它的单元测试
 mod android_paths;
+// 更新落地 helper（同一 exe 的隐藏子命令，main 里在 Tauri 初始化前分流）
+pub mod update_helper;
 
 struct AppState {
     engine: Arc<Engine>,
@@ -1453,38 +1455,58 @@ async fn download_update(
 }
 
 /// 应用更新：只接受 download_update 返回的 token（不接受路径）。
-/// Windows 走「延迟脚本覆盖 + 重启」，其它平台交给系统安装。
+/// Windows 用自己的隐藏 helper 进程做替换并重启，其它平台交给系统安装。
 #[tauri::command]
 async fn apply_update(
     app: tauri::AppHandle,
+    state: State<'_, AppState>,
     verified: State<'_, VerifiedUpdates>,
     token: String,
 ) -> Result<String, String> {
     let update = verified
         .take(&token)
         .ok_or_else(|| "更新包未通过校验或已失效，请重新下载".to_string())?;
-    let path = update.path().to_string_lossy().to_string();
+
+    // 先把进行中的任务暂停落盘（pause 会保存 checkpoint），
+    // 否则更新重启后可能带着过期进度回来，把"填零"当成已下载。
+    let running: Vec<String> = state
+        .engine
+        .snapshot()
+        .into_iter()
+        .filter(|t| {
+            matches!(
+                t.state,
+                felldl_core::TaskState::Downloading | felldl_core::TaskState::Queued
+            )
+        })
+        .map(|t| t.id)
+        .collect();
+    for id in running {
+        let _ = state.engine.pause(&id).await;
+    }
 
     #[cfg(target_os = "windows")]
     {
         let exe = std::env::current_exe().map_err(|e| format!("定位当前程序失败: {e}"))?;
-        let bat = data_dir(&app).join("apply-update.cmd");
-        // timeout 等待本进程退出；copy 失败（比如装在 Program Files）就直接跑新文件
-        let script = format!(
-            "@echo off\r\n\
-             chcp 65001 >nul\r\n\
-             timeout /t 2 /nobreak >nul\r\n\
-             copy /y \"{new}\" \"{old}\" >nul 2>&1\r\n\
-             if exist \"{old}\" (start \"\" \"{old}\") else (start \"\" \"{new}\")\r\n\
-             del /f /q \"%~f0\" >nul 2>&1\r\n",
-            new = path,
-            old = exe.to_string_lossy()
-        );
-        std::fs::write(&bat, script).map_err(|e| format!("写入更新脚本失败: {e}"))?;
-        std::process::Command::new("cmd")
-            .args(["/C", &bat.to_string_lossy().to_string()])
-            .spawn()
-            .map_err(|e| format!("启动更新程序失败: {e}"))?;
+        // 不再写 .cmd 脚本：直接以独立进程拉起「自己」的隐藏 helper，
+        // 参数走 argv（文件名里的空格/&/%/括号不会被二次解析）。
+        // helper 会等本进程真正退出后再替换，并负责失败回滚。
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg(crate::update_helper::HELPER_FLAG)
+            .arg("--from")
+            .arg(update.path())
+            .arg("--to")
+            .arg(&exe)
+            .arg("--restart")
+            .creation_flags(CREATE_NO_WINDOW);
+        match cmd.spawn() {
+            Ok(child) => eprintln!("[update] 已启动更新 helper pid={}", child.id()),
+            Err(e) => return Err(format!("启动更新程序失败: {e}")),
+        }
+        // 给 helper 一点时间起跑再退出，避免极端情况下父子同时被回收
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         app.exit(0);
         Ok("restarting".into())
     }
@@ -1492,7 +1514,7 @@ async fn apply_update(
     {
         // 安卓：调起系统安装器；失败就让用户自己去文件管理器点安装
         use tauri_plugin_opener::OpenerExt;
-        match app.opener().open_path(&path, None::<&str>) {
+        match app.opener().open_path(update.path(), None::<&str>) {
             Ok(_) => Ok("opened".into()),
             Err(_) => Ok("manual".into()),
         }
