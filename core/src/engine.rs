@@ -1340,6 +1340,7 @@ impl Engine {
                         index: seg.index,
                         cursor: seg.cursor(),
                         end: seg.end,
+                        total,
                         file,
                         limiter,
                         global,
@@ -1482,11 +1483,17 @@ impl Engine {
         let creds = Creds::from_task(&task_snapshot);
         let req = creds.apply(req, &url);
         let resp = req.send().await.context("请求失败")?;
-        if !resp.status().is_success() {
-            bail!("服务器返回 {}", resp.status().as_u16());
-        }
+        let status = resp.status();
         // 请求了 Range 但服务器回 200（不支持续传）：必须从头写，否则文件会错位
-        let resumed_by_server = resp.status() == StatusCode::PARTIAL_CONTENT;
+        let resumed_by_server = status == StatusCode::PARTIAL_CONTENT;
+        if resumed_by_server {
+            // 206 必须正是请求的那个起点，且总长度与探测结果一致，
+            // 否则说明服务器给了别的区间，按旧偏移落盘会写出错位数据
+            let expected_total = { rt.task.lock().size };
+            check_partial_content(&resp, start, None, expected_total)?;
+        } else if !status.is_success() {
+            bail!("服务器返回 {}", status.as_u16());
+        }
         let mut offset = if start > 0 && resumed_by_server { start } else { 0 };
 
         let file = OpenOptions::new()
@@ -1820,6 +1827,8 @@ struct SegmentJob {
     index: usize,
     cursor: u64,
     end: u64,
+    /// 探测得到的总长度（未知为 None），用于核对 Content-Range 的 /total
+    total: Option<u64>,
     file: Arc<File>,
     limiter: Arc<RateLimiter>,
     global: Arc<RateLimiter>,
@@ -1863,6 +1872,51 @@ async fn remove_downloaded(path: &str) {
         }
     }
     eprintln!("[delete] 文件删除失败（已重试）: {path}");
+}
+
+/// 校验 206 响应的 `Content-Range` 是否与本次请求严格对应。
+///
+/// 只信状态码是危险的：起点被换成 0、区间被截短、总长度变了都仍可能返回 206，
+/// 数据会被写进错误偏移，最后得到一个长度对、内容乱的成品。这里逐项核对
+/// 起点 / 终点（不得越过请求区间）/ 总长度（若已知），任何一项不符都报错重试。
+fn check_partial_content(
+    resp: &reqwest::Response,
+    expected_start: u64,
+    expected_end: Option<u64>,
+    expected_total: Option<u64>,
+) -> Result<()> {
+    let Some(cr) = resp
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+    else {
+        bail!("服务器返回 206 但缺少 Content-Range，无法确认数据区间");
+    };
+    let Some((start, end, total)) = util::parse_content_range(cr) else {
+        bail!("Content-Range 无法解析: {cr}");
+    };
+    if end < start {
+        bail!("Content-Range 区间非法（{start}-{end}）");
+    }
+    if start != expected_start {
+        bail!("服务器返回的区间起点不符（期望 {expected_start}，实际 {start}）");
+    }
+    if let Some(want_end) = expected_end {
+        if end > want_end {
+            bail!("服务器返回的区间超出请求（请求到 {want_end}，实际到 {end}）");
+        }
+    }
+    if let (Some(want), Some(got)) = (expected_total, total) {
+        if want != got {
+            bail!("服务器声明的总长度不一致（期望 {want}，实际 {got}）");
+        }
+    }
+    if let (Some(e), Some(t)) = (expected_end, total) {
+        if t <= e {
+            bail!("Content-Range 总长度 {t} 不足以覆盖请求终点 {e}");
+        }
+    }
+    Ok(())
 }
 
 async fn download_segment(job: SegmentJob, cancel: CancellationToken) -> Result<()> {
@@ -1930,9 +1984,11 @@ async fn fetch_segment(
         // 服务器忽略了 Range（If-Range 校验失败或本身不支持）
         return Err(anyhow!("服务器不支持分段（返回 200），请减少连接数后重试"));
     }
-    if !status.is_success() {
+    if status != StatusCode::PARTIAL_CONTENT {
         return Err(anyhow!("分片请求失败: HTTP {}", status.as_u16()));
     }
+    // 206 必须与请求区间严格对应，否则写入位置会错位
+    check_partial_content(&resp, *cursor, Some(job.end), job.total)?;
 
     let mut stream = resp.bytes_stream();
     loop {

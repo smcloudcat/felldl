@@ -743,3 +743,127 @@ async fn resume_after_local_file_truncated() {
     })
     .await;
 }
+
+// ── R03：206 响应的 Content-Range 必须与请求严格对应 ──
+
+/// 说谎的服务器：始终返回 206，但 Content-Range 与请求不符
+async fn spawn_liar_server(body: Vec<u8>, mode: &'static str) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = Arc::new(body);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let total = body.len() as u64;
+                let mut range: Option<(u64, u64)> = None;
+                for line in req.lines() {
+                    let ll = line.to_lowercase();
+                    if ll.starts_with("range:") {
+                        let v = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                        if let Some(spec) = v.strip_prefix("bytes=") {
+                            if let Some((a, b)) = spec.trim().split_once('-') {
+                                let start = a.trim().parse::<u64>().unwrap_or(0);
+                                let end = if b.trim().is_empty() {
+                                    total - 1
+                                } else {
+                                    b.trim().parse::<u64>().unwrap_or(total - 1)
+                                };
+                                range = Some((start, end.min(total - 1)));
+                            }
+                        }
+                    }
+                }
+                let (req_start, req_end) = range.unwrap_or((0, total - 1));
+                let req_start = req_start.min(total - 1);
+                let req_end = req_end.min(total - 1).max(req_start);
+                // 谎报：永远声称从 0 开始（对 start>0 的请求就是错位的数据）
+                let claimed_start = match mode {
+                    "wrong_start" => 0u64,
+                    _ => req_start,
+                };
+                let want_len = (req_end - req_start + 1).min(total - claimed_start);
+                let claimed_end = claimed_start + want_len - 1;
+                let slice = &body[claimed_start as usize..=(claimed_end as usize)];
+                let cr = match mode {
+                    "no_header" => String::new(),
+                    "wrong_total" => format!("Content-Range: bytes {}-{}/{}\r\n", claimed_start, claimed_start + claimed_end, total + 1024),
+                    _ => format!(
+                        "Content-Range: bytes {}-{}/{}\r\n",
+                        claimed_start,
+                        claimed_start + claimed_end,
+                        total
+                    ),
+                };
+                let head = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n{}ETag: \"abc123\"\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                    slice.len(), cr
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(slice).await;
+                let _ = sock.flush().await;
+            });
+        }
+    });
+    addr
+}
+
+/// 206 区间不符时必须报错，而不是把错误区间的数据写进文件并标记完成
+async fn rejects_bad_partial_content(tag: &str, mode: &'static str, expect_msg: &str) {
+    // 必须大到能切出多个分片：1MB 只会规划出 1 个分片，起点永远对得上
+    let payload = make_payload(4 * 1024 * 1024);
+    let addr = spawn_liar_server(payload.clone(), mode).await;
+    let root = temp_root(tag);
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    let id = engine
+        .add(AddTaskRequest {
+            url: format!("http://{addr}/lie.bin"),
+            save_dir: Some(out.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let t = wait_done(&engine, &id, Duration::from_secs(90)).await;
+    assert_eq!(t.state, TaskState::Error, "不应把错误数据当成完成");
+    let msg = t.error.clone().unwrap_or_default();
+    assert!(!msg.is_empty(), "失败任务必须带上可读原因");
+    if !expect_msg.is_empty() {
+        assert!(
+            msg.contains(expect_msg),
+            "错误信息应说明原因（期望包含「{expect_msg}」），实际: {msg}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejects_partial_content_with_wrong_start() {
+    rejects_bad_partial_content("lie_start", "wrong_start", "区间起点不符").await;
+}
+
+/// 服务器谎报总长度：探测阶段就会被采信，后续请求必然越界或起点不符，
+/// 具体报哪一条取决于越界方向，这里只要求「以错误结束且原因可读」
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejects_partial_content_with_wrong_total() {
+    rejects_bad_partial_content("lie_total", "wrong_total", "").await;
+}
+
+/// 206 不给 Content-Range：单流下载也不能凭状态码就写到文件里
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejects_partial_content_without_header() {
+    rejects_bad_partial_content("lie_nohdr", "no_header", "缺少 Content-Range").await;
+}

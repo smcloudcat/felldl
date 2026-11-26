@@ -541,29 +541,34 @@ pub struct AddTaskRequest {
 }
 
 /// 从 URL 中剥离 userinfo（user:pass@host）→ 返回 (剥离后的 URL, user, pass)
+///
+/// 用 `url::Url` 解析而不是字符串拼接：早期实现的 `format!("{}://{}", &url[..scheme_end+3], ..)`
+/// 会切到「://」之后、再补一个「://」，得到 `https://://host/path` 这种非法地址。
+/// 这里同时处理 percent encoding 与「只有用户名」「只有密码」「空凭据」等写法。
 pub fn split_url_userinfo(url: &str) -> (String, Option<String>, Option<String>) {
-    if let Some(scheme_end) = url.find("://") {
-        let after = &url[scheme_end + 3..];
-        if let Some(at) = after.find('@') {
-            // 只把最后一个 @ 前的部分当凭据（密码里可能带 @，取 host 段前的第一个 @ 不可靠，
-            // 但 host 段不含 @，因此取第一个出现在路径之前的 @）
-            let head = &after[..at];
-            if head.contains('/') || head.contains('?') || head.contains('#') {
-                return (url.to_string(), None, None);
-            }
-            let (u, p) = match head.split_once(':') {
-                Some((u, p)) => (u.to_string(), p.to_string()),
-                None => (head.to_string(), String::new()),
-            };
-            let cleaned = format!("{}://{}", &url[..scheme_end + 3], &after[at + 1..]);
-            return (
-                cleaned,
-                if u.is_empty() { None } else { Some(u) },
-                if p.is_empty() { None } else { Some(p) },
-            );
-        }
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return (url.to_string(), None, None);
+    };
+    let raw_user = parsed.username().to_string();
+    let raw_pass = parsed.password().map(|s| s.to_string());
+    if raw_user.is_empty() && raw_pass.is_none() {
+        return (url.to_string(), None, None);
     }
-    (url.to_string(), None, None)
+    // 凭据里的 percent encoding 是给 URL 用的，真正做 Basic 认证时要还原成原文
+    let decode = |s: &str| percent_encoding::percent_decode_str(s).decode_utf8_lossy().to_string();
+    let user = decode(&raw_user);
+    let pass = raw_pass.as_deref().map(decode);
+
+    // 剥离 userinfo；失败（极少数 scheme 不支持）就原样返回，不冒险改地址
+    if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+        return (url.to_string(), None, None);
+    }
+    let cleaned = parsed.to_string();
+    (
+        cleaned,
+        if user.is_empty() { None } else { Some(user) },
+        pass.filter(|p| !p.is_empty()),
+    )
 }
 
 /// 引擎事件（推送给 UI / 订阅者）
@@ -680,5 +685,63 @@ mod resume_anchor_tests {
         assert!(!anchor(100, 111).still_matches(&anchor(100, 222)));
         // 平台不提供创建时间（0）时退化为只看长度
         assert!(anchor(100, 0).still_matches(&anchor(100, 222)));
+    }
+}
+
+#[cfg(test)]
+mod url_userinfo_tests {
+    use super::split_url_userinfo;
+
+    #[test]
+    fn strips_userinfo_without_duplicating_scheme() {
+        let (u, user, pass) = split_url_userinfo("https://alice:s3cret@example.com/a.zip");
+        assert_eq!(u, "https://example.com/a.zip");
+        assert_eq!(user.as_deref(), Some("alice"));
+        assert_eq!(pass.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn percent_encoded_credentials_are_decoded() {
+        let (u, user, pass) = split_url_userinfo("https://u%40ser:p%3Ass@example.com/x");
+        assert_eq!(u, "https://example.com/x");
+        assert_eq!(user.as_deref(), Some("u@ser"));
+        assert_eq!(pass.as_deref(), Some("p:ss"));
+    }
+
+    #[test]
+    fn password_may_contain_at_sign() {
+        let (u, user, pass) = split_url_userinfo("https://u:p@ss@example.com/x");
+        assert_eq!(u, "https://example.com/x");
+        assert_eq!(user.as_deref(), Some("u"));
+        assert_eq!(pass.as_deref(), Some("p@ss"));
+    }
+
+    #[test]
+    fn empty_or_missing_parts() {
+        // 只有用户名
+        let (u, user, pass) = split_url_userinfo("ftp://bob@example.com/f.bin");
+        assert_eq!(u, "ftp://example.com/f.bin");
+        assert_eq!(user.as_deref(), Some("bob"));
+        assert!(pass.is_none());
+        // 只有密码（用户名为空）
+        let (u, user, pass) = split_url_userinfo("https://:pw@example.com/x");
+        assert_eq!(u, "https://example.com/x");
+        assert!(user.is_none());
+        assert_eq!(pass.as_deref(), Some("pw"));
+    }
+
+    #[test]
+    fn urls_without_userinfo_are_untouched() {
+        for raw in [
+            "https://example.com/a.zip",
+            "https://example.com/a@b.zip?x=1@2",
+            "http://127.0.0.1:8080/f",
+            "not a url",
+            "",
+        ] {
+            let (u, user, pass) = split_url_userinfo(raw);
+            assert_eq!(u, raw, "{raw} 不应被改动");
+            assert!(user.is_none() && pass.is_none(), "{raw} 不应解析出凭据");
+        }
     }
 }
