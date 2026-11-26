@@ -1032,7 +1032,8 @@ impl Engine {
                 let seg = u.as_ref().and_then(|u| u.path_segments()).and_then(|p| p.last());
                 sanitize_name(&format!("{}.ts", seg.unwrap_or("hls-video")))
             });
-        let path = crate::util::unique_path(Path::new(&dir), &name);
+        let path = crate::util::reserve_path(Path::new(&dir), &name)
+            .with_context(|| format!("无法在 {dir} 分配文件名"))?;
 
         let t = Task {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1071,6 +1072,7 @@ impl Engine {
             username: None,
             password: None,
             interval_secs: 0,
+            resume_anchor: None,
         };
         let id = t.id.clone();
         let task_id = id.clone();

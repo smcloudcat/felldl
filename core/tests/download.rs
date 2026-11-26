@@ -165,7 +165,10 @@ async fn wait_done(engine: &Arc<Engine>, id: &str, timeout: Duration) -> felldl_
             return t;
         }
         if start.elapsed() > timeout {
-            panic!("下载超时，最终状态: {:?}, 进度 {}/{:?}", t.state, t.downloaded, t.size);
+            panic!(
+                "下载超时，最终状态: {:?}, 进度 {}/{:?}",
+                t.state, t.downloaded, t.size
+            );
         }
     }
 }
@@ -202,7 +205,11 @@ async fn segmented_download_is_byte_exact() {
     assert_eq!(got.len(), payload.len(), "文件长度不符");
     assert!(got == payload, "内容不一致（分片写入错位）");
     // 确实用了多段
-    assert!(t.segments.len() >= 2, "应分成多段，实际 {}", t.segments.len());
+    assert!(
+        t.segments.len() >= 2,
+        "应分成多段，实际 {}",
+        t.segments.len()
+    );
     assert!(
         srv.range_hits.load(Ordering::Relaxed) >= 2,
         "服务器应收到多个 Range 请求"
@@ -350,7 +357,10 @@ async fn error_paths_are_reported() {
         let t = engine.get(&id).unwrap();
         assert_eq!(t.state, TaskState::Error, "{path} 应为错误态");
         let msg = t.error.clone().unwrap_or_default();
-        assert!(msg.contains(expect_kw), "{path} 错误信息应包含 {expect_kw}，实际: {msg}");
+        assert!(
+            msg.contains(expect_kw),
+            "{path} 错误信息应包含 {expect_kw}，实际: {msg}"
+        );
     }
 
     let _ = std::fs::remove_dir_all(&root);
@@ -425,7 +435,10 @@ async fn concurrent_limit_queues_extra_tasks() {
             break;
         }
         if all.iter().any(|t| t.state == TaskState::Error) {
-            panic!("有任务出错: {:?}", all.iter().map(|t| t.error.clone()).collect::<Vec<_>>());
+            panic!(
+                "有任务出错: {:?}",
+                all.iter().map(|t| t.error.clone()).collect::<Vec<_>>()
+            );
         }
         assert!(start.elapsed() < Duration::from_secs(90), "排队任务未完成");
     }
@@ -631,7 +644,12 @@ async fn scheduled_task_starts_on_time() {
 
     // 到期后应在数秒内自动开始并完成
     let t = wait_done(&engine, &id, Duration::from_secs(60)).await;
-    assert_eq!(t.state, TaskState::Completed, "定时任务未自动开始: {:?}", t.error);
+    assert_eq!(
+        t.state,
+        TaskState::Completed,
+        "定时任务未自动开始: {:?}",
+        t.error
+    );
     assert_eq!(std::fs::read(&t.save_path).unwrap(), payload);
 
     let _ = std::fs::remove_dir_all(&root);
@@ -640,3 +658,88 @@ async fn scheduled_task_starts_on_time() {
 // 避免 unused warning
 #[allow(dead_code)]
 fn _touch(_: &mut dyn Write) {}
+
+// ── R02：本地文件被删 / 截短后，断点进度必须作废重下 ──
+
+/// 通用流程：下载到一部分 → 暂停 → 破坏本地文件 → 恢复 → 内容必须与源一致
+async fn interrupted_then_damaged(tag: &str, damage: fn(&str)) {
+    let payload = make_payload(2 * 1024 * 1024);
+    let srv = spawn_server(payload.clone(), true).await;
+    let root = temp_root(tag);
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let engine = new_engine(&root);
+    let mut s = engine.settings();
+    s.global_speed_limit = 1024 * 1024; // 限速，保证能中途暂停
+    engine.update_settings(s).unwrap();
+
+    let url = format!("http://{}/d.bin", srv.addr);
+    let id = engine
+        .add(AddTaskRequest {
+            url,
+            save_dir: Some(out.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if engine.get(&id).unwrap().downloaded > 300 * 1024 {
+            break;
+        }
+    }
+    engine.pause(&id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let paused = engine.get(&id).unwrap();
+    assert_eq!(
+        paused.state,
+        TaskState::Paused,
+        "暂停后状态异常，进度 {}/{:?}",
+        paused.downloaded,
+        paused.size
+    );
+    assert!(
+        paused.segments.iter().any(|s| s.done > 0),
+        "暂停后应有分片进度"
+    );
+    assert!(paused.resume_anchor.is_some(), "暂停后应记录文件身份锚点");
+
+    damage(&paused.save_path);
+
+    // 取消限速，避免测试过慢
+    let mut s = engine.settings();
+    s.global_speed_limit = 0;
+    engine.update_settings(s).unwrap();
+    engine.resume(&id).await.unwrap();
+
+    let t = wait_done(&engine, &id, Duration::from_secs(120)).await;
+    assert_eq!(t.state, TaskState::Completed, "错误: {:?}", t.error);
+    let got = std::fs::read(&t.save_path).unwrap();
+    assert!(
+        got == payload,
+        "本地文件被破坏后仍沿用了旧断点，内容不一致（{} / {} 字节）",
+        got.len(),
+        payload.len()
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_after_local_file_deleted() {
+    interrupted_then_damaged("del", |path| {
+        std::fs::remove_file(path).expect("删除本地文件失败");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_after_local_file_truncated() {
+    interrupted_then_damaged("trunc", |path| {
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_len(1024).expect("截断失败");
+    })
+    .await;
+}

@@ -114,29 +114,91 @@ pub fn sanitize_name(name: &str) -> String {
     s
 }
 
-/// 若目标文件已存在，生成 `name (1).ext` 这类不冲突名称
-pub fn unique_path(dir: &Path, file_name: &str) -> PathBuf {
-    let candidate = dir.join(file_name);
-    if !candidate.exists() {
-        return candidate;
-    }
-    let p = Path::new(file_name);
+/// 原子预占一个可写路径，返回 `name.ext` / `name (1).ext` / ... 中第一个抢到的名字。
+///
+/// 关键点：判空与占位是**同一个** `create_new` 系统调用，因此并发调用不会拿到同一条路径。
+/// 早期的 `exists()` 判断 + 返回 PathBuf 存在 TOCTOU 窗口：并发或排队任务会同时判定
+/// 「不存在」，于是两个任务写同一个文件，互相截断/覆盖。
+///
+/// 返回时文件已存在且为 0 字节，后续下载以 `create(true)` 打开不会截断已下载内容。
+/// 若调用方最终没能建出任务，应自己删除这个占位文件（`Drop` 不做清理，避免误删续传数据）。
+pub fn reserve_path(dir: &Path, file_name: &str) -> std::io::Result<PathBuf> {
+    let name = sanitize_name(file_name);
+    std::fs::create_dir_all(dir)?;
+
+    let p = Path::new(&name);
     let stem = p
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "download".into());
-    let ext = p.extension().map(|e| e.to_string_lossy().to_string());
-    for i in 1..10000 {
-        let name = match &ext {
+    let ext = p
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .filter(|e| !e.is_empty());
+
+    let candidate_at = |i: usize| -> PathBuf {
+        if i == 0 {
+            return dir.join(&name);
+        }
+        dir.join(match &ext {
             Some(e) => format!("{stem} ({i}).{e}"),
             None => format!("{stem} ({i})"),
-        };
-        let cand = dir.join(&name);
-        if !cand.exists() {
-            return cand;
+        })
+    };
+
+    for i in 0..10_000usize {
+        let cand = candidate_at(i);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&cand)
+        {
+            Ok(_) => return Ok(cand),
+            // 已存在 → 换下一个序号；这是并发下正常的竞争结果，不是错误
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
         }
     }
-    dir.join(format!("{stem}-{}.tmp", crate::model::now_ms()))
+
+    // 同名文件多到离谱时的兜底：带时间戳再抢一轮，仍然走 create_new
+    let stamp = crate::model::now_ms();
+    let suffix = ext.as_ref().map(|e| format!(".{e}")).unwrap_or_default();
+    for i in 0..1000u32 {
+        let cand = dir.join(format!("{stem}-{stamp}-{i}{suffix}"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&cand)
+        {
+            Ok(_) => return Ok(cand),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "同名文件过多，无法分配唯一名称",
+    ))
+}
+
+/// 读取文件的「身份锚点」：长度 + 创建时间（拿不到创建时间时记为 0）。
+/// 用于判断断点进度对应的还是不是同一个文件。
+pub fn file_anchor(path: &Path) -> Option<crate::model::ResumeAnchor> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let created_ms = meta
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Some(crate::model::ResumeAnchor {
+        len: meta.len(),
+        created_ms,
+    })
 }
 
 /// 根据 Content-Type 补扩展名
@@ -346,11 +408,76 @@ mod tests {
         assert_eq!(sanitize_name("CON.txt"), "_CON.txt");
     }
 
+    /// 并发预占同一文件名：每个线程都必须拿到不同路径，且文件真的被创建出来。
+    /// 这是 R01 的核心验收（早期的 exists() 判断在这里会大量撞车）。
+    #[test]
+    fn reserve_path_is_atomic_under_concurrency() {
+        let dir = std::env::temp_dir().join(format!("felldl-reserve-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..100 {
+            let dir = dir.clone();
+            handles.push(std::thread::spawn(move || {
+                reserve_path(&dir, "same-name.zip").expect("预占不应失败")
+            }));
+        }
+        let paths: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(unique.len(), paths.len(), "并发预占出现了重复路径");
+        for p in &paths {
+            assert!(p.exists(), "预占后文件应存在: {}", p.display());
+            assert_eq!(std::fs::metadata(p).unwrap().len(), 0, "占位文件必须是空的");
+            assert_eq!(p.parent().unwrap(), dir.as_path(), "不得跳出目标目录");
+        }
+        // 原名应被其中一个线程拿到，其余退化为 name (1).ext 形式
+        assert!(paths
+            .iter()
+            .any(|p| p.file_name().unwrap() == "same-name.zip"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 已存在的文件不会被占用，序号依次递增；目录里原有的内容不受影响。
+    #[test]
+    fn reserve_path_skips_existing_files() {
+        let dir = std::env::temp_dir().join(format!("felldl-reserve2-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"keep me").unwrap();
+
+        let p1 = reserve_path(&dir, "a.txt").unwrap();
+        let p2 = reserve_path(&dir, "a.txt").unwrap();
+        assert_eq!(p1.file_name().unwrap(), "a (1).txt");
+        assert_eq!(p2.file_name().unwrap(), "a (2).txt");
+        // 原文件内容不能被预占清空
+        assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), b"keep me");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 文件名里的路径成分必须在预占阶段就被消掉，不能创建到目录外面
+    #[test]
+    fn reserve_path_stays_inside_dir() {
+        let dir = std::env::temp_dir().join(format!("felldl-reserve3-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let p = reserve_path(&dir, "../../evil.sh").unwrap();
+        assert_eq!(p.parent().unwrap(), dir.as_path());
+        // 名字中间残留 ".." 无害（它只是文件名的一部分），关键是不能成为路径组件
+        assert_eq!(p.components().count(), dir.components().count() + 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 凭据归属：只有 scheme/host/port 完全一致才允许携带认证信息。
     #[test]
     fn same_origin_rules() {
         // 同站同端口（含路径不同、默认端口显式写出的情况）
-        assert!(same_origin("https://a.com/f.zip", "https://a.com/other?x=1"));
+        assert!(same_origin(
+            "https://a.com/f.zip",
+            "https://a.com/other?x=1"
+        ));
         assert!(same_origin("https://a.com/f.zip", "https://A.COM/f.zip"));
         assert!(same_origin("https://a.com:443/f.zip", "https://a.com/g"));
         // 端口、协议、子域、域名不同 → 不同 origin
@@ -361,8 +488,14 @@ mod tests {
         // 解析失败一律视为不同 origin（fail-closed）
         assert!(!same_origin("not a url", "not a url"));
         assert!(!same_origin("https://a.com/f", ""));
-        assert_eq!(origin_of("https://A.com:8443/x").as_deref(), Some("https://a.com:8443"));
-        assert_eq!(origin_of("http://a.com/x").as_deref(), Some("http://a.com:80"));
+        assert_eq!(
+            origin_of("https://A.com:8443/x").as_deref(),
+            Some("https://a.com:8443")
+        );
+        assert_eq!(
+            origin_of("http://a.com/x").as_deref(),
+            Some("http://a.com:80")
+        );
     }
 
     /// 种子/文件名里常见的路径穿越写法必须退化成单个安全组件。

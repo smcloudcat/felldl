@@ -143,6 +143,7 @@ impl Engine {
             username: None,
             password: None,
             interval_secs: 0,
+            resume_anchor: None,
         };
         let id = t.id.clone();
         let rt = Runtime::new(t.clone());

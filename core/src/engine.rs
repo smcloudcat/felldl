@@ -468,7 +468,7 @@ impl Engine {
             Ok(p) => p,
             Err(e) => {
                 // 探测失败也建任务，标记错误便于用户重试
-                let mut t = self.build_task(&req, ProbeInfo::default(), &s);
+                let mut t = self.build_task(&req, ProbeInfo::default(), &s)?;
                 // 直连不通但开了镜像：用镜像的探测结果兜底建任务，
                 // 否则「镜像加速」恰好在最需要它的时候用不上。
                 if s.mirror_enabled {
@@ -504,7 +504,7 @@ impl Engine {
 
         // metalink 解析出的镜像直接注入（不再二次校验）
         let metalink_mirrors = std::mem::take(&mut req.mirrors);
-        let mut t = self.build_task(&req, probe, &s);
+        let mut t = self.build_task(&req, probe, &s)?;
         // 校验镜像：逐个探测，仅保留与主地址大小一致的镜像
         for m in &metalink_mirrors {
             let m = m.trim();
@@ -593,7 +593,7 @@ impl Engine {
             content_type: None,
             ..Default::default()
         };
-        let mut t = self.build_task_with_auth(&r2, probe, &s, kind, Some(username), Some(password));
+        let mut t = self.build_task_with_auth(&r2, probe, &s, kind, Some(username), Some(password))?;
         t.supports_range = true;
         self.insert_task(t.clone());
         if s.auto_start {
@@ -630,7 +630,12 @@ impl Engine {
         Ok(req)
     }
 
-    fn build_task(&self, req: &AddTaskRequest, probe: ProbeInfo, s: &Settings) -> Task {
+    fn build_task(
+        &self,
+        req: &AddTaskRequest,
+        probe: ProbeInfo,
+        s: &Settings,
+    ) -> Result<Task> {
         let kind = TaskKind::Http;
         let auth = (req.username.clone(), req.password.clone());
         self.build_task_with_auth(req, probe, s, kind, auth.0, auth.1)
@@ -644,7 +649,7 @@ impl Engine {
         kind: TaskKind,
         username: Option<String>,
         password: Option<String>,
-    ) -> Task {
+    ) -> Result<Task> {
         let save_dir = req
             .save_dir
             .clone()
@@ -681,10 +686,11 @@ impl Engine {
             })
             .unwrap_or(save_dir);
         let _ = std::fs::create_dir_all(&save_dir);
-        // 保存目录因分类规则变化时，重算唯一路径
-        let path = util::unique_path(Path::new(&save_dir), &final_name);
+        // 保存目录因分类规则变化时重新预占路径；create_new 保证并发下也不会撞名
+        let path = util::reserve_path(Path::new(&save_dir), &final_name)
+            .with_context(|| format!("无法在 {save_dir} 分配文件名"))?;
 
-        Task {
+        Ok(Task {
             id: uuid::Uuid::new_v4().to_string(),
             url: probe.final_url.clone().if_empty_then(req.url.clone()),
             kind,
@@ -722,7 +728,8 @@ impl Engine {
             username,
             password,
             interval_secs: req.interval_secs,
-        }
+            resume_anchor: None,
+        })
     }
 
     fn insert_task(&self, t: Task) {
@@ -1056,6 +1063,68 @@ impl Engine {
 
     // ───────────────────────── 主下载流程 ─────────────────────────
 
+    /// 续传前核对「磁盘上的文件还是不是上次那个文件」。
+    ///
+    /// `Segment::done` 只是数字，没有任何文件证据：文件被删、被截短、或被同名文件
+    /// 替换后，进度仍声称已下完若干 MB，续传会直接跳过这些分片，最后拿到一个
+    /// 稀疏文件冒充完成品。这里用保存进度时记录的身份锚点（长度 + 创建时间）核对，
+    /// 对不上就把进度整体作废并截断文件，强制从头下载。
+    ///
+    /// 返回 `true` = 可以按现有进度续传；`false` = 进度已作废（调用方必须从 0 开始）。
+    fn verify_resume(&self, rt: &Arc<Runtime>, path: &Path) -> bool {
+        let (anchor, has_progress) = {
+            let t = rt.task.lock();
+            let progress = t.downloaded > 0 || t.segments.iter().any(|s| s.done > 0);
+            (t.resume_anchor.clone(), progress)
+        };
+        if !has_progress {
+            return true;
+        }
+        let ok = match (&anchor, util::file_anchor(path)) {
+            (Some(a), Some(cur)) => a.still_matches(&cur),
+            // 老任务没有锚点 / 文件已不存在：一律不采信
+            _ => false,
+        };
+        if ok {
+            return true;
+        }
+        // 作废进度：清分片、清字节数，并截断文件（保留文件名占位）
+        let notice = {
+            let mut t = rt.task.lock();
+            let lost = t.downloaded;
+            let name = t.file_name.clone();
+            t.segments.clear();
+            t.downloaded = 0;
+            t.resume_anchor = None;
+            (lost > 0).then(|| format!("本地文件已变更，{name} 的断点进度已作废，将从头重新下载"))
+        };
+        rt.downloaded.store(0, Ordering::Relaxed);
+        if let Ok(f) = OpenOptions::new().write(true).open(path) {
+            let _ = f.set_len(0);
+        }
+        if let Some(msg) = notice {
+            self.emit(EngineEvent::Notice(msg));
+        }
+        false
+    }
+
+    /// 落暂停断点：状态 / 字节数 / 速度写入并立即持久化（幂等，可多次调用）
+    fn save_paused(&self, rt: &Arc<Runtime>) {
+        *rt.running.lock() = false;
+        let mut t = rt.task.lock();
+        // 已完成 / 出错的状态不被暂停覆盖（避免与 finish_task / fail_task 抢写）
+        if t.state == TaskState::Completed || t.state == TaskState::Error {
+            return;
+        }
+        t.state = TaskState::Paused;
+        t.speed = 0;
+        t.downloaded = rt.downloaded.load(Ordering::Relaxed);
+        let snap = t.clone();
+        drop(t);
+        let _ = self.store.save_task(&snap);
+        self.emit(EngineEvent::TaskUpdated(snap));
+    }
+
     async fn run_task(self: Arc<Self>, id: &str, cancel: CancellationToken) -> Result<()> {
         let rt = self
             .tasks
@@ -1128,6 +1197,11 @@ impl Engine {
             )
         };
 
+        // 续传前先核对本地文件身份：被删除 / 截短 / 替换过，旧分片进度一律作废，
+        // 否则会跳过“已完成”的分片，留下一个稀疏文件冒充完成品。
+        let local_path = std::path::PathBuf::from(&save_path);
+        self.verify_resume(&rt, &local_path);
+
         // 若之前没有分片信息，则规划分片
         let need_plan = {
             let t = rt.task.lock();
@@ -1176,6 +1250,11 @@ impl Engine {
         let meta_len = file.metadata()?.len();
         if meta_len < total.unwrap() {
             file.set_len(total.unwrap())?;
+        }
+        // 记录本次进度对应的文件身份，供下次续传核对
+        {
+            let mut t = rt.task.lock();
+            t.resume_anchor = util::file_anchor(&local_path);
         }
 
         // 起始已下载量
@@ -1329,16 +1408,12 @@ impl Engine {
 
         *rt.running.lock() = false;
 
-        if cancelled {
-            // 保存断点
-            let mut t = rt.task.lock();
-            t.state = TaskState::Paused;
-            t.speed = 0;
-            t.downloaded = rt.downloaded.load(Ordering::Relaxed);
-            let snap = t.clone();
-            drop(t);
-            let _ = self.store.save_task(&snap);
-            self.emit(EngineEvent::TaskUpdated(snap));
+        // 取消判定必须以令牌为准，不能只看 `cancelled` 标志：
+        // `select!` 的两个分支可能同时就绪，取消时各分片迅速收工、通道随即关闭，
+        // 若先命中 `rx.recv() == None` 分支，cancelled 仍是 false，
+        // 半截文件就会被当成下载完成（数据丢失，进度还会被改写成总长度）。
+        if cancelled || cancel.is_cancelled() {
+            self.save_paused(&rt);
             return Ok(());
         }
 
@@ -1354,6 +1429,17 @@ impl Engine {
             drop(t);
             let _ = self.store.save_task(&snap);
             self.emit(EngineEvent::TaskUpdated(snap));
+            return Ok(());
+        }
+
+        // 兜底：所有分片都真的写满才允许标记完成。
+        // 通道提前关闭但既没取消也没错误时，宁可回落暂停保留断点。
+        let unfinished = {
+            let t = rt.task.lock();
+            t.segments.iter().filter(|s| !s.is_done()).count()
+        };
+        if unfinished > 0 {
+            self.save_paused(&rt);
             return Ok(());
         }
 
@@ -1378,7 +1464,13 @@ impl Engine {
             )
         };
         let client = self.client(Some(&task_snapshot))?;
-        let start = rt.downloaded.load(Ordering::Relaxed);
+        // 断点可信性：文件被删 / 截短 / 替换后不能按旧偏移发 Range，只能从头来
+        let local_path = std::path::PathBuf::from(&save_path);
+        let start = if self.verify_resume(rt, &local_path) {
+            rt.downloaded.load(Ordering::Relaxed)
+        } else {
+            0
+        };
         let mut req = client.get(&url);
         if start > 0 {
             req = req.header(RANGE, format!("bytes={start}-"));
@@ -1402,6 +1494,10 @@ impl Engine {
             .write(true)
             .truncate(false)
             .open(&save_path)?;
+        {
+            let mut t = rt.task.lock();
+            t.resume_anchor = util::file_anchor(&local_path);
+        }
 
         let mut stream = resp.bytes_stream();
         // 服务器不支持续传时，从头覆盖
@@ -1451,6 +1547,21 @@ impl Engine {
                         None => break,
                     }
                 }
+            }
+        }
+        // 取消与流结束可能同时发生：以令牌为准，绝不能把半截文件当完成
+        if cancel.is_cancelled() {
+            rt.downloaded.store(offset, Ordering::Relaxed);
+            self.save_paused(rt);
+            return Ok(false);
+        }
+        // 已知总长度时，字节数对不上同样不能算完成（连接可能被中途关闭）
+        let expected = { rt.task.lock().size };
+        if let Some(total) = expected {
+            if offset < total {
+                rt.downloaded.store(offset, Ordering::Relaxed);
+                self.save_paused(rt);
+                return Ok(false);
             }
         }
         // 单流完成后补上 size
@@ -1577,7 +1688,7 @@ impl Engine {
                     me.emit(EngineEvent::TaskUpdated(snap));
                 }
                 for (id, rt, dl) in running_list {
-                    let snap = {
+                    let progress = {
                         let mut t = rt.task.lock();
                         t.downloaded = dl;
                         if let Some((pdl, pt)) = last.get(&id).copied() {
@@ -1586,16 +1697,17 @@ impl Engine {
                                 t.speed = ((dl.saturating_sub(pdl)) as f64 / dt) as u64;
                             }
                         }
-                        t.clone()
+                        // 关键：取快照与入队必须在**同一把任务锁内**完成。
+                        // 否则 pause() 恰好在两者之间把状态改成 Paused 并落盘，
+                        // 这条带着 Downloading 的旧快照随后写入，会把暂停覆盖回下载中。
+                        if persist_due && t.state == TaskState::Downloading {
+                            me.store.enqueue_save_owned(t.clone());
+                        }
+                        t.progress_snapshot()
                     };
                     last.insert(id, (dl, now));
                     // 进度只发增量字段，静态信息（URL/镜像/凭据）不再重复传输
-                    me.emit(EngineEvent::TaskProgress(Box::new(snap.progress_snapshot())));
-                    if persist_due {
-                        // 走合并队列：不阻塞 Tokio，同一任务多次进度只落最后一版
-                        // 这里直接移交所有权，避免再深拷贝一次 segments
-                        me.store.enqueue_save_owned(snap);
-                    }
+                    me.emit(EngineEvent::TaskProgress(Box::new(progress)));
                 }
 
                 // 清理已不存在的任务的速度记录（一次加锁完成）

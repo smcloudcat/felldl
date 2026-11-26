@@ -57,6 +57,38 @@ impl Segment {
     }
 }
 
+/// 断点可信锚：记录「上次保存进度时」落盘文件的样子。
+///
+/// 分片进度（`Segment::done`）本身不包含任何文件证据：文件被删掉、被截短、
+/// 或被同名文件替换后，进度仍然声称「已下完 100MB」，续传会直接跳过这些分片，
+/// 结果是一个稀疏文件冒充已完成的下载。恢复前用这个锚点核对文件身份，
+/// 对不上就把进度整体作废重下。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeAnchor {
+    /// 上次记录时的文件长度（字节）
+    pub len: u64,
+    /// 文件创建时间（毫秒时间戳）。平台不提供时写 0，此时只能靠长度判断
+    #[serde(default)]
+    pub created_ms: i64,
+}
+
+impl ResumeAnchor {
+    /// 与当前文件元数据是否仍匹配。
+    ///
+    /// - 长度变短 → 文件被截断，进度无效
+    /// - 创建时间与锚点不同 → 文件被删除后重建（长度可能恰好相同），进度同样无效
+    /// 长度变长是允许的（分片预分配会把文件拉到总长度）。
+    pub fn still_matches(&self, current: &ResumeAnchor) -> bool {
+        if current.len < self.len {
+            return false;
+        }
+        if self.created_ms != 0 && current.created_ms != 0 && self.created_ms != current.created_ms {
+            return false;
+        }
+        true
+    }
+}
+
 /// 代理配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyConfig {
@@ -452,6 +484,9 @@ pub struct Task {
     /// 周期性同步：完成后每 N 秒自动重新下载（0 = 关闭）
     #[serde(default)]
     pub interval_secs: u64,
+    /// 断点可信锚：文件被删/截短/替换后，旧分片进度不得再被采信
+    #[serde(default)]
+    pub resume_anchor: Option<ResumeAnchor>,
 }
 
 impl Task {
@@ -614,4 +649,36 @@ pub fn classify_category(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod resume_anchor_tests {
+    use super::ResumeAnchor;
+
+    fn anchor(len: u64, created_ms: i64) -> ResumeAnchor {
+        ResumeAnchor { len, created_ms }
+    }
+
+    /// 文件没动过 → 断点可信
+    #[test]
+    fn unchanged_file_still_matches() {
+        assert!(anchor(100, 111).still_matches(&anchor(100, 111)));
+        // 分片预分配可能把文件拉长
+        assert!(anchor(100, 111).still_matches(&anchor(200, 111)));
+    }
+
+    /// 被截短 → 已写入的字节没了，断点必须作废
+    #[test]
+    fn truncated_file_is_rejected() {
+        assert!(!anchor(100, 111).still_matches(&anchor(99, 111)));
+        assert!(!anchor(100, 111).still_matches(&anchor(0, 111)));
+    }
+
+    /// 被删后重建：长度可能恰好相同，靠创建时间识别
+    #[test]
+    fn recreated_file_is_rejected() {
+        assert!(!anchor(100, 111).still_matches(&anchor(100, 222)));
+        // 平台不提供创建时间（0）时退化为只看长度
+        assert!(anchor(100, 0).still_matches(&anchor(100, 222)));
+    }
 }

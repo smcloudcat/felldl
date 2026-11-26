@@ -329,6 +329,7 @@ mod tests {
             username: Some("u".into()),
             password: Some("p".into()),
             interval_secs: 60,
+            resume_anchor: None,
         };
         store.save_task(&t).unwrap();
         let loaded = store.load_tasks();
