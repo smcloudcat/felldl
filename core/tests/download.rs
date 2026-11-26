@@ -867,3 +867,181 @@ async fn rejects_partial_content_with_wrong_total() {
 async fn rejects_partial_content_without_header() {
     rejects_bad_partial_content("lie_nohdr", "no_header", "缺少 Content-Range").await;
 }
+
+// ── 远端实体校验：断点期间服务器换了包，不能把新旧字节拼在一起 ──
+
+struct MutableServer {
+    addr: SocketAddr,
+    /// (内容, ETag)；测试中途替换即模拟「发布方重新打包」
+    entity: Arc<std::sync::RwLock<(Vec<u8>, String)>>,
+}
+
+/// 支持 Range，内容与 ETag 可在运行时替换。
+/// `flip_etag_after_probe = true` 时：探测请求（bytes=0-1）返回 v1，
+/// 其余请求返回 flipped-v2，用来模拟「忽略 If-Range、照旧回 206 但实体已变」的服务器。
+async fn spawn_mutable_server(
+    body: Vec<u8>,
+    etag: &str,
+    flip_etag_after_probe: bool,
+) -> MutableServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let entity = Arc::new(std::sync::RwLock::new((body, etag.to_string())));
+    let ent = entity.clone();
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let ent = ent.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let (body, cur_etag) = {
+                    let g = ent.read().unwrap();
+                    (g.0.clone(), g.1.clone())
+                };
+                let total = body.len() as u64;
+                let mut range: Option<(u64, u64)> = None;
+                for line in req.lines() {
+                    let ll = line.to_lowercase();
+                    if ll.starts_with("range:") {
+                        let v = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                        if let Some(spec) = v.strip_prefix("bytes=") {
+                            if let Some((a, b)) = spec.trim().split_once('-') {
+                                let start = a.trim().parse::<u64>().unwrap_or(0);
+                                let end = if b.trim().is_empty() {
+                                    total - 1
+                                } else {
+                                    b.trim().parse::<u64>().unwrap_or(total - 1)
+                                };
+                                range = Some((start, end.min(total - 1)));
+                            }
+                        }
+                    }
+                }
+                let Some((s, e)) = range else {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nETag: \"{cur_etag}\"\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(&body).await;
+                    return;
+                };
+                let slice = &body[s as usize..=(e as usize)];
+                // 探测用的是 bytes=0-1，其余按分片区间处理
+                let is_probe = s == 0 && e == 1;
+                let reply_etag = if flip_etag_after_probe && !is_probe {
+                    "flipped-v2".to_string()
+                } else {
+                    cur_etag
+                };
+                let head = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nETag: \"{}\"\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                    slice.len(), s, e, total, reply_etag
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(slice).await;
+                let _ = sock.flush().await;
+            });
+        }
+    });
+
+    MutableServer { addr, entity }
+}
+
+/// 断点期间服务器换了内容（长度相同、ETag 不同）→ 必须重下，最终内容为新版本
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resume_after_remote_entity_changed() {
+    let payload = make_payload(2 * 1024 * 1024);
+    let srv = spawn_mutable_server(payload.clone(), "v1", false).await;
+    let root = temp_root("entchg");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let engine = new_engine(&root);
+    let mut s = engine.settings();
+    s.global_speed_limit = 1024 * 1024;
+    engine.update_settings(s).unwrap();
+
+    let id = engine
+        .add(AddTaskRequest {
+            url: format!("http://{}/chg.bin", srv.addr),
+            save_dir: Some(out.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if engine.get(&id).unwrap().downloaded > 300 * 1024 {
+            break;
+        }
+    }
+    engine.pause(&id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let paused = engine.get(&id).unwrap();
+    assert_eq!(paused.state, TaskState::Paused);
+    assert_eq!(paused.etag.as_deref(), Some("v1"));
+
+    // 发布方重新打包：长度不变、内容全变、ETag 更新
+    let new_payload: Vec<u8> = payload.iter().map(|b| b ^ 0x5a).collect();
+    {
+        let mut g = srv.entity.write().unwrap();
+        g.0 = new_payload.clone();
+        g.1 = "v2".to_string();
+    }
+
+    let mut s = engine.settings();
+    s.global_speed_limit = 0;
+    engine.update_settings(s).unwrap();
+    engine.resume(&id).await.unwrap();
+
+    let t = wait_done(&engine, &id, Duration::from_secs(120)).await;
+    assert_eq!(t.state, TaskState::Completed, "错误: {:?}", t.error);
+    let got = std::fs::read(&t.save_path).unwrap();
+    assert!(
+        got == new_payload,
+        "远端换了内容却沿用了旧断点，得到的是新旧字节拼接（{} / {} 字节）",
+        got.len(),
+        new_payload.len()
+    );
+    assert_eq!(t.etag.as_deref(), Some("v2"), "应换用新实体的 ETag");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 服务器忽略 If-Range，照旧回 206 但实体已变 → 必须报错，不能把错位数据写进文件
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejects_segment_when_etag_changed_mid_download() {
+    let payload = make_payload(2 * 1024 * 1024);
+    let srv = spawn_mutable_server(payload, "v1", true).await;
+    let root = temp_root("etagflip");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    let id = engine
+        .add(AddTaskRequest {
+            url: format!("http://{}/flip.bin", srv.addr),
+            save_dir: Some(out.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let t = wait_done(&engine, &id, Duration::from_secs(90)).await;
+    assert_eq!(t.state, TaskState::Error, "实体变了却当成完成（应为 Error）");
+    let msg = t.error.clone().unwrap_or_default();
+    assert!(
+        msg.contains("远端文件已变化"),
+        "错误信息应指出实体变化，实际: {msg}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

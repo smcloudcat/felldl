@@ -1099,7 +1099,13 @@ impl Engine {
         if ok {
             return true;
         }
-        // 作废进度：清分片、清字节数，并截断文件（保留文件名占位）
+        self.invalidate_progress(rt, path, "本地文件已变更，断点进度已作废，将从头重新下载");
+        false
+    }
+
+    /// 作废断点：清分片、清字节数、截断文件（保留文件名占位以便继续占用），
+    /// 并把原因作为提示推给界面。幂等，可重复调用。
+    fn invalidate_progress(&self, rt: &Arc<Runtime>, path: &Path, reason: &str) {
         let notice = {
             let mut t = rt.task.lock();
             let lost = t.downloaded;
@@ -1107,7 +1113,7 @@ impl Engine {
             t.segments.clear();
             t.downloaded = 0;
             t.resume_anchor = None;
-            (lost > 0).then(|| format!("本地文件已变更，{name} 的断点进度已作废，将从头重新下载"))
+            (lost > 0).then(|| format!("{reason}（{name}，已丢弃 {lost} 字节进度）"))
         };
         rt.downloaded.store(0, Ordering::Relaxed);
         if let Ok(f) = OpenOptions::new().write(true).open(path) {
@@ -1116,6 +1122,65 @@ impl Engine {
         if let Some(msg) = notice {
             self.emit(EngineEvent::Notice(msg));
         }
+    }
+
+    /// 续传前核对「远端还是不是上次那个文件」。
+    ///
+    /// 本地锚点只能证明「磁盘上那堆字节没被动过」，证明不了「它们还属于同一个远端实体」：
+    /// 断点期间发布方重新打包（长度不变、内容变了）是很常见的情形，续传会把新旧两份
+    /// 字节拼成一个长度正确、内容错乱的文件。这里用一次探测比对 ETag 与总长度，
+    /// 不一致就作废旧进度、换用新的实体信息重新下载。
+    ///
+    /// 探测失败（网络抖动 / 站点临时拒绝）不毁断点：退回本地锚点判断，
+    /// 后续 `If-Range` 与 206 的 ETag 比对仍会兜一层。
+    async fn verify_remote(&self, rt: &Arc<Runtime>, path: &Path) -> bool {
+        let snap = {
+            let t = rt.task.lock();
+            let progress = t.downloaded > 0 || t.segments.iter().any(|s| s.done > 0);
+            if !progress || t.etag.is_none() {
+                return true;
+            }
+            t.clone()
+        };
+        let prev_etag = snap.etag.clone().unwrap_or_default();
+        let ua = snap
+            .user_agent
+            .clone()
+            .unwrap_or_else(|| self.settings.read().user_agent.clone());
+        let info = match self
+            .probe_with_ua(&snap.url, snap.referer.as_deref(), &ua, Creds::from_task(&snap))
+            .await
+        {
+            Ok(i) => i,
+            Err(_) => return true,
+        };
+
+        let mut changed = false;
+        if let Some(cur) = info.etag.as_deref() {
+            if !cur.is_empty() && cur != prev_etag {
+                changed = true;
+            }
+        }
+        if let (Some(a), Some(b)) = (snap.size, info.size) {
+            if a != b {
+                changed = true;
+            }
+        }
+        if !changed {
+            return true;
+        }
+        // 换用新的实体信息，避免下一轮又按旧长度/旧 ETag 发请求
+        {
+            let mut t = rt.task.lock();
+            t.etag = info.etag.clone();
+            if let Some(sz) = info.size {
+                t.size = Some(sz);
+            }
+            if info.supports_range {
+                t.supports_range = true;
+            }
+        }
+        self.invalidate_progress(rt, path, "远端文件已变化，断点进度已作废，将重新下载");
         false
     }
 
@@ -1190,15 +1255,13 @@ impl Engine {
             };
         }
 
-        let (url, save_path, total, supports_range, conns, etag, task_ua) = {
+        // 探测信息在 verify_remote 之后要重新读一次，这里只取不受影响的部分
+        let (url, save_path, conns, task_ua) = {
             let t = rt.task.lock();
             (
                 t.url.clone(),
                 t.save_path.clone(),
-                t.size,
-                t.supports_range,
                 t.connections,
-                t.etag.clone(),
                 t.user_agent.clone(),
             )
         };
@@ -1207,6 +1270,13 @@ impl Engine {
         // 否则会跳过“已完成”的分片，留下一个稀疏文件冒充完成品。
         let local_path = std::path::PathBuf::from(&save_path);
         self.verify_resume(&rt, &local_path);
+        // 再核对远端实体：断点期间服务器换了包，续传会把新旧字节拼成「长度对、内容错」的文件。
+        // 作废后分片会被重新规划，所以下面要重新读取探测信息。
+        self.verify_remote(&rt, &local_path).await;
+        let (total, supports_range) = {
+            let t = rt.task.lock();
+            (t.size, t.supports_range)
+        };
 
         // 若之前没有分片信息，则规划分片
         let need_plan = {
@@ -1321,7 +1391,6 @@ impl Engine {
             let limiter = task_limiter.clone();
             let global = self.global_limiter.clone();
             let tx = tx.clone();
-            let etag = etag.clone();
             let (referer, cred_origin, cookie, basic) = {
                 let t = rt.task.lock();
                 let basic = match (t.username.as_deref(), t.password.as_deref()) {
@@ -1335,6 +1404,8 @@ impl Engine {
                 };
                 (t.referer.clone(), origin, t.cookie.clone(), basic)
             };
+            // ETag 也用任务当前值：verify_remote 可能刚换过实体
+            let etag = { rt.task.lock().etag.clone() };
             let cancel2 = cancel.clone();
             let seg_ua = task_ua.clone();
             set.spawn(async move {
@@ -1495,8 +1566,17 @@ impl Engine {
         if resumed_by_server {
             // 206 必须正是请求的那个起点，且总长度与探测结果一致，
             // 否则说明服务器给了别的区间，按旧偏移落盘会写出错位数据
-            let expected_total = { rt.task.lock().size };
-            check_partial_content(&resp, start, None, expected_total)?;
+            let (expected_total, expected_etag) = {
+                let t = rt.task.lock();
+                (t.size, t.etag.clone())
+            };
+            check_partial_content(
+                &resp,
+                start,
+                None,
+                expected_total,
+                expected_etag.as_deref(),
+            )?;
         } else if !status.is_success() {
             bail!("服务器返回 {}", status.as_u16());
         }
@@ -1890,7 +1970,22 @@ fn check_partial_content(
     expected_start: u64,
     expected_end: Option<u64>,
     expected_total: Option<u64>,
+    expected_etag: Option<&str>,
 ) -> Result<()> {
+    // 有的服务器会忽略 If-Range 照旧回 206：区间看着对，实体却已经换了。
+    // 这种情况只有比对响应 ETag 才能发现，否则会把新旧字节拼在一起。
+    if let Some(want) = expected_etag.filter(|s| !s.is_empty()) {
+        if let Some(got) = resp
+            .headers()
+            .get(ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.trim_matches('"'))
+        {
+            if !got.is_empty() && got != want {
+                bail!("远端文件已变化（ETag 期望 \"{want}\"，实际 \"{got}\"），不能续传");
+            }
+        }
+    }
     let Some(cr) = resp
         .headers()
         .get(CONTENT_RANGE)
@@ -1994,7 +2089,7 @@ async fn fetch_segment(
         return Err(anyhow!("分片请求失败: HTTP {}", status.as_u16()));
     }
     // 206 必须与请求区间严格对应，否则写入位置会错位
-    check_partial_content(&resp, *cursor, Some(job.end), job.total)?;
+    check_partial_content(&resp, *cursor, Some(job.end), job.total, job.etag.as_deref())?;
 
     let mut stream = resp.bytes_stream();
     loop {
