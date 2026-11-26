@@ -79,6 +79,11 @@ fn ftp_worker<S>(
 where
     S: suppaftp::TlsStream,
 {
+    // 必须显式 TYPE I：RFC 959 默认是 ASCII，服务器会把 LF 翻译成 CRLF，
+    // 二进制文件（exe/zip/图片）会被悄悄改写，长度也对不上。
+    ftp.transfer_type(suppaftp::types::FileType::Binary)
+        .map_err(|e| anyhow!("切换到二进制传输模式失败: {e}"))?;
+
     // 文件大小
     let size = ftp.size(&target.path).ok().map(|s| s as u64);
     {
@@ -144,7 +149,17 @@ where
             engine.store.enqueue_save(&snap);
         }
     }
-    let _ = stream.finish();
+    // 完成应答必须检查：服务器回 426 时数据可能已收到一部分甚至全部，
+    // 但传输是被判定失败的，不能当成下载成功（此前错误被 `let _ =` 丢掉了）。
+    stream
+        .finish()
+        .map_err(|e| anyhow!("FTP 传输未正常结束（完成应答失败）: {e}"))?;
+    // 已知长度时校验实收字节：服务器提前关流会走到这里
+    if let Some(sz) = size {
+        if offset < sz {
+            bail!("FTP 传输提前结束：只收到 {offset} / {sz} 字节");
+        }
+    }
     let _ = ftp.quit();
     Ok(Outcome::Done)
 }
@@ -256,6 +271,10 @@ async fn sftp_worker(
             drop(t);
             engine.store.enqueue_save(&snap);
         }
+    }
+    if offset < size {
+        sftp.close().await.ok();
+        bail!("SFTP 传输提前结束：只收到 {offset} / {size} 字节");
     }
     sftp.close().await.ok();
     Ok(Outcome::Done)
