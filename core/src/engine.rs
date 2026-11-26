@@ -151,6 +151,9 @@ pub struct Engine {
     pub(crate) grab_jobs: Mutex<HashMap<String, Arc<crate::grab::GrabJob>>>,
     /// BitTorrent 会话（首次添加磁力任务时惰性初始化）
     pub(crate) bt_session: tokio::sync::OnceCell<Arc<crate::bt::BtManager>>,
+    /// 已经尝试过重新挂回会话的 BT 任务：rqbit 会话是内存态，
+    /// 进程重启后需要按持久化记录重新 add，但失败不能每 500ms 重试一次
+    pub(crate) bt_restore_tried: Mutex<std::collections::HashSet<TaskId>>,
 }
 
 pub(crate) struct Runtime {
@@ -259,6 +262,7 @@ impl Engine {
             http_token: RwLock::new(token),
             grab_jobs: Mutex::new(HashMap::new()),
             bt_session: tokio::sync::OnceCell::new(),
+            bt_restore_tried: Mutex::new(std::collections::HashSet::new()),
         });
 
         // 载入历史任务（进行中的已回落为 Paused）
@@ -1762,7 +1766,8 @@ impl Engine {
             let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
             loop {
                 tick.tick().await;
-                // BT 任务状态轮询（会话未初始化时无操作）
+                // 进程重启后 BT 会话是空的：先把持久化任务重新挂回去，再轮询状态
+                me.bt_restore_pending().await;
                 me.bt_update_all();
 
                 let now = std::time::Instant::now();
