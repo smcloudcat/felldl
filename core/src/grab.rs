@@ -745,7 +745,11 @@ impl Engine {
 pub struct HlsMedia {
     pub segments: Vec<String>,
     pub init: Option<String>,
-    pub key: Option<HlsKey>,
+    /// `#EXT-X-MEDIA-SEQUENCE`：缺省 IV 由「媒体序号」推导，不是分片下标
+    pub media_sequence: u64,
+    /// 与 `segments` 一一对应的密钥（`None` = 该分片未加密）。
+    /// HLS 允许中途换密钥，所以不能只存「整个播放列表一个 key」。
+    pub segment_keys: Vec<Option<HlsKey>>,
 }
 
 #[derive(Clone)]
@@ -805,8 +809,9 @@ async fn parse_media_playlist(_client: &Client, base_url: &str, text: &str) -> R
     let base = reqwest::Url::parse(base_url)?;
     let mut segments = Vec::new();
     let mut init: Option<String> = None;
-    let mut key: Option<HlsKey> = None;
-    let mut pending_key: Option<HlsKey> = None;
+    let mut media_sequence: u64 = 0;
+    let mut cur_key: Option<HlsKey> = None;
+    let mut segment_keys: Vec<Option<HlsKey>> = Vec::new();
 
     for line in text.lines() {
         let line = line.trim();
@@ -820,6 +825,12 @@ async fn parse_media_playlist(_client: &Client, base_url: &str, text: &str) -> R
                         .and_then(|v| v.strip_suffix('"'))
                 })
                 .and_then(|u| base.join(u).ok().map(|x| x.to_string()));
+        } else if line.starts_with("#EXT-X-MEDIA-SEQUENCE:") {
+            media_sequence = line
+                .trim_start_matches("#EXT-X-MEDIA-SEQUENCE:")
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(0);
         } else if line.starts_with("#EXT-X-KEY:") {
             let rest = line.strip_prefix("#EXT-X-KEY:").unwrap_or(line);
             let method = rest.split(',').find_map(|kv| {
@@ -835,30 +846,36 @@ async fn parse_media_playlist(_client: &Client, base_url: &str, text: &str) -> R
             let iv = rest.split(',').find_map(|kv| {
                 kv.trim().strip_prefix("IV=0x").and_then(|v| parse_hex16(v))
             });
-            pending_key = match (method, key_uri) {
-                (Some(m), Some(u)) if m != "NONE" => {
-                    match base.join(&u).ok().map(|x| x.to_string()) {
-                        Some(ku) => Some(HlsKey { method: m, key_url: ku, iv }),
-                        None => None,
-                    }
-                }
+            // 该指令对后续所有分片生效，直到下一条 EXT-X-KEY（METHOD=NONE 表示清除）
+            cur_key = match (method, key_uri) {
+                (Some(m), Some(u)) if m != "NONE" => base
+                    .join(&u)
+                    .ok()
+                    .map(|x| HlsKey { method: m, key_url: x.to_string(), iv }),
                 _ => None,
             };
-            if pending_key.is_none() {
-                key = None;
-            }
         } else if !line.is_empty() && !line.starts_with('#') {
             let abs = base.join(line).map_err(|e| anyhow!("分片地址无效: {e}"))?.to_string();
-            if pending_key.is_some() && key.is_none() {
-                key = pending_key.clone();
-            }
             segments.push(abs);
+            segment_keys.push(cur_key.clone());
         }
     }
     if segments.is_empty() {
         bail!("playlist 中没有分片");
     }
-    Ok(HlsMedia { segments, init, key })
+    Ok(HlsMedia {
+        segments,
+        init,
+        media_sequence,
+        segment_keys,
+    })
+}
+
+/// 缺省 IV：媒体序号的大端 16 字节表示（RFC 8216 §5.2）
+fn default_iv(seq: u64) -> [u8; 16] {
+    let mut iv = [0u8; 16];
+    iv[8..].copy_from_slice(&seq.to_be_bytes());
+    iv
 }
 
 fn parse_hex16(s: &str) -> Option<[u8; 16]> {
@@ -970,7 +987,8 @@ mod tests {
             .unwrap();
         assert_eq!(media.segments.len(), 2);
         assert_eq!(media.segments[0], "https://cdn.example.com/live/seg0.ts");
-        assert!(media.key.is_none());
+        assert!(media.segment_keys.iter().all(|k| k.is_none()));
+        assert_eq!(media.media_sequence, 0);
     }
 
     #[tokio::test]
@@ -979,10 +997,60 @@ mod tests {
         let media = parse_media_playlist(&Client::new(), "https://cdn.example.com/a.m3u8", text)
             .await
             .unwrap();
-        let k = media.key.unwrap();
+        let k = media.segment_keys[0].clone().unwrap();
         assert_eq!(k.method, "AES-128");
         assert_eq!(k.key_url, "https://k.example.com/key");
         assert_eq!(k.iv.unwrap()[1], 1);
+    }
+
+    /// 缺省 IV 依赖 EXT-X-MEDIA-SEQUENCE，而不是分片下标
+    #[tokio::test]
+    async fn media_sequence_is_parsed_and_feeds_default_iv() {
+        let text = "#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:120
+#EXTINF:4,
+a.ts
+#EXTINF:4,
+b.ts
+";
+        let media = parse_media_playlist(&Client::new(), "https://cdn.example.com/v.m3u8", text)
+            .await
+            .unwrap();
+        assert_eq!(media.media_sequence, 120);
+        // 第 0 片缺省 IV 的序号是 120，不是 1
+        assert_eq!(default_iv(media.media_sequence)[15], 120);
+        assert_eq!(default_iv(media.media_sequence + 1)[15], 121);
+    }
+
+    /// EXT-X-KEY 可以出现多次：中途换钥后，前后分片要绑不同的 key
+    #[tokio::test]
+    async fn key_rotation_binds_per_segment() {
+        let text = "#EXTM3U
+#EXT-X-KEY:METHOD=AES-128,URI=\"k1.key\"
+#EXTINF:4,
+seg0.ts
+#EXTINF:4,
+seg1.ts
+#EXT-X-KEY:METHOD=AES-128,URI=\"k2.key\"
+#EXTINF:4,
+seg2.ts
+#EXT-X-KEY:METHOD=NONE
+#EXTINF:4,
+seg3.ts
+";
+        let media = parse_media_playlist(&Client::new(), "https://cdn.example.com/x.m3u8", text)
+            .await
+            .unwrap();
+        assert_eq!(media.segments.len(), 4);
+        let urls: Vec<Option<String>> = media
+            .segment_keys
+            .iter()
+            .map(|k| k.as_ref().map(|x| x.key_url.clone()))
+            .collect();
+        assert_eq!(urls[0].as_deref(), Some("https://cdn.example.com/k1.key"));
+        assert_eq!(urls[1].as_deref(), Some("https://cdn.example.com/k1.key"));
+        assert_eq!(urls[2].as_deref(), Some("https://cdn.example.com/k2.key"));
+        assert!(urls[3].is_none(), "METHOD=NONE 之后的分片不应带密钥");
     }
 
     #[test]
@@ -1128,27 +1196,9 @@ impl Engine {
             .open(&save_path)
             .with_context(|| format!("无法创建文件: {save_path}"))?;
 
-        // 解密密钥（若加密）
-        let key_bytes: Option<(Vec<u8>, Option<[u8; 16]>)> = match &media.key {
-            Some(k) if k.method == "AES-128" => {
-                let kb = client
-                    .get(&k.key_url)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .bytes()
-                    .await?
-                    .to_vec();
-                if kb.len() != 16 {
-                    bail!("HLS 密钥长度异常: {} 字节", kb.len());
-                }
-                Some((kb, k.iv))
-            }
-            Some(k) => bail!("暂不支持的 HLS 加密方式: {}", k.method),
-            None => None,
-        };
-
-        let total = media.segments.len();
+        // 密钥按 URL 缓存：轮换播放列表里相邻分片常共用同一个 key，不必每片重下
+        let mut key_cache: std::collections::HashMap<String, Vec<u8>> =
+            std::collections::HashMap::new();
 
         if let Some(init_url) = &media.init {
             let bytes = self
@@ -1164,25 +1214,45 @@ impl Engine {
                 return Err(anyhow!("已取消"));
             }
             let mut bytes = self.hls_fetch_segment(client, seg_url, cancel).await?;
-            if let (Some((ref k, ref iv)), true) = (&key_bytes, bytes.len() % 16 == 0) {
-                let iv_bytes: [u8; 16] = match iv {
-                    Some(v) => *v,
+            // 每片单独取密钥：HLS 允许中途换 key（EXT-X-KEY 可多次出现）
+            if let Some(key) = media.segment_keys.get(i).and_then(|k| k.as_ref()) {
+                if key.method != "AES-128" {
+                    bail!("暂不支持的 HLS 加密方式: {}", key.method);
+                }
+                let kb = match key_cache.get(&key.key_url) {
+                    Some(v) => v.clone(),
                     None => {
-                        // 缺省 IV = 媒体序号（大端 16 字节）
-                        let seq = (i + 1) as u64;
-                        let mut iv = [0u8; 16];
-                        iv[8..].copy_from_slice(&seq.to_be_bytes());
-                        iv
+                        let kb = client
+                            .get(&key.key_url)
+                            .send()
+                            .await
+                            .with_context(|| format!("获取 HLS 密钥失败: {}", key.key_url))?
+                            .error_for_status()?
+                            .bytes()
+                            .await?
+                            .to_vec();
+                        if kb.len() != 16 {
+                            bail!("HLS 密钥长度异常（{}）: {} 字节", key.key_url, kb.len());
+                        }
+                        key_cache.insert(key.key_url.clone(), kb.clone());
+                        kb
                     }
                 };
-                if let Ok(dec) = crate::crypto::aes128_cbc_decrypt(k, &iv_bytes, &mut bytes) {
-                    bytes = dec;
-                }
+                let iv_bytes = match key.iv {
+                    Some(v) => v,
+                    // 缺省 IV = 该分片的媒体序号（大端 16 字节）。
+                    // 用分片下标是错的：直播/切片列表常从 0 以外的序号开始
+                    // （#EXT-X-MEDIA-SEQUENCE），用下标会导致整段解成乱码。
+                    None => default_iv(media.media_sequence + i as u64),
+                };
+                // 解密失败必须报错：此前失败会静默把密文写进成品，
+                // 得到一个能播放但画面全花/中途静音的文件，却查不出原因
+                bytes = crate::crypto::aes128_cbc_decrypt(&kb, &iv_bytes, &bytes)
+                    .with_context(|| format!("第 {} 个分片解密失败（密钥或 IV 不匹配）", i + 1))?;
             }
             use std::io::Write;
             file.write_all(&bytes)?;
             rt.downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-            let _ = total;
         }
 
         drop(file);
