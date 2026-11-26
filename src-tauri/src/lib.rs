@@ -195,8 +195,7 @@ async fn open_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
-        open_path(&path)
+        open_path(&app, &path)
     }
 }
 
@@ -1001,8 +1000,7 @@ async fn show_in_folder(app: tauri::AppHandle, path: String) -> Result<(), Strin
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
-        reveal_path(&path)
+        reveal_path(&app, &path)
     }
 }
 
@@ -1359,61 +1357,42 @@ async fn apply_update(app: tauri::AppHandle, path: String) -> Result<String, Str
 }
 
 #[cfg(not(target_os = "android"))]
-fn open_path(_path: &str) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", _path])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
+fn open_path(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    // 只用原生打开接口（Windows 下为 ShellExecuteExW），**不把用户路径拼进
+    // cmd /C start 之类的命令行**：文件名里的 & % 括号都是合法字符，一旦进入
+    // 二次解析就成了命令注入面。这里仍然限制允许打开的目标类型。
+    let p = std::path::Path::new(path);
+    match std::fs::metadata(p) {
+        Ok(m) if m.is_file() || m.is_dir() => {}
+        Ok(_) => return Err("不支持打开该类型的路径".into()),
+        Err(e) => return Err(format!("路径不可用：{e}")),
     }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(_path)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(_path)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    #[allow(unreachable_code)]
-    Err("当前平台不支持直接打开文件".into())
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(not(target_os = "android"))]
-fn reveal_path(path: &str) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        // 用 explorer 选中文件
-        std::process::Command::new("explorer")
-            .arg(format!("/select,{path}"))
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .args(["-R", path])
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    #[allow(unreachable_code)]
-    {
-        let dir = std::path::Path::new(path)
-            .parent()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.to_string());
-        open_path(&dir)
+fn reveal_path(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    // 定位到文件所在目录并选中它：同样走插件原生实现，
+    // 不再用 `explorer /select,{path}` 这种字符串拼接方式。
+    let p = std::path::Path::new(path);
+    match std::fs::metadata(p) {
+        Ok(m) if m.is_file() => app
+            .opener()
+            .reveal_item_in_dir(p)
+            .map_err(|e| e.to_string()),
+        // 目录本身：直接在文件管理器中打开
+        Ok(m) if m.is_dir() => app
+            .opener()
+            .open_path(path, None::<&str>)
+            .map_err(|e| e.to_string()),
+        Ok(_) => Err("不支持定位该类型的路径".into()),
+        Err(e) => Err(format!("路径不可用：{e}")),
     }
 }
 

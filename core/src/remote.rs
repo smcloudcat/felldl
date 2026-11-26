@@ -405,6 +405,24 @@ pub(crate) async fn download(
     }
 }
 
+/// FTPS 使用的 rustls 客户端配置。
+///
+/// **必须显式指定 provider**：依赖树里 `ring`（本 crate）与 `aws-lc-rs`
+/// （其他依赖）可能同时被编译进来，此时 `ClientConfig::builder()` 找不到唯一
+/// 默认 provider 会 panic，而 release 是 `panic=abort`，等同于应用直接退出。
+/// 这里固定使用 ring 后端，与 `suppaftp` 的 `rustls-ring` 特性保持一致。
+fn ftps_tls_config() -> Result<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .context("初始化 FTPS TLS 协议版本失败")?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(cfg)
+}
+
 fn ftp_connect_and_run(
     target: RemoteTarget,
     secure: bool,
@@ -418,11 +436,7 @@ fn ftp_connect_and_run(
     let addr = format!("{}:{}", target.host, target.port);
     if secure {
         // FTPS：显式 TLS（rustls）
-        let mut roots = rustls::RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let cfg = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let cfg = ftps_tls_config()?;
         let conn = suppaftp::RustlsConnector::from(Arc::new(cfg));
         let stream = suppaftp::RustlsFtpStream::connect(&addr)
             .map_err(|e| anyhow!("连接 FTPS 服务器失败: {e}"))?;
@@ -512,5 +526,24 @@ impl russh::client::Handler for SshHandler {
                 Ok(false)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FTPS 作为“进程内第一个 TLS 操作”也必须能建出配置：
+    /// 依赖树同时编译 ring 与 aws-lc-rs 时，`ClientConfig::builder()` 会 panic。
+    #[test]
+    fn ftps_tls_config_builds_without_default_provider() {
+        let handle = std::thread::spawn(|| {
+            let cfg = ftps_tls_config().expect("FTPS TLS 配置应可构建");
+            // 再建一次，确认不依赖一次性全局安装
+            let cfg2 = ftps_tls_config().expect("重复构建也应成功");
+            (cfg.enable_sni, cfg2.enable_sni)
+        });
+        let (a, b) = handle.join().expect("构建 FTPS TLS 配置不得 panic");
+        assert!(a && b);
     }
 }

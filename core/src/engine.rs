@@ -224,6 +224,10 @@ struct ProbeInfo {
 
 impl Engine {
     pub fn new(store_root: impl Into<std::path::PathBuf>) -> Result<Arc<Self>> {
+        // 依赖树里 ring 与 aws-lc-rs 可能同时编译进来，rustls 无法自动选定唯一
+        // 默认 provider 时会 panic（release = panic=abort，等于应用直接退出）。
+        // 这里显式安装一次 ring 作为进程默认，重复调用只会返回 Err，可安全忽略。
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let store = Store::new(store_root.into()).context("初始化数据目录失败")?;
         let mut settings = store.load_settings();
         if settings.api_token.trim().is_empty() {
