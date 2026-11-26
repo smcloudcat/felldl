@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FilterKey, Settings, Task, UpdateInfo } from "./types";
 import { api, subscribe, subscribeResync } from "./bridge";
 import { mergeSnapshot, revOf } from "./taskMerge";
+import { INITIAL_LIMIT, STEP, nextLimit, visibleSlice } from "./taskWindow";
 import { TaskCard } from "./TaskCard";
 import { NewTaskDialog } from "./NewTaskDialog";
 import { SettingsPage } from "./SettingsPage";
@@ -344,6 +345,22 @@ export default function App() {
     }
   }, [tasks, filter, category]);
 
+  // ── 列表渲染窗口 ──
+  // 历史任务可能上千条，全量挂载 TaskCard 会让首屏和每次进度事件都变卡；
+  // 首屏只渲染前 N 条（排序是「新建在前」，进行中的总在上面），其余按需展开。
+  // 切换视图 / 筛选 / 分类时收回首屏数量，避免在「已完成」里展开几百条后
+  // 切回「全部」仍要渲染那么长的列表。
+  const [renderLimit, setRenderLimit] = useState(INITIAL_LIMIT);
+  useEffect(() => {
+    setRenderLimit(INITIAL_LIMIT);
+  }, [view, filter, category]);
+  const { items: shownTasks, hidden } = visibleSlice(
+    visible,
+    renderLimit,
+    // 进行中 / 排队 / 定时的任务永不被窗口挡住（老任务不会被新记录挤没）
+    (t) => isActive(t.state) || t.state === "queued" || t.state === "scheduled"
+  );
+
   // ── 操作 ──
   const handlePause = useCallback(
     (id: string) => {
@@ -681,7 +698,7 @@ export default function App() {
             <EmptyState filter={filter} onNew={() => setShowNew(true)} t={t} />
           ) : (
             <div className="task-list">
-              {visible.map((t) => (
+              {shownTasks.map((t) => (
                 <TaskCard
                   key={t.id}
                   task={t}
@@ -693,6 +710,15 @@ export default function App() {
                   onReveal={handleReveal}
                 />
               ))}
+              {hidden > 0 && (
+                <button
+                  type="button"
+                  className="btn btn-ghost list-more"
+                  onClick={() => setRenderLimit((n) => nextLimit(n, STEP))}
+                >
+                  {t("list.more", { n: hidden })}
+                </button>
+              )}
             </div>
           )}
         </div>

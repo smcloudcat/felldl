@@ -580,6 +580,14 @@ textarea {
   gap: 9px;
 }
 
+/* 「显示更多」：列表窗口的展开按钮，与卡片同宽、弱化存在感 */
+.task-list .list-more {
+  justify-content: center;
+  width: 100%;
+  padding: 10px;
+  color: var(--text-dim);
+}
+
 .task-card {
   background: var(--bg-elev);
   background: var(--panel);

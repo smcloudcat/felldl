@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "node --experimental-strip-types --test tests/taskMerge.test.ts tests/ipcError.test.ts",
+    "test": "node --experimental-strip-types --test tests/taskMerge.test.ts tests/ipcError.test.ts tests/taskWindow.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {

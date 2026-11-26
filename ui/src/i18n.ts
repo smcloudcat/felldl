@@ -28,6 +28,7 @@ const zh: Record<string, string> = {
   "hdr.resumeAll": "全部开始",
   "hdr.clearDone": "清空完成",
   "hdr.newTask": "新建下载",
+  "list.more": "显示更多（还有 {n} 项）",
   // 更新横幅
   "upd.found": "发现新版本",
   "upd.current": "当前",
@@ -347,6 +348,7 @@ const en: Record<string, string> = {
   "hdr.resumeAll": "Resume all",
   "hdr.clearDone": "Clear done",
   "hdr.newTask": "New download",
+  "list.more": "Show {n} more",
   "upd.found": "New version available",
   "upd.current": "current",
   "upd.go": "Update",
