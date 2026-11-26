@@ -165,6 +165,17 @@ pub(crate) struct Runtime {
     pub(crate) task_limiter: Mutex<Option<Arc<RateLimiter>>>,
 }
 
+/// 运行守卫：`run_task` 无论从哪条路径退出（完成 / 暂停 / 出错 / 解析失败），
+/// 都保证 `running` 归零。否则并发槽被永久占用：任务再也 resume 不起来，
+/// 队列里其他任务也被卡在「已满」。
+struct RunningGuard(Arc<Runtime>);
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        *self.0.running.lock() = false;
+    }
+}
+
 impl Runtime {
     pub(crate) fn new(task: Task) -> Arc<Self> {
         Arc::new(Self {
@@ -1132,6 +1143,8 @@ impl Engine {
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow!("任务不存在"))?;
+        // 所有退出路径统一清理运行标记（幂等：finish_task / fail_task 已经清过也没关系）
+        let _running_guard = RunningGuard(rt.clone());
 
         // FTP / SFTP 单流下载分支
         {
@@ -1166,18 +1179,11 @@ impl Engine {
             let snap = { rt.task.lock().clone() };
             self.emit(EngineEvent::TaskUpdated(snap));
             return match self.clone().hls_run(&rt, &media, &client, &cancel).await {
-                // 用户取消：落暂停并保存进度，不能当成错误
+                // 用户取消：落暂停并保存进度，不能当成错误。
+                // 必须走 save_paused：它会清 `running`，否则并发槽被永久占住，
+                // 下一轮 resume 会被「已在运行」直接吞掉（HLS 只能暂停一次）。
                 Err(_) if cancel.is_cancelled() => {
-                    let mut t = rt.task.lock();
-                    if t.state.is_active() {
-                        t.state = TaskState::Paused;
-                        t.speed = 0;
-                    }
-                    t.downloaded = rt.downloaded.load(Ordering::Relaxed);
-                    let snap = t.clone();
-                    drop(t);
-                    let _ = self.store.save_task(&snap);
-                    self.emit(EngineEvent::TaskUpdated(snap));
+                    self.save_paused(&rt);
                     Ok(())
                 }
                 other => other,
