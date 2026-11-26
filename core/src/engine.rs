@@ -167,16 +167,48 @@ pub(crate) struct Runtime {
     pub(crate) running: Mutex<bool>,
     /// 任务级限速器（运行中可由 set_task_speed_limit 动态调整）
     pub(crate) task_limiter: Mutex<Option<Arc<RateLimiter>>>,
+    /// 运行代号（generation）：每次「开工」递增。
+    ///
+    /// worker 只允许用**自己那一代**写任务状态。这解决三类真实问题：
+    /// 1) 暂停超时后用户点了恢复，旧 worker 收尾时把 `running` 清零，
+    ///    导致并发槽被重复占用、同一文件被两个 worker 同时写；
+    /// 2) 删除任务后 worker 迟到写回 Paused/Completed，任务在磁盘和 UI 上复活；
+    /// 3) 旧 worker 的 Error 覆盖用户刚点的暂停。
+    pub(crate) generation: AtomicU64,
+}
+
+impl Runtime {
+    /// 开始新的一代运行（resume / 取消 都调用）
+    pub(crate) fn next_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// 当前代
+    pub(crate) fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// 这一代是否仍然有效（没有恢复过、没有被取消/删除）
+    pub(crate) fn is_current(&self, generation: u64) -> bool {
+        self.current_generation() == generation
+    }
 }
 
 /// 运行守卫：`run_task` 无论从哪条路径退出（完成 / 暂停 / 出错 / 解析失败），
 /// 都保证 `running` 归零。否则并发槽被永久占用：任务再也 resume 不起来，
 /// 队列里其他任务也被卡在「已满」。
-struct RunningGuard(Arc<Runtime>);
+///
+/// 只清理**自己那一代**的 running：恢复后的新 worker 不能被旧 worker 的收尾误伤。
+struct RunningGuard {
+    rt: Arc<Runtime>,
+    generation: u64,
+}
 
 impl Drop for RunningGuard {
     fn drop(&mut self) {
-        *self.0.running.lock() = false;
+        if self.rt.is_current(self.generation) {
+            *self.rt.running.lock() = false;
+        }
     }
 }
 
@@ -188,6 +220,7 @@ impl Runtime {
             running: Mutex::new(false),
             task: Mutex::new(task),
             task_limiter: Mutex::new(None),
+            generation: AtomicU64::new(0),
         })
     }
 }
@@ -934,15 +967,18 @@ impl Engine {
         while *rt.running.lock() && waited.elapsed() < std::time::Duration::from_secs(5) {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        let mut t = rt.task.lock();
-        if t.state.is_active() || t.state == TaskState::Queued || t.state == TaskState::Scheduled {
-            t.state = TaskState::Paused;
-            t.speed = 0;
-            t.downloaded = rt.downloaded.load(Ordering::Relaxed);
-            let snap = t.clone();
-            drop(t);
-            let _ = self.store.save_task(&snap);
-            self.emit(EngineEvent::TaskUpdated(snap));
+        // 用户操作代表最新意图：用当前代号写入，不会被超时未停的 worker 回退
+        let generation = rt.current_generation();
+        let active = {
+            let t = rt.task.lock();
+            t.state.is_active() || t.state == TaskState::Queued || t.state == TaskState::Scheduled
+        };
+        if active {
+            let dl = rt.downloaded.load(Ordering::Relaxed);
+            self.commit_state(&rt, generation, TaskState::Paused, |t| {
+                t.speed = 0;
+                t.downloaded = dl;
+            });
         }
         Ok(())
     }
@@ -986,34 +1022,27 @@ impl Engine {
         if active_others >= max {
             // 释放占位并转入排队
             *rt.running.lock() = false;
-            let mut t = rt.task.lock();
-            if t.state != TaskState::Queued {
-                t.state = TaskState::Queued;
-                t.clear_error();
-                let snap = t.clone();
-                drop(t);
-                let _ = self.store.save_task(&snap);
-                self.emit(EngineEvent::TaskUpdated(snap));
-            }
+            let generation = rt.current_generation();
+            self.commit_state(&rt, generation, TaskState::Queued, |t| t.clear_error());
             return Ok(());
         }
 
         // 每次开工都换新 token，保证上一次暂停的取消信号不影响本轮
         let new_cancel = CancellationToken::new();
         *rt.cancel.lock() = new_cancel.clone();
-        {
-            let mut t = rt.task.lock();
-            t.state = TaskState::Probing;
+        // 新的一代：上一代 worker 若还活着（暂停超时），它的收尾从此一律被丢弃
+        let generation = rt.next_generation();
+        self.commit_state(&rt, generation, TaskState::Probing, |t| {
             t.clear_error();
             t.speed = 0;
-        }
+        });
 
         let engine = self.clone();
         let id2 = id.to_string();
         tokio::spawn(async move {
-            let res = engine.clone().run_task(&id2, new_cancel).await;
+            let res = engine.clone().run_task(&id2, generation, new_cancel).await;
             if let Err(e) = res {
-                engine.fail_task(&id2, &e);
+                engine.fail_task(&id2, Some(generation), &e);
             }
         });
         Ok(())
@@ -1032,6 +1061,9 @@ impl Engine {
         } else {
             rt.cancel.lock().cancel();
         }
+        // 让在途 worker 立即作废：删除后它的任何状态写入 / 事件广播都被丢弃，
+        // 否则用户删掉的任务会以「暂停中」的身份重新出现在列表和磁盘上。
+        rt.next_generation();
         let path = {
             let t = rt.task.lock();
             t.save_path.clone()
@@ -1073,17 +1105,68 @@ impl Engine {
         }
     }
 
-    pub(crate) fn fail_task(&self, id: &str, err: &anyhow::Error) {
-        if let Some(rt) = self.tasks.lock().get(id).cloned() {
-            *rt.running.lock() = false;
-            let mut t = rt.task.lock();
-            t.state = TaskState::Error;
+    /// 任务状态的**唯一**写入口：状态迁移、落盘与广播都在这里发生。
+    ///
+    /// `generation` 是本次运行的代号（`Runtime::next_generation` 分配）。
+    /// 下列任一情况直接丢弃（不写盘、不广播），返回 `false`：
+    /// - 这一代已被新的运行 / 取消取代 —— 旧 worker 的迟到快照不得改状态；
+    /// - 任务已被删除（store 墓碑）—— 否则删除后任务会复活；
+    /// - 状态机拒绝的迁移（例如已完成被打回暂停）。
+    fn commit_state<F>(&self, rt: &Arc<Runtime>, generation: u64, to: TaskState, apply: F) -> bool
+    where
+        F: FnOnce(&mut Task),
+    {
+        if !rt.is_current(generation) {
+            return false;
+        }
+        let mut t = rt.task.lock();
+        if self.store.is_dead(&t.id) {
+            return false;
+        }
+        if !t.state.can_transition(to) {
+            eprintln!(
+                "[state] 拒绝迁移 {:?} -> {:?}（任务 {}，已是过期写入）",
+                t.state, to, t.id
+            );
+            return false;
+        }
+        apply(&mut t);
+        t.state = to;
+        let snap = t.clone();
+        drop(t);
+        let _ = self.store.save_task(&snap);
+        self.emit(EngineEvent::TaskUpdated(snap));
+        true
+    }
+
+    /// 热路径进度落盘（FTP / SFTP / BT）：**取快照与入队必须在同一把任务锁内**，
+    /// 且只在「仍处于下载中」时写。
+    ///
+    /// 否则 pause() 刚写下的 Paused 会被一条并发产生的 Downloading 快照覆盖，
+    /// 用户看到「暂停中却还在下载」，重启后状态也会回跳到下载中。
+    pub(crate) fn persist_progress(&self, rt: &Arc<Runtime>) {
+        let mut t = rt.task.lock();
+        t.downloaded = rt.downloaded.load(Ordering::Relaxed);
+        if t.state == TaskState::Downloading {
+            self.store.enqueue_save_owned(t.clone());
+        }
+    }
+
+    /// 记录失败。`generation = None` 表示调用方自管生命周期（BT 会话），
+    /// 按当前代处理——它没有「旧 worker 迟到」的问题，取消会直接从 map 移除。
+    pub(crate) fn fail_task(&self, id: &str, generation: Option<u64>, err: &anyhow::Error) {
+        let Some(rt) = self.tasks.lock().get(id).cloned() else {
+            return;
+        };
+        let generation = generation.unwrap_or_else(|| rt.current_generation());
+        let dl = rt.downloaded.load(Ordering::Relaxed);
+        self.commit_state(&rt, generation, TaskState::Error, |t| {
             t.set_error(err);
             t.speed = 0;
-            let snap = t.clone();
-            drop(t);
-            let _ = self.store.save_task(&snap);
-            self.emit(EngineEvent::TaskUpdated(snap));
+            t.downloaded = dl;
+        });
+        if rt.is_current(generation) {
+            *rt.running.lock() = false;
         }
     }
 
@@ -1199,46 +1282,53 @@ impl Engine {
         false
     }
 
-    /// 落暂停断点：状态 / 字节数 / 速度写入并立即持久化（幂等，可多次调用）
-    fn save_paused(&self, rt: &Arc<Runtime>) {
-        *rt.running.lock() = false;
-        let mut t = rt.task.lock();
-        // 已完成 / 出错的状态不被暂停覆盖（避免与 finish_task / fail_task 抢写）
-        if t.state == TaskState::Completed || t.state == TaskState::Error {
+    /// 落暂停断点：状态 / 字节数 / 速度写入并立即持久化（幂等，可多次调用）。
+    ///
+    /// `generation` 必须是当前运行的代号：过期 worker（超时未停、已被恢复/取消）
+    /// 调到这里时既不落盘也不清 `running`，否则会覆盖用户刚做的决定。
+    pub(crate) fn save_paused(&self, rt: &Arc<Runtime>, generation: u64) {
+        if !rt.is_current(generation) {
             return;
         }
-        t.state = TaskState::Paused;
-        t.speed = 0;
-        t.downloaded = rt.downloaded.load(Ordering::Relaxed);
-        let snap = t.clone();
-        drop(t);
-        let _ = self.store.save_task(&snap);
-        self.emit(EngineEvent::TaskUpdated(snap));
+        let dl = rt.downloaded.load(Ordering::Relaxed);
+        self.commit_state(rt, generation, TaskState::Paused, |t| {
+            t.speed = 0;
+            t.downloaded = dl;
+        });
+        // 状态写被状态机拒绝（例如已完成）时也要放开并发槽
+        if rt.is_current(generation) {
+            *rt.running.lock() = false;
+        }
     }
 
-    async fn run_task(self: Arc<Self>, id: &str, cancel: CancellationToken) -> Result<()> {
+    async fn run_task(
+        self: Arc<Self>,
+        id: &str,
+        generation: u64,
+        cancel: CancellationToken,
+    ) -> Result<()> {
         let rt = self
             .tasks
             .lock()
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow!("任务不存在"))?;
-        // 所有退出路径统一清理运行标记（幂等：finish_task / fail_task 已经清过也没关系）
-        let _running_guard = RunningGuard(rt.clone());
+        // 所有退出路径统一清理运行标记（幂等：finish_task / fail_task 已经清过也没关系）。
+        // 只清自己这一代：恢复后的新 worker 不能被旧 worker 的收尾误伤。
+        let _running_guard = RunningGuard {
+            rt: rt.clone(),
+            generation,
+        };
 
         // FTP / SFTP 单流下载分支
         {
             let kind = rt.task.lock().kind;
             if kind == TaskKind::Ftp || kind == TaskKind::Sftp {
-                {
-                    let mut t = rt.task.lock();
-                    t.state = TaskState::Downloading;
+                self.commit_state(&rt, generation, TaskState::Downloading, |t| {
                     t.clear_error();
                     t.speed = 0;
-                }
-                let snap = { rt.task.lock().clone() };
-                self.emit(EngineEvent::TaskUpdated(snap));
-                return crate::remote::download(self.clone(), rt, &cancel).await;
+                });
+                return crate::remote::download(self.clone(), rt, generation, &cancel).await;
             }
         }
 
@@ -1249,21 +1339,21 @@ impl Engine {
             let media = crate::grab::parse_hls(&client, &url).await?;
             // 分片流无法按字节对齐续传，恢复时从 0 重写（truncate）
             rt.downloaded.store(0, Ordering::Relaxed);
-            {
-                let mut t = rt.task.lock();
-                t.state = TaskState::Downloading;
+            self.commit_state(&rt, generation, TaskState::Downloading, |t| {
                 t.clear_error();
                 t.speed = 0;
                 t.downloaded = 0;
-            }
-            let snap = { rt.task.lock().clone() };
-            self.emit(EngineEvent::TaskUpdated(snap));
-            return match self.clone().hls_run(&rt, &media, &client, &cancel).await {
+            });
+            return match self
+                .clone()
+                .hls_run(&rt, generation, &media, &client, &cancel)
+                .await
+            {
                 // 用户取消：落暂停并保存进度，不能当成错误。
                 // 必须走 save_paused：它会清 `running`，否则并发槽被永久占住，
                 // 下一轮 resume 会被「已在运行」直接吞掉（HLS 只能暂停一次）。
                 Err(_) if cancel.is_cancelled() => {
-                    self.save_paused(&rt);
+                    self.save_paused(&rt, generation);
                     Ok(())
                 }
                 other => other,
@@ -1309,18 +1399,14 @@ impl Engine {
             t.segments = segs;
         }
 
-        {
-            let mut t = rt.task.lock();
-            t.state = TaskState::Downloading;
+        self.commit_state(&rt, generation, TaskState::Downloading, |t| {
             t.clear_error();
-        }
-        let snap = { rt.task.lock().clone() };
-        self.emit(EngineEvent::TaskUpdated(snap));
+        });
 
         // 大小未知、0 字节、或明确不支持分段 → 单流下载
         if total.unwrap_or(0) == 0 || !supports_range {
             // 返回 false 表示用户取消（已保存断点），不能当作下载完成
-            let completed = self.run_stream_single(&rt, &cancel).await?;
+            let completed = self.run_stream_single(&rt, generation, &cancel).await?;
             if !completed {
                 return Ok(());
             }
@@ -1330,7 +1416,7 @@ impl Engine {
                     t.size = Some(rt.downloaded.load(Ordering::Relaxed));
                 }
             }
-            self.finish_task(&rt)?;
+            self.finish_task(&rt, generation)?;
             return Ok(());
         }
 
@@ -1360,7 +1446,7 @@ impl Engine {
         };
         rt.downloaded.store(already, Ordering::Relaxed);
         if already >= total.unwrap() {
-            self.finish_task(&rt)?;
+            self.finish_task(&rt, generation)?;
             return Ok(());
         }
 
@@ -1504,28 +1590,23 @@ impl Engine {
             }
         }
 
-        *rt.running.lock() = false;
+        if rt.is_current(generation) {
+            *rt.running.lock() = false;
+        }
 
         // 取消判定必须以令牌为准，不能只看 `cancelled` 标志：
         // `select!` 的两个分支可能同时就绪，取消时各分片迅速收工、通道随即关闭，
         // 若先命中 `rx.recv() == None` 分支，cancelled 仍是 false，
         // 半截文件就会被当成下载完成（数据丢失，进度还会被改写成总长度）。
         if cancelled || cancel.is_cancelled() {
-            self.save_paused(&rt);
+            self.save_paused(&rt, generation);
             return Ok(());
         }
 
         if let Some(e) = first_err {
-            // 分片出错：若已有进度，保留为错误态以便重试续传
-            let mut t = rt.task.lock();
-            t.state = TaskState::Error;
-            t.set_error(&e);
-            t.speed = 0;
-            t.downloaded = rt.downloaded.load(Ordering::Relaxed);
-            let snap = t.clone();
-            drop(t);
-            let _ = self.store.save_task(&snap);
-            self.emit(EngineEvent::TaskUpdated(snap));
+            // 分片出错：若已有进度，保留为错误态以便重试续传。
+            // 过期 worker 的失败不能覆盖用户刚点的暂停 / 新一轮运行。
+            self.fail_task(id, Some(generation), &e);
             return Ok(());
         }
 
@@ -1536,11 +1617,11 @@ impl Engine {
             t.segments.iter().filter(|s| !s.is_done()).count()
         };
         if unfinished > 0 {
-            self.save_paused(&rt);
+            self.save_paused(&rt, generation);
             return Ok(());
         }
 
-        self.finish_task(&rt)?;
+        self.finish_task(&rt, generation)?;
         Ok(())
     }
 
@@ -1549,6 +1630,7 @@ impl Engine {
     async fn run_stream_single(
         self: &Arc<Self>,
         rt: &Arc<Runtime>,
+        generation: u64,
         cancel: &CancellationToken,
     ) -> Result<bool> {
         let (url, save_path, referer, task_snapshot) = {
@@ -1621,18 +1703,8 @@ impl Engine {
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    *rt.running.lock() = false;
-                    let mut t = rt.task.lock();
-                    t.state = TaskState::Paused;
-                    t.downloaded = offset;
-                    t.speed = 0;
-                    if t.size.is_none() {
-                        t.size = None;
-                    }
-                    let snap = t.clone();
-                    drop(t);
-                    let _ = self.store.save_task(&snap);
-                    self.emit(EngineEvent::TaskUpdated(snap));
+                    rt.downloaded.store(offset, Ordering::Relaxed);
+                    self.save_paused(rt, generation);
                     return Ok(false);
                 }
                 chunk = stream.next() => {
@@ -1641,15 +1713,8 @@ impl Engine {
                             let n = bytes.len() as u64;
                             // 取消安全：暂停时不再卡在限速 sleep 里
                             if !self.global_limiter.acquire_cancellable(n, cancel).await {
-                                *rt.running.lock() = false;
-                                let mut t = rt.task.lock();
-                                t.state = TaskState::Paused;
-                                t.downloaded = offset;
-                                t.speed = 0;
-                                let snap = t.clone();
-                                drop(t);
-                                let _ = self.store.save_task(&snap);
-                                self.emit(EngineEvent::TaskUpdated(snap));
+                                rt.downloaded.store(offset, Ordering::Relaxed);
+                                self.save_paused(rt, generation);
                                 return Ok(false);
                             }
                             write_at(&file, &bytes, offset)?;
@@ -1665,7 +1730,7 @@ impl Engine {
         // 取消与流结束可能同时发生：以令牌为准，绝不能把半截文件当完成
         if cancel.is_cancelled() {
             rt.downloaded.store(offset, Ordering::Relaxed);
-            self.save_paused(rt);
+            self.save_paused(rt, generation);
             return Ok(false);
         }
         // 已知总长度时，字节数对不上同样不能算完成（连接可能被中途关闭）
@@ -1673,7 +1738,7 @@ impl Engine {
         if let Some(total) = expected {
             if offset < total {
                 rt.downloaded.store(offset, Ordering::Relaxed);
-                self.save_paused(rt);
+                self.save_paused(rt, generation);
                 return Ok(false);
             }
         }
@@ -1688,8 +1753,12 @@ impl Engine {
         Ok(true)
     }
 
-    pub(crate) fn finish_task(&self, rt: &Arc<Runtime>) -> Result<()> {
-        *rt.running.lock() = false;
+    pub(crate) fn finish_task(&self, rt: &Arc<Runtime>, generation: u64) -> Result<()> {
+        // 过期 worker（已被恢复 / 取消 / 删除）不得提交：
+        // 否则它会把新一轮正在写的 `.part` 改名，或者把暂停的任务标成已完成。
+        if !rt.is_current(generation) {
+            return Ok(());
+        }
         // 先落地再改状态：rename 失败（磁盘满/权限/被杀软占用）时任务必须是 Error，
         // 不能出现「状态 Completed 但文件还叫 xxx.part」这种自相矛盾的结果。
         {
@@ -1703,43 +1772,46 @@ impl Engine {
                     .with_context(|| format!("保存下载文件失败: {path}"))?;
             }
         }
-        let mut t = rt.task.lock();
-        let total = t.size.unwrap_or(rt.downloaded.load(Ordering::Relaxed));
-        // 确保分片状态与总量一致
-        let sum: u64 = t.segments.iter().map(|s| s.done.min(s.len())).sum();
-        t.downloaded = if t.segments.is_empty() {
-            rt.downloaded.load(Ordering::Relaxed)
-        } else {
-            sum.max(total)
-        };
-        if !t.segments.is_empty() {
-            t.downloaded = total;
+        let dl = rt.downloaded.load(Ordering::Relaxed);
+        let mut reschedule = false;
+        let completed = self.commit_state(rt, generation, TaskState::Completed, |t| {
+            let total = t.size.unwrap_or(dl);
+            // 确保分片状态与总量一致
+            let sum: u64 = t.segments.iter().map(|s| s.done.min(s.len())).sum();
+            t.downloaded = if t.segments.is_empty() {
+                dl
+            } else {
+                sum.max(total)
+            };
+            if !t.segments.is_empty() {
+                t.downloaded = total;
+            }
+            t.completed_at = Some(now_ms());
+            t.speed = 0;
+            t.clear_error();
+            reschedule = t.interval_secs > 0;
+        });
+        if rt.is_current(generation) {
+            *rt.running.lock() = false;
         }
-        t.state = TaskState::Completed;
-        t.completed_at = Some(now_ms());
-        t.speed = 0;
-        t.clear_error();
+        if !completed {
+            return Ok(());
+        }
 
         // 周期性同步：完成后按间隔重新调度（保持文件始终最新）
-        let reschedule = t.interval_secs > 0;
         if reschedule {
-            t.state = TaskState::Scheduled;
-            t.scheduled_at = Some(now_ms() + t.interval_secs as i64 * 1000);
-            // 清零进度等待下一轮；**保留已下载文件**，到点后按 ETag/大小
-            // 重新校验，内容未变化则无需重下（避免同步期间文件消失）
-            t.downloaded = 0;
-            t.segments.clear();
-            t.completed_at = Some(now_ms());
+            let now = now_ms();
+            self.commit_state(rt, generation, TaskState::Scheduled, |t| {
+                t.scheduled_at = Some(now + t.interval_secs as i64 * 1000);
+                // 清零进度等待下一轮；**保留已下载文件**，到点后按 ETag/大小
+                // 重新校验，内容未变化则无需重下（避免同步期间文件消失）
+                t.downloaded = 0;
+                t.segments.clear();
+                t.completed_at = Some(now);
+            });
             rt.downloaded.store(0, Ordering::Relaxed);
-        }
-
-        let snap = t.clone();
-        drop(t);
-        let _ = self.store.save_task(&snap);
-        self.emit(EngineEvent::TaskUpdated(snap));
-
-        // 全部任务都完成 → 触发「下载后动作」（关机 / 睡眠）
-        if !reschedule {
+        } else {
+            // 全部任务都完成 → 触发「下载后动作」（关机 / 睡眠）
             self.maybe_after_complete();
         }
         Ok(())
@@ -2360,5 +2432,104 @@ mod tests {
         s.done = 100;
         assert!(s.is_done());
         assert_eq!(s.len(), 100);
+    }
+
+    // ───────────── 状态机 / 运行代号 ─────────────
+
+    fn test_task(id: &str, state: TaskState) -> Task {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "url": "https://example.com/f.bin",
+            "file_name": "f.bin",
+            "save_dir": "/tmp",
+            "save_path": "/tmp/f.bin",
+            "state": state,
+        }))
+        .expect("最小任务 JSON 应能反序列化")
+    }
+
+    /// 终态不能被「迟到」的写入打回去。
+    #[test]
+    fn terminal_states_reject_backwards_transitions() {
+        use TaskState::*;
+        for to in [Paused, Downloading, Queued] {
+            assert!(!Completed.can_transition(to), "已完成 -> {to:?} 必须被拒绝");
+        }
+        for to in [Downloading, Paused, Completed] {
+            assert!(!Error.can_transition(to), "出错 -> {to:?} 必须被拒绝");
+        }
+        // 正常流程必须放行
+        assert!(Downloading.can_transition(Paused));
+        assert!(Paused.can_transition(Probing));
+        assert!(Probing.can_transition(Downloading));
+        assert!(Downloading.can_transition(Completed));
+        assert!(Completed.can_transition(Scheduled));
+        assert!(Error.can_transition(Probing));
+        // 同状态重复写入（幂等保存）永远允许
+        for s in [
+            Queued,
+            Probing,
+            Downloading,
+            Paused,
+            Completed,
+            Error,
+            Scheduled,
+        ] {
+            assert!(s.can_transition(s), "{s:?} 重复写入应允许");
+        }
+    }
+
+    fn engine_in_temp(tag: &str) -> (Arc<Engine>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "felldl-gen-{tag}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        (Engine::new(&dir).expect("引擎初始化失败"), dir)
+    }
+
+    /// 过期代（恢复/取消之前的 worker）不得改状态、不得清 running。
+    #[tokio::test]
+    async fn stale_generation_cannot_write_state() {
+        let (engine, dir) = engine_in_temp("stale");
+        let rt = Runtime::new(test_task("t1", TaskState::Downloading));
+        *rt.running.lock() = true;
+        let stale = rt.next_generation();
+        let fresh = rt.next_generation();
+        assert!(!rt.is_current(stale), "被取代的代号必须失效");
+        assert!(rt.is_current(fresh));
+
+        let wrote = engine.commit_state(&rt, stale, TaskState::Paused, |t| t.speed = 0);
+        assert!(!wrote, "过期代的状态写入应被丢弃");
+        assert_eq!(
+            rt.task.lock().state,
+            TaskState::Downloading,
+            "状态不得被改动"
+        );
+        assert!(
+            *rt.running.lock(),
+            "过期代不得清 running（否则并发槽被重复占用）"
+        );
+
+        let wrote = engine.commit_state(&rt, fresh, TaskState::Paused, |t| t.speed = 0);
+        assert!(wrote, "当前代应能正常写状态");
+        assert_eq!(rt.task.lock().state, TaskState::Paused);
+        assert!(engine.store.is_dead("t1") == false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 已删除的任务：任何代号都不能把它写回来。
+    #[tokio::test]
+    async fn deleted_task_rejects_state_writes() {
+        let (engine, dir) = engine_in_temp("deleted");
+        let rt = Runtime::new(test_task("gone", TaskState::Downloading));
+        let gen = rt.next_generation();
+        *rt.running.lock() = true;
+        engine.store.delete_task("gone");
+
+        let wrote = engine.commit_state(&rt, gen, TaskState::Paused, |t| t.downloaded = 1);
+        assert!(!wrote, "已删除任务的状态写入应被丢弃");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

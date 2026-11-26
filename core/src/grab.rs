@@ -1149,6 +1149,8 @@ impl Engine {
         let rt = Runtime::new(t.clone());
         *rt.running.lock() = true;
         *rt.cancel.lock() = CancellationToken::new();
+        // HLS 任务在这里就「开工」了，同样分配运行代号
+        let generation = rt.next_generation();
         self.tasks.lock().insert(id.clone(), rt.clone());
         let _ = self.store.save_task(&t);
         self.emit(EngineEvent::TaskUpdated(t));
@@ -1156,25 +1158,18 @@ impl Engine {
         let me = self.clone();
         let cancel = rt.cancel.lock().clone();
         tokio::spawn(async move {
-            let res = me.clone().hls_run(&rt, &media, &client, &cancel).await;
+            let res = me
+                .clone()
+                .hls_run(&rt, generation, &media, &client, &cancel)
+                .await;
             match res {
                 // 取消退出：清理 running 与任务状态（与 pause() 竞争时幂等），
-                // 避免取消后永久占用并发槽
+                // 避免取消后永久占用并发槽。过期代号会被统一入口直接丢弃。
                 Err(_) if cancel.is_cancelled() => {
-                    *rt.running.lock() = false;
-                    let mut t = rt.task.lock();
-                    if t.state.is_active() {
-                        t.state = TaskState::Paused;
-                        t.speed = 0;
-                        t.downloaded = rt.downloaded.load(Ordering::Relaxed);
-                    }
-                    let snap = t.clone();
-                    drop(t);
-                    let _ = me.store.save_task(&snap);
-                    me.emit(EngineEvent::TaskUpdated(snap));
+                    me.save_paused(&rt, generation);
                 }
                 Err(e) => {
-                    me.fail_task(&task_id, &e);
+                    me.fail_task(&task_id, Some(generation), &e);
                 }
                 Ok(()) => {}
             }
@@ -1185,6 +1180,7 @@ impl Engine {
     pub(crate) async fn hls_run(
         self: Arc<Self>,
         rt: &Arc<Runtime>,
+        generation: u64,
         media: &HlsMedia,
         client: &Client,
         cancel: &CancellationToken,
@@ -1259,7 +1255,7 @@ impl Engine {
         }
 
         drop(file);
-        self.finish_task(rt)?;
+        self.finish_task(rt, generation)?;
         Ok(())
     }
 

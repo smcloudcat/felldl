@@ -31,6 +31,30 @@ impl TaskState {
     pub fn is_terminal(self) -> bool {
         matches!(self, TaskState::Completed | TaskState::Error)
     }
+
+    /// 状态机：这次迁移是否成立。
+    ///
+    /// 这里**只拦明显回退**（终态被打回运行/暂停），不是业务规则全集：
+    /// 同一状态重复写入永远允许，正常流程里的迁移都放行。
+    /// 作用是兜住「旧 generation 的迟到快照 / 删除后残留 worker」——
+    /// 它们想写回 Downloading 或 Paused 时会被拒绝，而不是覆盖用户刚做的决定。
+    pub fn can_transition(self, to: TaskState) -> bool {
+        use TaskState::*;
+        if self == to {
+            return true;
+        }
+        match self {
+            // 排队/定时都还没真正开始，任何状态都可能是用户下一步操作
+            Queued | Scheduled => true,
+            Probing => true,
+            Downloading => true,
+            // 暂停后可以继续/重排/报错，但不会被「悄悄变回运行中」
+            Paused => matches!(to, Probing | Queued | Downloading | Scheduled | Error),
+            // 终态只能被「重新开始」或「周期同步」带走
+            Completed => matches!(to, Scheduled | Probing),
+            Error => matches!(to, Probing | Queued | Scheduled),
+        }
+    }
 }
 
 /// 单个分段。`end` 为**闭区间**末尾字节偏移。

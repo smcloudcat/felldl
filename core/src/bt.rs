@@ -249,7 +249,7 @@ impl Engine {
                     Err(e) => {
                         // 允许用户点「恢复」时再试一次
                         me2.bt_restore_tried.lock().remove(&t.id);
-                        me2.fail_task(&t.id, &e);
+                        me2.fail_task(&t.id, None, &e);
                     }
                 }
             });

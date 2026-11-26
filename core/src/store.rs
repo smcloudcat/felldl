@@ -23,6 +23,13 @@ pub struct Store {
     /// Some(task) 表示保存、None 表示删除墓碑；revision 用于防止
     /// 「删除后旧的 in-flight 写入把任务复活」。
     queue: Arc<Queue>,
+    /// 已删除任务的永久墓碑集合。
+    ///
+    /// 队列里的墓碑只能盖住**同一批**里的旧快照；取消下载时 worker 并没有被 join，
+    /// 它可能在墓碑落盘之后才收尾并调用 `save_task`，于是任务文件被重新写出来
+    /// （进程重启后用户会看到自己删掉的任务又回来了）。任务 id 是 UUID 且永不复用，
+    /// 所以「已删除」是永久事实，直接在这里记住即可。
+    dead: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 type Queue = (Mutex<QueueState>, Condvar);
@@ -39,18 +46,22 @@ impl Store {
         let root = root.into();
         fs::create_dir_all(root.join("tasks"))?;
         let queue: Arc<Queue> = Arc::new((Mutex::new(QueueState::default()), Condvar::new()));
+        let dead: Arc<Mutex<std::collections::HashSet<String>>> =
+            Arc::new(Mutex::new(std::collections::HashSet::new()));
         // 专用 writer 线程：唯一真正落盘者，批量、去重、串行
         let wq = queue.clone();
         let wroot = root.clone();
+        let wdead = dead.clone();
         std::thread::Builder::new()
             .name("felldl-store-writer".into())
-            .spawn(move || writer_loop(wroot, wq))
+            .spawn(move || writer_loop(wroot, wq, wdead))
             .ok();
         Ok(Self {
             root,
             write_lock: Mutex::new(()),
             tmp_seq: AtomicU64::new(0),
             queue,
+            dead,
         })
     }
 
@@ -67,11 +78,23 @@ impl Store {
     /// 同 `enqueue_save`，但直接接管所有权，省掉热路径上的一次深拷贝
     /// （Task 内含 segments 向量，任务多/分片多时拷贝并不便宜）。
     pub fn enqueue_save_owned(&self, task: Task) {
+        // 已删除任务的迟到快照直接丢弃：否则 worker 收尾会把墓碑覆盖掉
+        if self.is_dead(&task.id) {
+            return;
+        }
         let rev = self.next_rev();
         let (lock, cv) = &*self.queue;
         let mut g = lock.lock().unwrap_or_else(|e| e.into_inner());
         g.map.insert(task.id.clone(), (rev, Some(task)));
         cv.notify_one();
+    }
+
+    /// 任务是否已被删除（墓碑永久有效，id 为 UUID 不会复用）
+    pub fn is_dead(&self, id: &str) -> bool {
+        self.dead
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(id)
     }
 
     /// 阻塞直到队列已排空（测试/退出时使用）
@@ -104,6 +127,12 @@ impl Store {
     }
 
     pub fn delete_task(&self, id: &str) {
+        // 先立墓碑再入队：保证「删除之后才到达的快照」一律被拒绝，
+        // 而不是依赖队列先后顺序去赌 worker 的收尾时机。
+        self.dead
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_string());
         // 通过队列写入"墓碑"：writer 线程串行处理，天然与在途进度保存排序，
         // 不会出现「先删除、随后旧快照又写回来」的复活问题。
         let rev = self.next_rev();
@@ -188,7 +217,7 @@ impl Store {
 /// 专用写盘线程：从合并队列取快照，批量、去重地落盘。
 /// 同一 id 的多次进度更新在队列里只保留最新一份；删除用墓碑（None）表示，
 /// 且墓碑总是覆盖旧快照，避免任务被复活。
-fn writer_loop(root: PathBuf, q: Arc<Queue>) {
+fn writer_loop(root: PathBuf, q: Arc<Queue>, dead: Arc<Mutex<std::collections::HashSet<String>>>) {
     let tasks_dir = root.join("tasks");
     let seq = AtomicU64::new(0);
     let (lock, cv) = &*q;
@@ -211,6 +240,11 @@ fn writer_loop(root: PathBuf, q: Arc<Queue>) {
             let path = tasks_dir.join(format!("{id}.json"));
             match item {
                 Some(task) => {
+                    // 快照可能在墓碑立起之前就已经在队列里，落盘前再确认一次
+                    if dead.lock().unwrap_or_else(|e| e.into_inner()).contains(&id) {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
                     if let Ok(data) = serde_json::to_vec_pretty(&task) {
                         let _ = write_atomic(&path, &data, &seq);
                     }
@@ -291,12 +325,9 @@ mod tests {
         d
     }
 
-    #[test]
-    fn roundtrip_task() {
-        let dir = tmp_dir("rt");
-        let store = Store::new(&dir).unwrap();
-        let mut t = Task {
-            id: "abc".into(),
+    fn sample_task(id: &str) -> Task {
+        Task {
+            id: id.into(),
             url: "https://e.com/f.bin".into(),
             kind: crate::model::TaskKind::Http,
             mirrors: vec!["https://mirror.com/f.bin".into()],
@@ -332,7 +363,14 @@ mod tests {
             password: Some("p".into()),
             interval_secs: 60,
             resume_anchor: None,
-        };
+        }
+    }
+
+    #[test]
+    fn roundtrip_task() {
+        let dir = tmp_dir("rt");
+        let store = Store::new(&dir).unwrap();
+        let mut t = sample_task("abc");
         store.save_task(&t).unwrap();
         let loaded = store.load_tasks();
         assert_eq!(loaded.len(), 1);
@@ -345,6 +383,44 @@ mod tests {
         assert_eq!(loaded[0].speed, 0);
         t.downloaded = 500;
         let _ = t;
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 删除后 worker 收尾写回的旧快照不能把任务复活。
+    #[test]
+    fn deleted_task_is_not_resurrected_by_late_snapshot() {
+        let dir = tmp_dir("tomb");
+        let store = Store::new(&dir).unwrap();
+        let mut t = sample_task("gone");
+        store.save_task(&t).unwrap();
+        assert!(store.task_path("gone").exists());
+
+        store.delete_task("gone");
+        assert!(!store.task_path("gone").exists(), "删除应立即落盘");
+
+        // 取消下载时 worker 并没有被 join：它会带着旧 Arc 再存一次
+        t.downloaded = 999;
+        t.state = TaskState::Paused;
+        store.save_task(&t).unwrap();
+        assert!(
+            !store.task_path("gone").exists(),
+            "删除后迟到的快照不得把任务文件写回来"
+        );
+        assert!(store.load_tasks().is_empty(), "重启后不应再看到已删除任务");
+        assert!(store.is_dead("gone"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 反向场景：墓碑只对同一个 id 生效，别的任务照常保存。
+    #[test]
+    fn tombstone_does_not_affect_other_tasks() {
+        let dir = tmp_dir("tomb2");
+        let store = Store::new(&dir).unwrap();
+        store.save_task(&sample_task("a")).unwrap();
+        store.delete_task("a");
+        store.save_task(&sample_task("b")).unwrap();
+        let ids: Vec<String> = store.load_tasks().into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec!["b".to_string()]);
         let _ = fs::remove_dir_all(&dir);
     }
 

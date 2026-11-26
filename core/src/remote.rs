@@ -139,14 +139,11 @@ where
             }
         }
 
-        // 每 2 秒持久化一次进度（进程被杀也能续传）——走合并队列避免阻塞
+        // 每 2 秒持久化一次进度（进程被杀也能续传）——走合并队列避免阻塞。
+        // 快照与入队在同一把锁内完成，避免覆盖 pause() 刚写入的暂停态。
         if last_persist.elapsed().as_secs() >= 2 {
             last_persist = std::time::Instant::now();
-            let mut t = rt.task.lock();
-            t.downloaded = offset;
-            let snap = t.clone();
-            drop(t);
-            engine.store.enqueue_save(&snap);
+            engine.persist_progress(&rt);
         }
     }
     // 完成应答必须检查：服务器回 426 时数据可能已收到一部分甚至全部，
@@ -265,11 +262,7 @@ async fn sftp_worker(
 
         if last_persist.elapsed().as_secs() >= 2 {
             last_persist = std::time::Instant::now();
-            let mut t = rt.task.lock();
-            t.downloaded = offset;
-            let snap = t.clone();
-            drop(t);
-            engine.store.enqueue_save(&snap);
+            engine.persist_progress(&rt);
         }
     }
     if offset < size {
@@ -284,6 +277,7 @@ async fn sftp_worker(
 pub(crate) async fn download(
     engine: Arc<Engine>,
     rt: Arc<Runtime>,
+    generation: u64,
     cancel: &CancellationToken,
 ) -> Result<()> {
     let (kind, url, save_path, user, pass, speed_limit, start) = {
@@ -370,19 +364,12 @@ pub(crate) async fn download(
                 Ok(inner) => inner,
                 Err(e) => Err(anyhow!("FTP 任务异常: {e}")),
             };
-            // worker 已真正退出：清理运行标记；若是取消触发的退出，落 Paused
-            *rt3.running.lock() = false;
+            // worker 已真正退出：清理运行标记；若是取消触发的退出，落 Paused。
+            // 走统一入口：过期代号（已恢复/已删除）的收尾不会写盘也不会广播。
             if flag3.load(Ordering::Relaxed) || bridge_cancel.is_cancelled() {
-                let mut t = rt3.task.lock();
-                if t.state.is_active() {
-                    t.state = TaskState::Paused;
-                    t.speed = 0;
-                    t.downloaded = rt3.downloaded.load(Ordering::Relaxed);
-                }
-                let snap = t.clone();
-                drop(t);
-                let _ = engine3.store.save_task(&snap);
-                engine3.emit(EngineEvent::TaskUpdated(snap));
+                engine3.save_paused(&rt3, generation);
+            } else if rt3.is_current(generation) {
+                *rt3.running.lock() = false;
             }
             let _ = tx.send(res);
         });
@@ -407,21 +394,11 @@ pub(crate) async fn download(
                     t.size = Some(rt.downloaded.load(Ordering::Relaxed));
                 }
             }
-            engine.finish_task(&rt)?;
+            engine.finish_task(&rt, generation)?;
             Ok(())
         }
         Outcome::Cancelled => {
-            *rt.running.lock() = false;
-            let mut t = rt.task.lock();
-            if t.state.is_active() {
-                t.state = TaskState::Paused;
-                t.speed = 0;
-                t.downloaded = rt.downloaded.load(Ordering::Relaxed);
-            }
-            let snap = t.clone();
-            drop(t);
-            let _ = engine.store.save_task(&snap);
-            engine.emit(EngineEvent::TaskUpdated(snap));
+            engine.save_paused(&rt, generation);
             Ok(())
         }
     }

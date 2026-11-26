@@ -1218,3 +1218,72 @@ async fn cancel_with_delete_removes_part_file() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 取消/删除后，仍在收尾的 worker 不得把任务「复活」：
+/// 既不能重新出现在任务列表里，也不能重新出现在磁盘上（重启后）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_does_not_resurrect_task() {
+    use felldl_core::EngineEvent;
+
+    let payload = make_payload(4 * 1024 * 1024);
+    let srv = spawn_server(payload, true).await;
+    let root = temp_root("cancel-ghost");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let engine = new_engine(&root);
+    let mut s = engine.settings();
+    // 限速让取消确实发生在下载途中
+    s.global_speed_limit = 512 * 1024;
+    engine.update_settings(s).unwrap();
+    let mut rx = engine.subscribe();
+
+    let id = engine
+        .add(AddTaskRequest {
+            url: format!("http://{}/g.bin", srv.addr),
+            save_dir: Some(out.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    loop {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        if engine
+            .get(&id)
+            .map(|t| t.downloaded > 150 * 1024)
+            .unwrap_or(false)
+        {
+            break;
+        }
+    }
+
+    // 清掉取消之前的事件，只看取消之后 worker 收尾阶段有没有「幽灵更新」
+    while rx.try_recv().is_ok() {}
+    engine.cancel(&id, false).await.unwrap();
+    assert!(engine.get(&id).is_none(), "取消后任务应立即从列表消失");
+
+    let mut ghost_updates = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+            Ok(Ok(EngineEvent::TaskUpdated(t))) if t.id == id => ghost_updates += 1,
+            Ok(Ok(_)) => {}
+            // 超时/通道断开：安静了，可以结束
+            _ => break,
+        }
+    }
+    assert_eq!(
+        ghost_updates, 0,
+        "删除后不应再广播该任务的状态（UI 会把它显示成幽灵任务）"
+    );
+
+    // 磁盘上也不能复活：重启后不应该再看到它
+    drop(engine);
+    let engine2 = new_engine(&root);
+    assert!(
+        engine2.get(&id).is_none(),
+        "已删除的任务不得被迟到快照写回磁盘"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
