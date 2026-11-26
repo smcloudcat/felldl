@@ -1819,7 +1819,13 @@ pub fn run() {
                                 execute_system_action(action);
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        // 广播缓冲溢出：事件已经丢了，而且不会补发。
+                        // 典型后果是「最后一次事件是『已完成』」的任务永远停在旧状态。
+                        // 这里显式通知前端重新拉一次权威快照（见 ui 的 subscribeResync）。
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            eprintln!("[event] 事件积压，丢弃 {n} 条，通知前端重同步");
+                            let _ = app_handle.emit("engine://resync", n);
+                        }
                         Err(_) => break,
                     }
                 }

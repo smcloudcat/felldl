@@ -480,6 +480,7 @@ mod tests {
             error: None,
             error_code: None,
             retryable: None,
+            rev: 0,
             connections: 8,
             segments: vec![],
             supports_range: true,

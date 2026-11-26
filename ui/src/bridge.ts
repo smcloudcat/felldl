@@ -129,6 +129,14 @@ export interface UpdateProgress {
   percent: number;
 }
 
+/**
+ * 事件断流信号：后端广播缓冲溢出、丢了 `dropped` 条事件。
+ * 丢掉的事件不会补发，收到后必须重新拉一次任务快照。
+ */
+export function subscribeResync(cb: (dropped: number) => void): Promise<UnlistenFn> {
+  return listen<number>("engine://resync", (evt) => cb(evt.payload));
+}
+
 /** 订阅更新包下载进度 */
 export function subscribeUpdateProgress(
   cb: (p: UpdateProgress) => void

@@ -41,6 +41,11 @@ export interface Task {
   error_code?: string | null;
   /** 自动重试是否有意义；null/缺省表示当前没有错误 */
   retryable?: boolean | null;
+  /**
+   * 任务版本号：后端每次改动任务就 +1。
+   * 用来丢弃倒序到达的旧快照 / 旧进度（见 taskMerge.ts）。
+   */
+  rev?: number;
   connections: number;
   segments: Segment[];
   supports_range: boolean;

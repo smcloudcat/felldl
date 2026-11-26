@@ -1143,6 +1143,7 @@ impl Engine {
             password: None,
             interval_secs: 0,
             resume_anchor: None,
+            rev: 0,
         };
         let id = t.id.clone();
         let task_id = id.clone();

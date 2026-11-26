@@ -175,6 +175,8 @@ pub(crate) struct Runtime {
     /// 2) 删除任务后 worker 迟到写回 Paused/Completed，任务在磁盘和 UI 上复活；
     /// 3) 旧 worker 的 Error 覆盖用户刚点的暂停。
     pub(crate) generation: AtomicU64,
+    /// 任务版本号（每次内容变更 +1）。UI 靠它丢弃比当前更旧的快照，见 `Task::rev`。
+    pub(crate) rev: AtomicU64,
     /// 正在被删除：从发起删除到记录消失之间，任何 worker 都不许再改状态/广播。
     /// 删除期间用户要的是「它消失」，不是「它先暂停了一下」。
     pub(crate) deleting: std::sync::atomic::AtomicBool,
@@ -194,6 +196,14 @@ impl Runtime {
     /// 这一代是否仍然有效（没有恢复过、没有被取消/删除）
     pub(crate) fn is_current(&self, generation: u64) -> bool {
         self.current_generation() == generation
+    }
+
+    /// 推进任务版本号并返回新值。
+    ///
+    /// 必须在持有 `task` 锁时调用，并紧接着把它写回 `t.rev` 再取快照，
+    /// 否则「版本号」和「内容」会不同步，UI 的乱序判断就失效了。
+    pub(crate) fn bump_rev(&self) -> u64 {
+        self.rev.fetch_add(1, Ordering::SeqCst) + 1
     }
 }
 
@@ -217,6 +227,7 @@ impl Drop for RunningGuard {
 
 impl Runtime {
     pub(crate) fn new(task: Task) -> Arc<Self> {
+        let task_rev = task.rev;
         Arc::new(Self {
             downloaded: AtomicU64::new(task.downloaded),
             cancel: Mutex::new(CancellationToken::new()),
@@ -224,6 +235,8 @@ impl Runtime {
             task: Mutex::new(task),
             task_limiter: Mutex::new(None),
             generation: AtomicU64::new(0),
+            // 从磁盘载入的任务可能带着上次的版本号，接着往上加，避免回绕
+            rev: AtomicU64::new(task_rev),
             deleting: std::sync::atomic::AtomicBool::new(false),
         })
     }
@@ -784,6 +797,7 @@ impl Engine {
             password,
             interval_secs: req.interval_secs,
             resume_anchor: None,
+            rev: 0,
         })
     }
 
@@ -1151,6 +1165,7 @@ impl Engine {
         }
         apply(&mut t);
         t.state = to;
+        t.rev = rt.bump_rev();
         let snap = t.clone();
         drop(t);
         // 持久化失败必须可见：否则界面显示「已暂停」，重启后却回到下载中
@@ -1169,6 +1184,7 @@ impl Engine {
     pub(crate) fn persist_progress(&self, rt: &Arc<Runtime>) {
         let mut t = rt.task.lock();
         t.downloaded = rt.downloaded.load(Ordering::Relaxed);
+        t.rev = rt.bump_rev();
         if t.state == TaskState::Downloading {
             self.store.enqueue_save_owned(t.clone());
         }
@@ -1903,6 +1919,7 @@ impl Engine {
                     let mut t = rt.task.lock();
                     t.speed = 0;
                     t.downloaded = rt.downloaded.load(Ordering::Relaxed);
+                    t.rev = rt.bump_rev();
                     let snap = t.clone();
                     drop(t);
                     last.insert(id, (snap.downloaded, now));
@@ -1918,6 +1935,7 @@ impl Engine {
                                 t.speed = ((dl.saturating_sub(pdl)) as f64 / dt) as u64;
                             }
                         }
+                        t.rev = rt.bump_rev();
                         // 关键：取快照与入队必须在**同一把任务锁内**完成。
                         // 否则 pause() 恰好在两者之间把状态改成 Paused 并落盘，
                         // 这条带着 Downloading 的旧快照随后写入，会把暂停覆盖回下载中。
@@ -2538,6 +2556,48 @@ mod tests {
         assert!(wrote, "当前代应能正常写状态");
         assert_eq!(rt.task.lock().state, TaskState::Paused);
         assert!(engine.store.is_dead("t1") == false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 版本号必须跟着每次状态写入前进，而且广播出去的快照与内存里的值一致。
+    ///
+    /// UI 的乱序判断完全依赖这个不变式：一旦版本号重复或倒退，
+    /// 「旧快照盖新状态」的保护就会失效（重复时被当成同一份，倒退时误丢新数据）。
+    #[tokio::test]
+    async fn revision_advances_with_every_state_write() {
+        let (engine, dir) = engine_in_temp("rev");
+        let rt = Runtime::new(test_task("t1", TaskState::Paused));
+        engine.tasks.lock().insert("t1".to_string(), rt.clone());
+        let mut rx = engine.subscribe();
+
+        let gen = rt.next_generation();
+        assert!(engine.commit_state(&rt, gen, TaskState::Probing, |_| {}));
+        assert!(engine.commit_state(&rt, gen, TaskState::Downloading, |_| {}));
+        assert!(engine.commit_state(&rt, gen, TaskState::Paused, |_| {}));
+
+        let mut revs = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let EngineEvent::TaskUpdated(t) = ev {
+                revs.push(t.rev);
+            }
+        }
+        assert_eq!(revs.len(), 3, "每次状态写入都应广播一次快照");
+        assert!(
+            revs.windows(2).all(|w| w[0] < w[1]),
+            "版本号必须严格递增: {revs:?}"
+        );
+        assert_eq!(rt.task.lock().rev, *revs.last().unwrap());
+
+        // 高频进度落盘也要推进版本号：它是「任务内容变了」的另一种写法，
+        // 漏掉的话 UI 会认为快照比手里的进度更新，把进度打回去。
+        let before = rt.task.lock().rev;
+        engine.persist_progress(&rt);
+        assert!(rt.task.lock().rev > before, "进度落盘也必须推进版本号");
+
+        // 快照带的就是内存里的版本号，不会低于已经广播出去的值
+        let snap = engine.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].rev, rt.task.lock().rev);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -457,6 +457,14 @@ pub struct Task {
     /// 自动重试是否有意义；`None` 表示当前没有错误。
     #[serde(default)]
     pub retryable: Option<bool>,
+    /// 任务版本号：内存态每次被改动就 +1。
+    ///
+    /// UI 靠它解决「快照与事件并发」的乱序：启动时 `list_tasks` 拿到的是
+    /// 某一刻的拷贝，若这期间已经有事件把任务推进到更新状态，
+    /// 直接拿快照覆盖就会把界面打回旧状态（进度倒退、完成变回下载中）。
+    /// UI 只接受版本号不小于当前值的快照，因此这里必须覆盖**所有**改状态的路径。
+    #[serde(default)]
+    pub rev: u64,
     #[serde(default)]
     pub connections: usize,
     #[serde(default)]
@@ -622,6 +630,9 @@ pub enum EngineEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskProgress {
     pub id: TaskId,
+    /// 与 `Task.rev` 同一套版本号，UI 用它丢弃倒序到达的旧增量
+    #[serde(default)]
+    pub rev: u64,
     pub state: TaskState,
     pub downloaded: u64,
     pub size: Option<u64>,
@@ -652,6 +663,7 @@ impl Task {
     pub fn progress_snapshot(&self) -> TaskProgress {
         TaskProgress {
             id: self.id.clone(),
+            rev: self.rev,
             state: self.state,
             downloaded: self.downloaded,
             size: self.size,

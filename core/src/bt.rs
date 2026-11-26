@@ -146,6 +146,7 @@ impl Engine {
             password: None,
             interval_secs: 0,
             resume_anchor: None,
+            rev: 0,
         };
         let id = t.id.clone();
         let rt = Runtime::new(t.clone());
@@ -269,6 +270,7 @@ impl Engine {
         t.state = TaskState::Paused;
         t.speed = 0;
         t.upload_speed = 0;
+        t.rev = rt.bump_rev();
         let snap = t.clone();
         drop(t);
         let _ = self.store.save_task(&snap);
@@ -293,7 +295,8 @@ impl Engine {
         *rt.running.lock() = true;
         let mut t = rt.task.lock();
         t.state = TaskState::Downloading;
-        t.error = None;
+        t.clear_error();
+        t.rev = rt.bump_rev();
         let snap = t.clone();
         drop(t);
         self.emit(EngineEvent::TaskUpdated(snap));
@@ -391,6 +394,7 @@ impl Engine {
                 }
                 *rt.running.lock() = true;
             }
+            t.rev = rt.bump_rev();
             let snap = t.clone();
             drop(t);
             rt.downloaded.store(done, Ordering::Relaxed);
@@ -476,6 +480,7 @@ mod restore_tests {
             password: None,
             interval_secs: 0,
             resume_anchor: None,
+            rev: 0,
         };
         store.save_task(&task).unwrap();
         task.id

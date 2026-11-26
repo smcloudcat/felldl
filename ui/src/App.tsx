@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FilterKey, Settings, Task, UpdateInfo } from "./types";
-import { api, subscribe } from "./bridge";
+import { api, subscribe, subscribeResync } from "./bridge";
+import { mergeSnapshot, revOf } from "./taskMerge";
 import { TaskCard } from "./TaskCard";
 import { NewTaskDialog } from "./NewTaskDialog";
 import { SettingsPage } from "./SettingsPage";
@@ -57,6 +58,10 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const toastId = useRef(0);
+  // 取快照（list_tasks）期间收到的事件：用来判断「谁是更新的那一份」，
+  // 避免旧快照把已经推进到新状态的任务盖回去（见 taskMerge.ts）
+  const touchedRef = useRef(new Set<string>());
+  const removedRef = useRef(new Set<string>());
 
   interface Toast {
     id: number;
@@ -77,11 +82,20 @@ export default function App() {
       if (alive) setSlowHint(true);
     }, 20000);
     (async () => {
+      // 只统计这一轮取快照期间发生的事件
+      touchedRef.current.clear();
+      removedRef.current.clear();
       try {
         const [ts, s] = await Promise.all([api.listTasks(), api.getSettings()]);
         if (!alive) return;
         clearTimeout(timer);
-        setTasks(ts);
+        // 不能直接 setTasks(ts)：这份快照可能比刚收到的事件更旧
+        setTasks((prev) =>
+          mergeSnapshot(prev, ts, {
+            touched: touchedRef.current,
+            removed: removedRef.current,
+          })
+        );
         setSettings(s);
         setInitError(null);
         setSlowHint(false);
@@ -141,6 +155,8 @@ export default function App() {
           const cur = next[i];
           // 已终态的任务忽略迟到进度，避免「完成/错误」被旧进度覆盖
           if (cur.state === "completed" || cur.state === "error") continue;
+          // 版本号更小的增量是旧数据（例如补发的上一轮进度）
+          if (revOf(d) < revOf(cur)) continue;
           next[i] = { ...cur, ...d };
           changed = true;
         }
@@ -149,6 +165,8 @@ export default function App() {
           if (i === -1) {
             next = [t, ...next];
           } else {
+            // 本地已经更新（进度 tick 的 rev 更高）时不要被旧快照回退
+            if (revOf(next[i]) > revOf(t)) continue;
             next[i] = t;
           }
           changed = true;
@@ -171,12 +189,14 @@ export default function App() {
         case "taskProgress": {
           const d = e.payload as Partial<Task> & { id: string };
           if (!d?.id) break;
+          touchedRef.current.add(d.id);
           progress.set(d.id, d);
           scheduleFlush(false);
           break;
         }
         case "taskUpdated": {
           const t = e.payload as Task;
+          touchedRef.current.add(t.id);
           // 完整快照优先于增量进度
           progress.delete(t.id);
           // 合并同一任务的连续进度；非下载态（完成/暂停/错误/排队）立即提交
@@ -185,6 +205,8 @@ export default function App() {
           break;
         }
         case "taskRemoved":
+          touchedRef.current.add(e.payload as string);
+          removedRef.current.add(e.payload as string);
           pending.delete(e.payload as string);
           progress.delete(e.payload as string);
           setTasks((prev) => prev.filter((x) => x.id !== e.payload));
@@ -209,6 +231,45 @@ export default function App() {
       un?.();
     };
   }, [toast]);
+
+  // ── 事件断流后的重同步 ──
+  // 后端广播通道有容量上限，前端处理不过来时会丢事件（Rust 侧会发 resync 信号）；
+  // 丢掉的事件不会补发 —— 例如「最后一条是已完成」的任务会永远停在旧状态。
+  // 收到信号就重新拉一次权威快照，仍按 rev 水位合并，避免把更新的事件盖回去。
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    let disposed = false;
+    let inflight = false;
+    const resync = async () => {
+      if (inflight) return;
+      inflight = true;
+      touchedRef.current.clear();
+      try {
+        const ts = await api.listTasks();
+        if (disposed) return;
+        setTasks((prev) =>
+          mergeSnapshot(prev, ts, {
+            touched: touchedRef.current,
+            removed: removedRef.current,
+          })
+        );
+      } catch {
+        /* 拉不到就等下一次信号；不要用 toast 打扰用户 */
+      } finally {
+        inflight = false;
+      }
+    };
+    subscribeResync(() => void resync())
+      .then((f) => {
+        if (disposed) f();
+        else un = f;
+      })
+      .catch(() => {});
+    return () => {
+      disposed = true;
+      un?.();
+    };
+  }, []);
 
   // ── 主题 / 皮肤 / 按钮风格 ──
   useEffect(() => {
