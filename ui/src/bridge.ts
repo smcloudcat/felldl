@@ -74,10 +74,10 @@ export const api = {
   requestAllFilesAccess: () => invoke("request_all_files_access") as Promise<void>,
   dirWritable: (path: string) => invoke("dir_writable", { path }) as Promise<boolean>,
 
-  // 应用内直接更新：下载更新包（进度走 update://progress 事件）→ 应用并重启
-  downloadUpdate: (url: string, fileName: string) =>
-    invoke("download_update", { url, fileName }) as Promise<string>,
-  applyUpdate: (path: string) => invoke("apply_update", { path }) as Promise<string>,
+  // 应用内直接更新：URL 与文件名都来自签名清单，前端不传（也就无法被诱导下载别的）
+  // 下载进度走 update://progress 事件；返回一次性 token，applyUpdate 只接受 token
+  downloadUpdate: () => invoke("download_update") as Promise<string>,
+  applyUpdate: (token: string) => invoke("apply_update", { token }) as Promise<string>,
   setTaskSpeedLimit: (id: string, limit: number) =>
     invoke("set_task_speed_limit", { id, limit }) as Promise<void>,
 

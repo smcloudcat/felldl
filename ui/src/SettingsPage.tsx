@@ -163,6 +163,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
 
   async function instantUpdate() {
     if (!updateInfo) return;
+    // 只做「有没有可更新」的前置判断；下载地址来自后端验签过的清单
     const asset = pickUpdateAsset(updateInfo);
     if (!asset) {
       toast(t("set.updateNoAsset"), "error");
@@ -173,14 +174,14 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
     setSizeHint("");
     setHasTotal(false);
     try {
-      const path = await api.downloadUpdate(asset.url, asset.name);
+      const token = await api.downloadUpdate();
       setPhase("apply");
-      const mode = await api.applyUpdate(path);
+      const mode = await api.applyUpdate(token);
       // Windows 走「退出→覆盖→重启」，这一步之后进程就没了；
       // 其它平台返回 opened / manual，提示用户手动确认安装
       if (mode !== "restarting") {
         setPhase("idle");
-        toast(t("set.manualInstall", { p: path }));
+        toast(t("set.manualInstall"));
       }
     } catch (e: any) {
       setPhase("idle");

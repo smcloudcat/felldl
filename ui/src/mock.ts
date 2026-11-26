@@ -300,7 +300,8 @@ export const mockEngine = {
             percent: i * 10,
           });
         }
-        return "/tmp/Felldl-0.3.9-win-x64.exe";
+        // 预览模式：返回一个假的「已校验」token（真实链路只接受后端登记过的 token）
+        return "mock-verified-token";
       }
       case "apply_update":
         // 预览模式不重启，走「已下载，请手动安装」分支

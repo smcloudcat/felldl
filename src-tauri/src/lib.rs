@@ -26,6 +26,48 @@ struct AppState {
     api_port: parking_lot_stub::PortCell,
 }
 
+/// 已通过「清单验签 + 摘要校验」、等待安装的更新包。
+///
+/// 前端只拿到一次性 token，**不能传路径**：安装入口从这个表里取文件，
+/// 因此不存在「前端给个路径就执行」的信任漏洞。
+#[derive(Default)]
+struct VerifiedUpdates(std::sync::Mutex<std::collections::HashMap<String, felldl_core::update::VerifiedUpdate>>);
+
+impl VerifiedUpdates {
+    fn insert(&self, update: felldl_core::update::VerifiedUpdate) -> String {
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        if let Ok(mut map) = self.0.lock() {
+            // 只保留最近一次：同一时刻只允许一个待安装更新，避免并发覆盖
+            map.clear();
+            map.insert(token.clone(), update);
+        }
+        token
+    }
+
+    fn take(&self, token: &str) -> Option<felldl_core::update::VerifiedUpdate> {
+        self.0.lock().ok().and_then(|mut map| map.remove(token))
+    }
+}
+
+/// 清单里的 platform 值
+fn current_platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "android") {
+        "android"
+    } else {
+        "linux"
+    }
+}
+
+/// 清单里的 arch 值：与 `std::env::consts::ARCH` 保持一致（x86_64 / aarch64 …），
+/// Android arm64 也是 `aarch64`，用 platform 区分平台即可。
+fn current_arch() -> &'static str {
+    std::env::consts::ARCH
+}
+
 /// 极简可变端口容器（避免为一个小需求引入额外依赖）
 mod parking_lot_stub {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -545,6 +587,13 @@ const UPDATE_VERSION_JSON: [&str; 2] = [
     "https://raw.githubusercontent.com/smcloudcat/felldl/master/version.json",
 ];
 
+/// 签名更新清单（与 version.json 同一仓库、同一 CDN 策略）。
+/// 清单由离线私钥签名，应用只内置公钥——发布源被篡改也装不上。
+const UPDATE_MANIFEST_JSON: [&str; 2] = [
+    "https://cdn.jsdelivr.net/gh/smcloudcat/felldl@master/update-manifest.json",
+    "https://raw.githubusercontent.com/smcloudcat/felldl/master/update-manifest.json",
+];
+
 async fn fetch_version_json(client: &reqwest::Client) -> Result<UpdateInfo, String> {
     let mut last_err = String::from("version.json 源均不可用");
     for url in UPDATE_VERSION_JSON {
@@ -968,6 +1017,10 @@ mod update_tests {
     }
 
     /// 实测 GitHub Releases 接口（限流时跳过，避免把网络状况当成代码问题）
+    ///
+    /// 需要真实外网与可信证书链：离线、代理拦截（自签 CA）环境下必然失败，
+    /// 默认忽略，用 `cargo test -- --ignored github_endpoint_reachable` 手动跑。
+    #[ignore = "需要联网：离线或代理中间人环境下会因证书链失败"]
     #[tokio::test]
     async fn github_endpoint_reachable() {
         let body = reqwest::Client::new()
@@ -1237,91 +1290,181 @@ fn safe_file_name(name: &str) -> String {
     }
 }
 
+/// 拉取签名更新清单：任一条来源验签通过即可用。
+async fn fetch_signed_manifest(client: &reqwest::Client) -> Result<(String, felldl_core::update::Payload), String> {
+    let mut last_err = String::from("更新清单源均不可用");
+    for url in UPDATE_MANIFEST_JSON {
+        let resp = match client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(6))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = format!("{url} 请求失败: {e}");
+                continue;
+            }
+        };
+        if !resp.status().is_success() {
+            last_err = format!("{url} 返回 HTTP {}", resp.status().as_u16());
+            continue;
+        }
+        let text = match resp.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                last_err = format!("{url} 读取失败: {e}");
+                continue;
+            }
+        };
+        match felldl_core::update::parse_and_verify(&text) {
+            Ok(payload) => return Ok((text, payload)),
+            Err(e) => last_err = format!("{url}: {e:#}"),
+        }
+    }
+    Err(last_err)
+}
+
+/// 下载更新包。**URL 与文件名都来自签名清单**，不接受前端传参：
+/// 前端只能决定「要不要更新」，不能决定「从哪里下载什么」。
 #[tauri::command]
 async fn download_update(
     app: tauri::AppHandle,
-    url: String,
-    file_name: String,
+    verified: State<'_, VerifiedUpdates>,
 ) -> Result<String, String> {
-    if !url.starts_with("https://") {
-        return Err("更新地址必须是 https".into());
-    }
-    let dir = data_dir(&app).join("updates");
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| format!("创建更新目录失败: {e}"))?;
-    let path = dir.join(safe_file_name(&file_name));
+    let current = env!("CARGO_PKG_VERSION");
+    let (platform, arch) = (current_platform(), current_arch());
 
     let client = reqwest::Client::builder()
         .user_agent(concat!("Felldl/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(1800))
         .build()
         .map_err(|e| format!("创建下载客户端失败: {e}"))?;
-    let resp = client
-        .get(&url)
+
+    // ① 先拿签名清单，确认「这个版本 / 这个平台」确实存在且比当前新
+    let (manifest_text, payload) = fetch_signed_manifest(&client)
+        .await
+        .map_err(|e| format!("无法获取更新签名清单（{e}），请到 Release 页面手动下载安装包"))?;
+    if !felldl_core::update::version_gt(&payload.version, current) {
+        return Err(format!(
+            "清单版本 {} 不高于当前版本 {current}，无需更新",
+            payload.version
+        ));
+    }
+    let artifact = felldl_core::update::pick_artifact(&payload, platform, arch)
+        .map_err(|e| format!("{e:#}"))?;
+    if !artifact.url.to_ascii_lowercase().starts_with("https://") {
+        return Err("更新清单里的产物地址不是 https，已拒绝下载".into());
+    }
+
+    // ② 先写 .part，校验通过后才改名到最终位置
+    let dir = data_dir(&app).join("updates");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| format!("创建更新目录失败: {e}"))?;
+    let file_name = safe_file_name(
+        artifact
+            .url
+            .rsplit('/')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("felldl-update.bin"),
+    );
+    let final_path = dir.join(&file_name);
+    let part_path = dir.join(format!("{file_name}.part"));
+    let _ = tokio::fs::remove_file(&part_path).await;
+
+    let total = artifact.size;
+    let mut resp = client
+        .get(&artifact.url)
         .send()
         .await
         .map_err(|e| format!("连接更新源失败: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("更新源返回 HTTP {}", resp.status().as_u16()));
     }
-    let total = resp.content_length().unwrap_or(0);
-
-    let mut file = tokio::fs::File::create(&path)
-        .await
-        .map_err(|e| format!("创建文件失败: {e}"))?;
-    let mut downloaded: u64 = 0;
-    let mut last_emit = std::time::Instant::now();
-    let mut resp = resp;
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("下载中断: {e}"))? {
-        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+    {
+        let mut file = tokio::fs::File::create(&part_path)
+            .await
+            .map_err(|e| format!("创建临时文件失败: {e}"))?;
+        let mut downloaded: u64 = 0;
+        let mut last_emit = std::time::Instant::now();
+        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("下载中断: {e}"))? {
+            // 清单已经声明了长度：超长直接中止，避免被灌满磁盘
+            if downloaded + chunk.len() as u64 > total {
+                let _ = tokio::fs::remove_file(&part_path).await;
+                return Err("更新包超过清单声明的长度，已中止".into());
+            }
+            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+                .await
+                .map_err(|e| format!("写入失败: {e}"))?;
+            downloaded += chunk.len() as u64;
+            if last_emit.elapsed().as_millis() >= 200 || downloaded == total {
+                last_emit = std::time::Instant::now();
+                let _ = app.emit(
+                    "update://progress",
+                    UpdateProgress {
+                        downloaded,
+                        total,
+                        percent: (downloaded as f64 / total.max(1) as f64 * 100.0).min(100.0),
+                    },
+                );
+            }
+        }
+        tokio::io::AsyncWriteExt::flush(&mut file)
             .await
             .map_err(|e| format!("写入失败: {e}"))?;
-        downloaded += chunk.len() as u64;
-        // 200ms 节流：进度条够顺滑，又不至于刷爆事件总线
-        if last_emit.elapsed().as_millis() >= 200 || downloaded == total {
-            last_emit = std::time::Instant::now();
-            let _ = app.emit(
-                "update://progress",
-                UpdateProgress {
-                    downloaded,
-                    total,
-                    percent: if total > 0 {
-                        (downloaded as f64 / total as f64 * 100.0).min(100.0)
-                    } else {
-                        0.0
-                    },
-                },
-            );
-        }
     }
-    tokio::io::AsyncWriteExt::flush(&mut file)
-        .await
-        .map_err(|e| format!("写入失败: {e}"))?;
-    drop(file);
 
-    // 有些 CDN 走 chunked、没有 Content-Length：结尾补一发，前端才知道已经下完
+    // ③ 验签 + 长度 + 摘要 + 平台/版本，全部通过才有 VerifiedUpdate
+    let verified_update = match felldl_core::update::verify_for_install(
+        &manifest_text,
+        platform,
+        arch,
+        current,
+        &part_path,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return Err(format!("更新包校验失败：{e:#}"));
+        }
+    };
+
     let _ = app.emit(
         "update://progress",
         UpdateProgress {
-            downloaded,
-            total: total.max(downloaded),
+            downloaded: total,
+            total,
             percent: 100.0,
         },
     );
 
-    if total > 0 && downloaded < total {
-        return Err(format!("下载不完整（{downloaded}/{total} 字节）"));
-    }
-    Ok(path.to_string_lossy().to_string())
+    // ④ 校验通过后才改名到最终路径，并登记到一次性 token
+    let verified_update = match verified_update.move_to(&final_path) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return Err(format!("更新包落地失败：{e:#}"));
+        }
+    };
+    Ok(verified.insert(verified_update))
 }
 
-/// 应用更新：Windows 走「延迟脚本覆盖 + 重启」，其它平台交给系统安装
+/// 应用更新：只接受 download_update 返回的 token（不接受路径）。
+/// Windows 走「延迟脚本覆盖 + 重启」，其它平台交给系统安装。
 #[tauri::command]
-async fn apply_update(app: tauri::AppHandle, path: String) -> Result<String, String> {
-    if !std::path::Path::new(&path).exists() {
-        return Err("更新包不存在，请重新下载".into());
-    }
+async fn apply_update(
+    app: tauri::AppHandle,
+    verified: State<'_, VerifiedUpdates>,
+    token: String,
+) -> Result<String, String> {
+    let update = verified
+        .take(&token)
+        .ok_or_else(|| "更新包未通过校验或已失效，请重新下载".to_string())?;
+    let path = update.path().to_string_lossy().to_string();
+
     #[cfg(target_os = "windows")]
     {
         let exe = std::env::current_exe().map_err(|e| format!("定位当前程序失败: {e}"))?;
@@ -1522,6 +1665,8 @@ pub fn run() {
                 engine: engine.clone(),
                 api_port: parking_lot_stub::PortCell::new(bound_port),
             });
+            // 待安装的已校验更新包（token → VerifiedUpdate）
+            app.manage(VerifiedUpdates::default());
 
             // 事件转发：引擎 → 前端
             let app_handle = handle.clone();
@@ -1700,3 +1845,67 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 
+
+#[cfg(test)]
+mod verified_update_tests {
+    use super::{current_arch, current_platform, VerifiedUpdates};
+    use felldl_core::update::{file_sha256, verify_downloaded, Artifact, VerifiedUpdate};
+
+    /// 造一个真正通过摘要校验的 VerifiedUpdate（它没有公开构造函数）
+    fn verified_sample() -> (VerifiedUpdate, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("felldl-token-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("pkg.bin");
+        std::fs::write(&file, b"installer-bytes").unwrap();
+        let artifact = Artifact {
+            platform: current_platform().to_string(),
+            arch: current_arch().to_string(),
+            version: "9.9.9".into(),
+            url: "https://example.com/pkg.bin".into(),
+            size: 15,
+            sha256: file_sha256(&file).unwrap(),
+            version_code: None,
+        };
+        let v = verify_downloaded(&artifact, &file).expect("摘要匹配应通过");
+        (v, dir)
+    }
+
+    #[test]
+    fn token_is_single_use_and_unknown_token_is_rejected() {
+        let reg = VerifiedUpdates::default();
+        let (v, dir) = verified_sample();
+        let token = reg.insert(v);
+
+        assert!(reg.take("not-a-token").is_none(), "未知 token 必须拒绝安装");
+        assert!(reg.take(&token).is_some(), "首次取用应成功");
+        assert!(reg.take(&token).is_none(), "token 必须一次性，防止重复安装");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_latest_pending_update_survives() {
+        let reg = VerifiedUpdates::default();
+        let (v1, d1) = verified_sample();
+        let t1 = reg.insert(v1);
+        let (v2, d2) = verified_sample();
+        let t2 = reg.insert(v2);
+
+        assert!(reg.take(&t1).is_none(), "旧 token 应失效，避免装到过期产物");
+        assert!(reg.take(&t2).is_some(), "最新一次下载应可安装");
+
+        let _ = std::fs::remove_dir_all(&d1);
+        let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    /// 清单里的 platform/arch 取值必须与编译目标一致，否则永远选不到产物
+    #[test]
+    fn platform_and_arch_match_manifest_values() {
+        assert!(
+            matches!(current_platform(), "windows" | "macos" | "linux" | "android"),
+            "未知平台: {}",
+            current_platform()
+        );
+        assert!(!current_arch().is_empty());
+    }
+}

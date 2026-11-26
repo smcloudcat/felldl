@@ -123,6 +123,38 @@ cd src-tauri/gen/android
 > 密钥库 `.jks` 与口令**不得提交到 Git**（已在 `.gitignore` 中）。历史版本曾提交过的密钥应视为已泄露，
 > 后续应评估密钥轮换与旧版本升级兼容，而不是删文件了事。
 
+### 发布更新清单（应用内更新必须）
+
+应用内更新只安装**通过签名校验**的包：清单 `update-manifest.json` 由离线私钥签名，
+应用内只内置公钥，因此发布源被篡改也装不上。每次发版按下面三步：
+
+```bash
+# ① 算出每个产物的长度与 SHA256
+cargo run -p felldl-core --example update-sign -- hash --in dist/Felldl-<ver>-win-x64.exe
+
+# ② 按 update-manifest.example.json 的格式写 payload.json
+#    （platform: windows/macos/linux/android，arch 与 std::env::consts::ARCH 一致，
+#      Android 额外填 version_code；url 必须是 https 的 Release 直链）
+
+# ③ 签名 → 生成 update-manifest.json
+cargo run -p felldl-core --example update-sign -- sign \
+  --key src-tauri/keys/update-signing.pkcs8 \
+  --in payload.json --out update-manifest.json
+
+# 可选自检
+cargo run -p felldl-core --example update-sign -- verify --in update-manifest.json
+```
+
+然后在 GitHub 创建 Release 并上传产物，再把 `update-manifest.json` 与 `version.json`
+一并更新到仓库根目录（应用通过 jsDelivr / raw 拉取）。
+
+> 私钥 `src-tauri/keys/update-signing.pkcs8` 只在发布机保存（已 gitignore，`*.pkcs8` 一并忽略），
+> 丢了就只能换公钥重新发版；公钥在 `core/src/update.rs` 的 `UPDATE_PUBLIC_KEY`，
+> 轮换过渡期可把新旧公钥同时放进 `TRUSTED_PUBLIC_KEYS`。
+>
+> 若清单尚未发布或不可访问，应用内更新会明确提示「无法获取更新签名清单，请到 Release 页面手动下载」，
+> 不会退回「只要 HTTPS 就安装」的旧行为。
+
 > ⚠️ 两个必须注意的点：
 > 1. `src-tauri/capabilities/default.json` 必须存在。Tauri 2 在缺失 capability 时
 >    WebView 的 IPC / 事件订阅会被拒绝，表现为界面永远停在「正在启动引擎…」。
