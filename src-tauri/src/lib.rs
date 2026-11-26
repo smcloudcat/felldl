@@ -5,6 +5,7 @@
 
 use felldl_core::api;
 use felldl_core::{AddTaskRequest, Engine, EngineEvent, Settings, Task};
+use ipc::IpcError;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 
@@ -18,6 +19,8 @@ use tauri::{
 
 #[cfg(target_os = "android")]
 mod android;
+/// Tauri 命令的结构化错误（code + 人话 + 可重试）
+mod ipc;
 // 纯路径映射不带 cfg：桌面端也能跑它的单元测试
 mod android_paths;
 // APK 安装前的元数据校验（纯逻辑，桌面端可测）
@@ -308,10 +311,11 @@ async fn request_all_files_access(app: tauri::AppHandle) -> Result<(), String> {
 
 /// 安卓「安装未知应用」授权状态；其它平台恒为 true
 #[tauri::command]
-async fn can_install_packages(app: tauri::AppHandle) -> Result<bool, String> {
+async fn can_install_packages(app: tauri::AppHandle) -> Result<bool, IpcError> {
     #[cfg(target_os = "android")]
     {
-        return android::can_install_packages(&app);
+        return android::can_install_packages(&app)
+            .map_err(|e| IpcError::from_coded(e, "install.unavailable"));
     }
     #[cfg(not(target_os = "android"))]
     {
@@ -322,16 +326,17 @@ async fn can_install_packages(app: tauri::AppHandle) -> Result<bool, String> {
 
 /// 打开「安装未知应用」授权页（仅安卓有意义）
 #[tauri::command]
-async fn open_install_permission_settings(app: tauri::AppHandle) -> Result<(), String> {
+async fn open_install_permission_settings(app: tauri::AppHandle) -> Result<(), IpcError> {
     #[cfg(target_os = "android")]
     {
         let pkg = app.config().identifier.clone();
-        return android::open_install_settings(&app, &pkg);
+        return android::open_install_settings(&app, &pkg)
+            .map_err(|e| IpcError::from_coded(e, "install.unavailable"));
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
-        Err("当前平台不需要安装授权".into())
+        Err(IpcError::new("install.not_needed", "当前平台不需要安装授权"))
     }
 }
 
@@ -1358,8 +1363,12 @@ fn safe_file_name(name: &str) -> String {
 }
 
 /// 拉取签名更新清单：任一条来源验签通过即可用。
-async fn fetch_signed_manifest(client: &reqwest::Client) -> Result<(String, felldl_core::update::Payload), String> {
+async fn fetch_signed_manifest(
+    client: &reqwest::Client,
+) -> Result<(String, felldl_core::update::Payload), IpcError> {
     let mut last_err = String::from("更新清单源均不可用");
+    // 有任何一次是「签名/格式不对」就不该让用户反复重试：换源结果一样，得等人修清单
+    let mut saw_verify_error = false;
     for url in UPDATE_MANIFEST_JSON {
         let resp = match client
             .get(url)
@@ -1386,10 +1395,26 @@ async fn fetch_signed_manifest(client: &reqwest::Client) -> Result<(String, fell
         };
         match felldl_core::update::parse_and_verify(&text) {
             Ok(payload) => return Ok((text, payload)),
-            Err(e) => last_err = format!("{url}: {e:#}"),
+            Err(e) => {
+                saw_verify_error = true;
+                last_err = format!("{url}: {e:#}");
+            }
         }
     }
-    Err(last_err)
+    let message = format!("无法获取更新签名清单：{last_err}。可到 Release 页面手动下载安装包");
+    let err = IpcError::new(
+        if saw_verify_error {
+            "update.manifest_sig"
+        } else {
+            "update.manifest"
+        },
+        message,
+    );
+    Err(if saw_verify_error {
+        err
+    } else {
+        err.retryable()
+    })
 }
 
 /// 下载更新包。**URL 与文件名都来自签名清单**，不接受前端传参：
@@ -1398,7 +1423,7 @@ async fn fetch_signed_manifest(client: &reqwest::Client) -> Result<(String, fell
 async fn download_update(
     app: tauri::AppHandle,
     verified: State<'_, VerifiedUpdates>,
-) -> Result<String, String> {
+) -> Result<String, IpcError> {
     let current = env!("CARGO_PKG_VERSION");
     let (platform, arch) = (current_platform(), current_arch());
 
@@ -1407,29 +1432,37 @@ async fn download_update(
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(1800))
         .build()
-        .map_err(|e| format!("创建下载客户端失败: {e}"))?;
+        .map_err(|e| IpcError::new("update.client", format!("创建下载客户端失败: {e}")))?;
 
     // ① 先拿签名清单，确认「这个版本 / 这个平台」确实存在且比当前新
-    let (manifest_text, payload) = fetch_signed_manifest(&client)
-        .await
-        .map_err(|e| format!("无法获取更新签名清单（{e}），请到 Release 页面手动下载安装包"))?;
+    // 已经是结构化错误（带 code/retryable），别再降级成字符串
+    let (manifest_text, payload) = fetch_signed_manifest(&client).await?;
     if !felldl_core::update::version_gt(&payload.version, current) {
-        return Err(format!(
-            "清单版本 {} 不高于当前版本 {current}，无需更新",
-            payload.version
+        return Err(IpcError::new(
+            "update.no_newer",
+            format!(
+                "清单版本 {} 不高于当前版本 {current}，无需更新",
+                payload.version
+            ),
         ));
     }
     let artifact = felldl_core::update::pick_artifact(&payload, platform, arch)
-        .map_err(|e| format!("{e:#}"))?;
+        .map_err(|e| IpcError::new("update.unsupported", format!("{e:#}")))?;
     if !artifact.url.to_ascii_lowercase().starts_with("https://") {
-        return Err("更新清单里的产物地址不是 https，已拒绝下载".into());
+        return Err(IpcError::new(
+            "update.insecure",
+            "更新清单里的产物地址不是 https，已拒绝下载",
+        ));
     }
 
     // ② 先写 .part，校验通过后才改名到最终位置
     let dir = data_dir(&app).join("updates");
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|e| format!("创建更新目录失败: {e}"))?;
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+        IpcError::from_anyhow(
+            "update.disk",
+            &anyhow::Error::from(e).context("创建更新目录失败"),
+        )
+    })?;
     let file_name = safe_file_name(
         artifact
             .url
@@ -1443,29 +1476,46 @@ async fn download_update(
     let _ = tokio::fs::remove_file(&part_path).await;
 
     let total = artifact.size;
-    let mut resp = client
-        .get(&artifact.url)
-        .send()
-        .await
-        .map_err(|e| format!("连接更新源失败: {e}"))?;
+    let mut resp = client.get(&artifact.url).send().await.map_err(|e| {
+        IpcError::from_anyhow(
+            "update.network",
+            &anyhow::Error::from(e).context("连接更新源失败"),
+        )
+    })?;
     if !resp.status().is_success() {
-        return Err(format!("更新源返回 HTTP {}", resp.status().as_u16()));
+        return Err(IpcError::http_status("update.http", resp.status().as_u16()));
     }
     {
-        let mut file = tokio::fs::File::create(&part_path)
-            .await
-            .map_err(|e| format!("创建临时文件失败: {e}"))?;
+        let mut file = tokio::fs::File::create(&part_path).await.map_err(|e| {
+            IpcError::from_anyhow(
+                "update.disk",
+                &anyhow::Error::from(e).context("创建更新临时文件失败"),
+            )
+        })?;
         let mut downloaded: u64 = 0;
         let mut last_emit = std::time::Instant::now();
-        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("下载中断: {e}"))? {
+        while let Some(chunk) = resp.chunk().await.map_err(|e| {
+            IpcError::from_anyhow(
+                "update.network",
+                &anyhow::Error::from(e).context("下载中断"),
+            )
+        })? {
             // 清单已经声明了长度：超长直接中止，避免被灌满磁盘
             if downloaded + chunk.len() as u64 > total {
                 let _ = tokio::fs::remove_file(&part_path).await;
-                return Err("更新包超过清单声明的长度，已中止".into());
+                return Err(IpcError::new(
+                    "update.oversize",
+                    "更新包超过清单声明的长度，已中止",
+                ));
             }
             tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
                 .await
-                .map_err(|e| format!("写入失败: {e}"))?;
+                .map_err(|e| {
+                    IpcError::from_anyhow(
+                        "update.disk",
+                        &anyhow::Error::from(e).context("写入更新包失败"),
+                    )
+                })?;
             downloaded += chunk.len() as u64;
             if last_emit.elapsed().as_millis() >= 200 || downloaded == total {
                 last_emit = std::time::Instant::now();
@@ -1481,7 +1531,12 @@ async fn download_update(
         }
         tokio::io::AsyncWriteExt::flush(&mut file)
             .await
-            .map_err(|e| format!("写入失败: {e}"))?;
+            .map_err(|e| {
+                IpcError::from_anyhow(
+                    "update.disk",
+                    &anyhow::Error::from(e).context("刷新更新包失败"),
+                )
+            })?;
     }
 
     // ③ 验签 + 长度 + 摘要 + 平台/版本，全部通过才有 VerifiedUpdate
@@ -1495,7 +1550,11 @@ async fn download_update(
         Ok(v) => v,
         Err(e) => {
             let _ = tokio::fs::remove_file(&part_path).await;
-            return Err(format!("更新包校验失败：{e:#}"));
+            // 签名 / 摘要 / 长度 / 平台任一不符：重试同一个源不会有别的结果
+            return Err(IpcError::new(
+                "update.verify",
+                format!("更新包校验失败：{e:#}"),
+            ));
         }
     };
 
@@ -1513,7 +1572,10 @@ async fn download_update(
         Ok(v) => v,
         Err(e) => {
             let _ = tokio::fs::remove_file(&part_path).await;
-            return Err(format!("更新包落地失败：{e:#}"));
+            return Err(IpcError::new(
+                "update.disk",
+                format!("更新包落地失败：{e:#}"),
+            ));
         }
     };
     Ok(verified.insert(verified_update))
@@ -1527,17 +1589,24 @@ async fn apply_update(
     state: State<'_, AppState>,
     verified: State<'_, VerifiedUpdates>,
     token: String,
-) -> Result<String, String> {
+) -> Result<String, IpcError> {
     // 安卓：没有「安装未知应用」授权时，连 token 都不该消费——
     // 用户去设置里授权回来后还能直接重试，不必把几十 MB 的更新包再下一遍。
     #[cfg(target_os = "android")]
-    if !android::can_install_packages(&app)? {
-        return Err("install.need_permission: 需要允许「安装未知应用」才能更新".into());
+    if !android::can_install_packages(&app)
+        .map_err(|e| IpcError::from_coded(e, "install.unavailable"))?
+    {
+        // 授完权可以原地重试：token 还没消费，不必把几十 MB 再下一遍
+        return Err(IpcError::new(
+            "install.need_permission",
+            "需要允许「安装未知应用」才能更新",
+        )
+        .retryable());
     }
 
     let update = verified
         .take(&token)
-        .ok_or_else(|| "更新包未通过校验或已失效，请重新下载".to_string())?;
+        .ok_or_else(|| IpcError::new("update.token", "更新包未通过校验或已失效，请重新下载"))?;
 
     // 先把进行中的任务暂停落盘（pause 会保存 checkpoint），
     // 否则更新重启后可能带着过期进度回来，把"填零"当成已下载。
@@ -1559,7 +1628,8 @@ async fn apply_update(
 
     #[cfg(target_os = "windows")]
     {
-        let exe = std::env::current_exe().map_err(|e| format!("定位当前程序失败: {e}"))?;
+        let exe = std::env::current_exe()
+            .map_err(|e| IpcError::new("update.helper", format!("定位当前程序失败: {e}")))?;
         // 不再写 .cmd 脚本：直接以独立进程拉起「自己」的隐藏 helper，
         // 参数走 argv（文件名里的空格/&/%/括号不会被二次解析）。
         // helper 会等本进程真正退出后再替换，并负责失败回滚。
@@ -1575,7 +1645,12 @@ async fn apply_update(
             .creation_flags(CREATE_NO_WINDOW);
         match cmd.spawn() {
             Ok(child) => eprintln!("[update] 已启动更新 helper pid={}", child.id()),
-            Err(e) => return Err(format!("启动更新程序失败: {e}")),
+            Err(e) => {
+                return Err(IpcError::new(
+                    "update.helper",
+                    format!("启动更新程序失败: {e}"),
+                ))
+            }
         }
         // 给 helper 一点时间起跑再退出，避免极端情况下父子同时被回收
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -1590,13 +1665,18 @@ async fn apply_update(
         let pkg = app.config().identifier.clone();
         let path = update.path().to_string_lossy().to_string();
 
-        let installed = android::installed_apk_info(&app, &pkg)
-            .map_err(|e| format!("install.failed: 读取已安装版本信息失败：{e}"))?;
+        let installed = android::installed_apk_info(&app, &pkg).map_err(|e| {
+            IpcError::new(
+                "install.unavailable",
+                format!("读取已安装版本信息失败：{e}"),
+            )
+        })?;
         let apk = android::apk_info(&app, &path)
-            .map_err(|e| format!("install.failed: 更新包不可用：{e}"))?;
+            .map_err(|e| IpcError::new("install.unavailable", format!("更新包不可用：{e}")))?;
         apk_update::verify_installable(&pkg, &installed, &apk, update.version_code)
-            .map_err(|e| format!("install.rejected: {e}"))?;
-        android::install_apk(&app, &path)?;
+            .map_err(|e| IpcError::new("install.rejected", format!("{e}")))?;
+        // Kotlin 侧已经带 `install.no_handler` / `install.uri_denied` 这类码，原样透传
+        android::install_apk(&app, &path).map_err(|e| IpcError::from_coded(e, "install.failed"))?;
         Ok("installing".into())
     }
     // 其它桌面平台：交回系统默认程序

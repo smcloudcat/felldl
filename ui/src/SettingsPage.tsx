@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Settings, UpdateInfo } from "./types";
 import { api, subscribeUpdateProgress } from "./bridge";
+import { toIpcError, type IpcError } from "./ipcError";
 import { useI18n, setLang } from "./i18n";
 import {
   IconCopy,
@@ -102,7 +103,8 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
     null
   );
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-  const [updateErr, setUpdateErr] = useState<string | null>(null);
+  // 结构化错误：code 决定动作（是否去授权页）、message 只负责展示、retryable 决定要不要给重试按钮
+  const [updateErr, setUpdateErr] = useState<IpcError | null>(null);
   const [checking, setChecking] = useState(false);
   const [ifaces, setIfaces] = useState<string[]>([]);
   const [dnsTesting, setDnsTesting] = useState(false);
@@ -152,6 +154,8 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
     setPercent(0);
     setSizeHint("");
     setHasTotal(false);
+    // 上一轮的错误已经过期，重试期间不该继续显示
+    setUpdateErr(null);
     try {
       const token = await api.downloadUpdate();
       setPhase("apply");
@@ -161,21 +165,23 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       if (mode === "restarting") return;
       setPhase("idle");
       toast(t(mode === "installing" ? "set.installing" : "set.manualInstall"));
-    } catch (e: any) {
+    } catch (e) {
       setPhase("idle");
       setPercent(0);
-      const raw = typeof e === "string" ? e : String(e?.message ?? e);
-      // 安卓首次更新需要用户允许「安装未知应用」：直接把人带到设置页
-      if (raw.startsWith("install.need_permission")) {
+      const err = toIpcError(e, "update.failed");
+      setUpdateErr(err);
+      // 安卓首次更新需要允许「安装未知应用」：直接把人带到设置页，
+      // 回来点「重试」即可（token 没被消费，不必重新下载）
+      if (err.code === "install.need_permission") {
         toast(t("set.needInstallPermission"), "error");
         try {
           await api.openInstallPermissionSettings();
         } catch {
           /* 打开失败就只剩提示，用户可以自己去系统设置里开 */
         }
-      } else {
-        // 后端错误带 `install.xxx:` 机器前缀，展示时剥掉
-        toast(raw.replace(/^install\.[a-z_]+:\s*/, ""), "error");
+      } else if (!err.retryable) {
+        // 重试也没用的错误：卡片里已经写明原因，这里只做一次显眼提示
+        toast(err.message, "error");
       }
     }
   }
@@ -305,7 +311,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
         setUpdateErr(null);
       })
       .catch((e) => {
-        if (alive) setUpdateErr(typeof e === "string" ? e : t("set.checkFail"));
+        if (alive) setUpdateErr(toIpcError(e, "update.check"));
       });
     return () => {
       alive = false;
@@ -388,9 +394,10 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       } else {
         toast(t("set.latest", { v: info?.current_version ?? "…" }));
       }
-    } catch (e: any) {
-      setUpdateErr(typeof e === "string" ? e : t("set.checkFail"));
-      toast(typeof e === "string" ? e : t("set.checkFail"), "error");
+    } catch (e) {
+      const err = toIpcError(e, "update.check");
+      setUpdateErr(err);
+      toast(err.message || t("set.checkFail"), "error");
     } finally {
       setChecking(false);
     }
@@ -1364,7 +1371,19 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
                 flexWrap: "wrap",
               }}
             >
-              <span>⚠ {updateErr}</span>
+              {/* 悬停能看到机器码：反馈问题时报这个，比截图文案可靠 */}
+              <span title={`错误码: ${updateErr.code}`}>⚠ {updateErr.message}</span>
+              {/* 暂时性失败（网络抖动 / 源站 5xx / 刚授完权）直接给一键重试 */}
+              {updateErr.retryable && updateInfo?.has_update && (
+                <button
+                  className="btn btn-soft btn-sm"
+                  type="button"
+                  onClick={instantUpdate}
+                  disabled={updating}
+                >
+                  {t("set.retryUpdate")}
+                </button>
+              )}
               {/* 查不到也能自己去看：直接打开 Release 页面 */}
               <button
                 className="btn btn-ghost btn-sm"
