@@ -112,6 +112,9 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   const [bgBusy, setBgBusy] = useState(false);
   // 真实应用版本（来自后端），与「检查更新」的缓存结果解耦
   const [appVer, setAppVer] = useState("");
+  // 真机验证安装链路用的入口：由后端能力探测决定，debug 安卓构建才出现。
+  // release 包里 `debug_capabilities` 恒为 false，命令本身也只返回 install.unsupported。
+  const [debugStaged, setDebugStaged] = useState(false);
   // 安卓存储：是否已获得「所有文件访问」、当前目录是否可写
   const [storageOk, setStorageOk] = useState<boolean | null>(null);
   const [dirOk, setDirOk] = useState<boolean | null>(null);
@@ -143,6 +146,23 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
     return () => {
       dead = true;
       un?.();
+    };
+  }, []);
+
+  // 调试能力探测：只有 debug 安卓构建会返回 staged_install=true，
+  // 决定「安装暂存的 APK」按钮是否出现（release 用户看不到这个入口）。
+  useEffect(() => {
+    let dead = false;
+    api
+      .debugCapabilities()
+      .then((c) => {
+        if (!dead) setDebugStaged(!!c?.staged_install);
+      })
+      .catch(() => {
+        /* 老构建没有这个命令：当作不支持 */
+      });
+    return () => {
+      dead = true;
     };
   }, []);
 
@@ -181,6 +201,30 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
         }
       } else if (!err.retryable) {
         // 重试也没用的错误：卡片里已经写明原因，这里只做一次显眼提示
+        toast(err.message, "error");
+      }
+    }
+  }
+
+  // 真机验证用：把暂存在 data_dir/debug-updates 的 APK 交给后端安装。
+  /// 走的是和真实更新完全相同的分支（权限检查 → 包名/签名/版本校验 → content:// 安装器）。
+  async function installStagedApk() {
+    setUpdateErr(null);
+    try {
+      await api.debugInstallStagedUpdate();
+      setPhase("idle");
+      toast(t("set.installing"));
+    } catch (e) {
+      const err = toIpcError(e, "install.failed");
+      setUpdateErr(err);
+      if (err.code === "install.need_permission") {
+        toast(t("set.needInstallPermission"), "error");
+        try {
+          await api.openInstallPermissionSettings();
+        } catch {
+          /* 打开失败就只剩提示，用户可以自己去系统设置里开 */
+        }
+      } else {
         toast(err.message, "error");
       }
     }
@@ -1322,6 +1366,17 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
                   {t("set.goDownload")}
                 </button>
               </>
+            )}
+            {debugStaged && (
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={installStagedApk}
+                disabled={updating}
+                type="button"
+                title="仅 debug 安卓构建：安装 data_dir/debug-updates 下最新的 APK"
+              >
+                安装暂存的 APK（debug）
+              </button>
             )}
           </div>
 

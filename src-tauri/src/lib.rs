@@ -99,13 +99,30 @@ fn data_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
         .unwrap_or_else(|_| std::env::temp_dir().join("felldl"))
 }
 
+/// 更新包的存放目录。
+///
+/// **安卓必须放在 cache/ 下**：安装时要把它包成 `content://` URI 交给系统安装器，
+/// 而 `android_paths::content_uri` 只映射 `files/` 与 `cache/` 两个根
+/// （见 `res/xml/file_paths.xml`）。放在 data_dir 根目录（`/data/user/0/<pkg>/updates`）
+/// 会拼不出 URI，真机上的表现是「更新包不在可共享目录内」，整条安装链路根本走不到。
+/// 桌面端沿用 data_dir/updates（Windows helper 需要在进程退出后仍能读到它）。
+fn update_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        if let Ok(cache) = app.path().app_cache_dir() {
+            return cache.join("updates");
+        }
+    }
+    data_dir(app).join("updates")
+}
+
 /// 清掉上次留下的更新包（含未下完的 `.part`）。
 ///
 /// 为什么可以无脑删：安装入口只认 `VerifiedUpdates` 里的内存 token，
 /// 进程一退出 token 就没了，磁盘上的旧包再也不会被用到。
 /// 安卓安装过程中本进程会被系统杀掉，能在启动时跑到这里，说明安装已结束或已被取消。
 fn cleanup_update_cache(app: &tauri::AppHandle) {
-    let freed = remove_files_in(&data_dir(app).join("updates"));
+    let freed = remove_files_in(&update_dir(app));
     if freed > 0 {
         eprintln!(
             "[update] 已清理更新缓存 {:.1} MB",
@@ -1456,7 +1473,7 @@ async fn download_update(
     }
 
     // ② 先写 .part，校验通过后才改名到最终位置
-    let dir = data_dir(&app).join("updates");
+    let dir = update_dir(&app);
     tokio::fs::create_dir_all(&dir).await.map_err(|e| {
         IpcError::from_anyhow(
             "update.disk",
@@ -1658,26 +1675,10 @@ async fn apply_update(
         Ok("restarting".into())
     }
     // 安卓：先核对「这确实是本应用的新版本、签名一致」，再用 content:// 拉起安装器。
-    // 不能走 tauri-plugin-opener：它把路径当 URL 交给 ACTION_VIEW，Android 上
-    // 要么找不到启动器（静默失败），要么因 file:// 直接 FileUriExposedException。
     #[cfg(target_os = "android")]
     {
-        let pkg = app.config().identifier.clone();
         let path = update.path().to_string_lossy().to_string();
-
-        let installed = android::installed_apk_info(&app, &pkg).map_err(|e| {
-            IpcError::new(
-                "install.unavailable",
-                format!("读取已安装版本信息失败：{e}"),
-            )
-        })?;
-        let apk = android::apk_info(&app, &path)
-            .map_err(|e| IpcError::new("install.unavailable", format!("更新包不可用：{e}")))?;
-        apk_update::verify_installable(&pkg, &installed, &apk, update.version_code)
-            .map_err(|e| IpcError::new("install.rejected", format!("{e}")))?;
-        // Kotlin 侧已经带 `install.no_handler` / `install.uri_denied` 这类码，原样透传
-        android::install_apk(&app, &path).map_err(|e| IpcError::from_coded(e, "install.failed"))?;
-        Ok("installing".into())
+        install_android_update(&app, &path, update.version_code)
     }
     // 其它桌面平台：交回系统默认程序
     #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
@@ -1688,6 +1689,122 @@ async fn apply_update(
             Err(_) => Ok("manual".into()),
         }
     }
+}
+
+/// 安卓安装的公共路径：包名/签名/版本校验 → `content://` 拉起系统安装器。
+///
+/// 不能走 `tauri-plugin-opener`：它把路径当 URL 交给 ACTION_VIEW，Android 上
+/// 要么找不到启动器（静默失败），要么因 `file://` 直接 `FileUriExposedException`。
+///
+/// `declared_version_code` 是「我们验过的那个版本」：真实更新来自签名清单，
+/// debug 测试入口传 APK 自身的 versionCode（见 `debug_install_staged_update`）。
+#[cfg(target_os = "android")]
+fn install_android_update(
+    app: &tauri::AppHandle,
+    path: &str,
+    declared_version_code: Option<u64>,
+) -> Result<String, IpcError> {
+    let pkg = app.config().identifier.clone();
+    let installed = android::installed_apk_info(app, &pkg).map_err(|e| {
+        IpcError::new(
+            "install.unavailable",
+            format!("读取已安装版本信息失败：{e}"),
+        )
+    })?;
+    let apk = android::apk_info(app, path)
+        .map_err(|e| IpcError::new("install.unavailable", format!("更新包不可用：{e}")))?;
+    apk_update::verify_installable(&pkg, &installed, &apk, declared_version_code)
+        .map_err(|e| IpcError::new("install.rejected", format!("{e}")))?;
+    // Kotlin 侧已经带 `install.no_handler` / `install.uri_denied` 这类码，原样透传
+    android::install_apk(app, path).map_err(|e| IpcError::from_coded(e, "install.failed"))?;
+    Ok("installing".into())
+}
+
+/// **仅 debug 构建**：把 `debug-updates/` 下最新的 APK 当作「已校验的更新包」，
+/// 走与真实更新**完全相同**的安装分支（权限 → 校验 → content:// 拉起安装器）。
+///
+/// 为什么需要它：真实更新只认签名清单里的 https 包，而清单在 GitHub 上。
+/// 发布前不可能用正式源在真机上验证「授权引导 → 安装器 → 版本变化」，
+/// 这个入口让同一段代码可以在真机上被驱动；release 构建里不会注册这个命令。
+///
+/// 用法（debug APK 已安装）：
+/// ```text
+/// adb push update.apk /data/local/tmp/u.apk
+/// adb shell "run-as com.felldl.app mkdir -p cache/debug-updates"
+/// adb shell "cat /data/local/tmp/u.apk | run-as com.felldl.app sh -c 'cat > cache/debug-updates/u.apk'"
+/// ```
+/// 然后在设置页点「安装暂存的 APK（debug）」（`debug_capabilities` 为 true 时按钮才出现）。
+///
+/// 注意用独立的 `debug-updates/` 目录：`updates/` 会被启动时的清理逻辑删掉，
+/// 那是真实更新的缓存，不能当测试暂存区。
+#[cfg(all(target_os = "android", debug_assertions))]
+#[tauri::command]
+async fn debug_install_staged_update(app: tauri::AppHandle) -> Result<String, IpcError> {
+    if !android::can_install_packages(&app)
+        .map_err(|e| IpcError::from_coded(e, "install.unavailable"))?
+    {
+        return Err(IpcError::new(
+            "install.need_permission",
+            "需要允许「安装未知应用」才能更新",
+        )
+        .retryable());
+    }
+    let dir = update_dir(&app)
+        .parent()
+        .map(|p| p.join("debug-updates"))
+        .unwrap_or_else(|| data_dir(&app).join("debug-updates"));
+    let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    let entries = std::fs::read_dir(&dir).map_err(|e| {
+        IpcError::new(
+            "install.unavailable",
+            format!("读取 {} 失败：{e}", dir.display()),
+        )
+    })?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("apk") {
+            continue;
+        }
+        let mtime = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if newest.as_ref().map(|(t, _)| mtime > *t).unwrap_or(true) {
+            newest = Some((mtime, path));
+        }
+    }
+    let (_, path) = newest.ok_or_else(|| {
+        IpcError::new(
+            "install.unavailable",
+            format!("{} 里没有 apk（先用 adb 推一个进去）", dir.display()),
+        )
+    })?;
+    let path = path.to_string_lossy().to_string();
+    // 声明版本 = APK 自身：等价于「清单声明的就是这个包」，其余校验照常执行
+    let apk = android::apk_info(&app, &path)
+        .map_err(|e| IpcError::new("install.unavailable", format!("暂存包不可用：{e}")))?;
+    install_android_update(&app, &path, Some(apk.version_code))
+}
+
+/// 非安卓 / release 构建里的同名占位：命令表保持一份，但永远不会执行安装。
+/// （release 包里既没有暂存目录的读取逻辑，也没有拉安装器的分支。）
+#[cfg(not(all(target_os = "android", debug_assertions)))]
+#[tauri::command]
+async fn debug_install_staged_update(_app: tauri::AppHandle) -> Result<String, IpcError> {
+    Err(IpcError::new(
+        "install.unsupported",
+        "仅 debug 安卓构建可用于暂存包安装",
+    ))
+}
+
+/// 告诉前端「当前构建有哪些调试用能力」。
+///
+/// 前端据此决定是否显示「安装暂存的 APK」按钮：release 包里恒为 false，
+/// 不需要用户去开发者工具里改 localStorage 才能测。
+#[tauri::command]
+fn debug_capabilities() -> serde_json::Value {
+    let staged_install = cfg!(all(target_os = "android", debug_assertions));
+    serde_json::json!({ "staged_install": staged_install })
 }
 
 /// 下载中的临时文件路径（与 `felldl_core::util::part_path` 保持一致）
@@ -1955,6 +2072,8 @@ pub fn run() {
             check_update,
             download_update,
             apply_update,
+            debug_install_staged_update,
+            debug_capabilities,
             open_url,
             analyze_url,
             grab_site,

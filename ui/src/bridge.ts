@@ -83,6 +83,13 @@ export const api = {
   // 下载进度走 update://progress 事件；返回一次性 token，applyUpdate 只接受 token
   downloadUpdate: () => invoke("download_update") as Promise<string>,
   applyUpdate: (token: string) => invoke("apply_update", { token }) as Promise<string>,
+  // 仅 debug 安卓构建：安装 cache/debug-updates 下最新的 APK。
+  // 用于在发布前真机验证「授权引导 → 校验 → 安装器 → 版本变化」整条链路；
+  // release 构建里同名命令只会返回 install.unsupported。
+  debugInstallStagedUpdate: () => invoke("debug_install_staged_update") as Promise<string>,
+  // 当前构建是否具备调试能力（release 里恒为 false，按钮据此显示/隐藏）
+  debugCapabilities: () =>
+    invoke("debug_capabilities") as Promise<{ staged_install: boolean }>,
   setTaskSpeedLimit: (id: string, limit: number) =>
     invoke("set_task_speed_limit", { id, limit }) as Promise<void>,
 

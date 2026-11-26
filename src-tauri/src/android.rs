@@ -280,9 +280,51 @@ pub fn request_all_files_access(app: &tauri::AppHandle) -> Result<(), String> {
 
 const APK_HELPER_CLASS: &str = "com/felldl/app/ApkInstaller";
 
-fn helper_class<'a>(env: &mut JNIEnv<'a>) -> Result<jni::objects::JClass<'a>, String> {
-    env.find_class(APK_HELPER_CLASS)
-        .map_err(|e| format!("找不到安装辅助类（APK 未包含 ApkInstaller）: {e}"))
+/// 清掉 JNI 调用留下的 pending 异常。
+///
+/// `FindClass` / `CallStaticMethod` 失败时 ART 会把异常挂在线程上；不清理的话，
+/// native 调用返回 Java 时会被当成「未捕获异常」直接把进程杀掉（真机表现就是
+/// 点一下闪退，logcat 里只有一句 `NoClassDefFoundError`，没有堆栈）。
+fn clear_pending(env: &mut JNIEnv) {
+    if env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
+}
+
+/// 找到 `ApkInstaller` 类。
+///
+/// **不能用 `env.find_class`**：在这个 JNI 线程上它走的是启动类加载器，只认识
+/// `java.*` / `android.*`，找不到应用自己的类 —— 真机上实测是 `NoClassDefFoundError`
+/// （Class not found using the boot class loader）直接闪退。改为从 Activity 取
+/// AppClassLoader，再 `loadClass`。
+fn helper_class<'a>(
+    env: &mut JNIEnv<'a>,
+    activity: &JObject,
+) -> Result<jni::objects::JClass<'a>, String> {
+    let loader = match env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[]) {
+        Ok(v) => v.l().map_err(|e| format!("读取类加载器失败: {e}"))?,
+        Err(e) => {
+            clear_pending(env);
+            return Err(format!("读取类加载器失败: {e}"));
+        }
+    };
+    let dotted = APK_HELPER_CLASS.replace('/', ".");
+    let jname = env
+        .new_string(&dotted)
+        .map_err(|e| format!("构造类名失败: {e}"))?;
+    let cls = match env.call_method(
+        &loader,
+        "loadClass",
+        "(Ljava/lang/String;)Ljava/lang/Class;",
+        &[JValue::Object(&jname)],
+    ) {
+        Ok(v) => v.l().map_err(|e| format!("加载安装辅助类失败: {e}"))?,
+        Err(e) => {
+            clear_pending(env);
+            return Err(format!("找不到安装辅助类（APK 未包含 ApkInstaller）: {e}"));
+        }
+    };
+    Ok(jni::objects::JClass::from(cls))
 }
 
 /// 调 `ApkInstaller` 的静态方法：第一个参数固定是 Activity，其余为字符串
@@ -293,7 +335,7 @@ fn helper_string(
     sig: &str,
     args: &[&str],
 ) -> Result<String, String> {
-    let cls = helper_class(env)?;
+    let cls = helper_class(env, activity)?;
     let jargs: Vec<jni::objects::JString> = args
         .iter()
         .map(|a| env.new_string(a))
@@ -367,7 +409,7 @@ pub fn apk_info(app: &tauri::AppHandle, path: &str) -> Result<ApkInfo, String> {
 /// 是否已允许「安装未知应用」（API 26+；更低版本恒为 true）
 pub fn can_install_packages(app: &tauri::AppHandle) -> Result<bool, String> {
     exec_ret(app, |env, activity| {
-        let cls = helper_class(env)?;
+        let cls = helper_class(env, activity)?;
         let out = env
             .call_static_method(
                 cls,
