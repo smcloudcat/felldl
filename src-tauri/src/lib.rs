@@ -1521,6 +1521,15 @@ async fn apply_update(
     }
 }
 
+/// 下载中的临时文件路径（与 `felldl_core::util::part_path` 保持一致）
+fn in_progress_part(p: &std::path::Path) -> std::path::PathBuf {
+    let name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    p.with_file_name(format!("{name}.part"))
+}
+
 #[cfg(not(target_os = "android"))]
 fn open_path(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -1529,6 +1538,11 @@ fn open_path(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
     // cmd /C start 之类的命令行**：文件名里的 & % 括号都是合法字符，一旦进入
     // 二次解析就成了命令注入面。这里仍然限制允许打开的目标类型。
     let p = std::path::Path::new(path);
+    // 未完成的下载只有 `<名>.part` 有数据，最终路径是 0 字节占位：
+    // 直接打开会得到空文件，必须明确告诉用户「还没下完」
+    if in_progress_part(p).exists() {
+        return Err("文件仍在下载或校验中，完成后才能打开".into());
+    }
     match std::fs::metadata(p) {
         Ok(m) if m.is_file() || m.is_dir() => {}
         Ok(_) => return Err("不支持打开该类型的路径".into()),
@@ -1546,6 +1560,9 @@ fn reveal_path(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
     // 定位到文件所在目录并选中它：同样走插件原生实现，
     // 不再用 `explorer /select,{path}` 这种字符串拼接方式。
     let p = std::path::Path::new(path);
+    if in_progress_part(p).exists() {
+        return Err("文件仍在下载或校验中，完成后才能定位".into());
+    }
     match std::fs::metadata(p) {
         Ok(m) if m.is_file() => app
             .opener()

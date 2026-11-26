@@ -1045,3 +1045,158 @@ async fn rejects_segment_when_etag_changed_mid_download() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ── `.part` 语义：未完成时目录里不应出现「看起来已完成」的文件 ──
+
+fn part_of(path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(path);
+    p.with_file_name(format!(
+        "{}.part",
+        p.file_name().unwrap().to_string_lossy()
+    ))
+}
+
+/// 暂停后：最终路径只能是 0 字节占位，真实进度在 `<名>.part` 里
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn paused_download_writes_only_part_file() {
+    let payload = make_payload(2 * 1024 * 1024);
+    let srv = spawn_server(payload.clone(), true).await;
+    let root = temp_root("partpaused");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let engine = new_engine(&root);
+    let mut s = engine.settings();
+    s.global_speed_limit = 1024 * 1024;
+    engine.update_settings(s).unwrap();
+
+    let id = engine
+        .add(AddTaskRequest {
+            url: format!("http://{}/p.bin", srv.addr),
+            save_dir: Some(out.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if engine.get(&id).unwrap().downloaded > 300 * 1024 {
+            break;
+        }
+    }
+    engine.pause(&id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let t = engine.get(&id).unwrap();
+    assert_eq!(t.state, TaskState::Paused);
+
+    let part = part_of(&t.save_path);
+    let part_len = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    assert!(part_len > 0, "进度必须写在 .part 里，实际 {part_len} 字节");
+
+    let final_len = std::fs::metadata(&t.save_path).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(
+        final_len, 0,
+        "未完成的下载不应在最终路径留下数据（否则用户点开就是坏文件）"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 完成后：`.part` 消失，最终文件内容完整
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completed_download_commits_part_atomically() {
+    let payload = make_payload(512 * 1024);
+    let srv = spawn_server(payload.clone(), true).await;
+    let root = temp_root("partdone");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    let id = engine
+        .add(AddTaskRequest {
+            url: format!("http://{}/c.bin", srv.addr),
+            save_dir: Some(out.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let t = wait_done(&engine, &id, Duration::from_secs(60)).await;
+    assert_eq!(t.state, TaskState::Completed, "错误: {:?}", t.error);
+
+    let part = part_of(&t.save_path);
+    assert!(!part.exists(), "完成后 .part 必须被清理（rename 走了）");
+    let got = std::fs::read(&t.save_path).unwrap();
+    assert!(got == payload, "最终文件内容不完整：{} / {} 字节", got.len(), payload.len());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 失败（404）：最终路径不能留下数据，任务必须是 Error
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_download_leaves_no_final_file() {
+    let payload = make_payload(64 * 1024);
+    let srv = spawn_server(payload, true).await;
+    let root = temp_root("partfail");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    let id = engine
+        .add(AddTaskRequest {
+            url: format!("http://{}/missing.bin", srv.addr),
+            save_dir: Some(out.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let t = wait_done(&engine, &id, Duration::from_secs(60)).await;
+    assert_eq!(t.state, TaskState::Error);
+    let final_len = std::fs::metadata(&t.save_path).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(final_len, 0, "失败的任务不应在最终路径留下数据");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 删除任务时连 `.part` 一起清掉，不留无人认领的半成品
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_with_delete_removes_part_file() {
+    let payload = make_payload(2 * 1024 * 1024);
+    let srv = spawn_server(payload, true).await;
+    let root = temp_root("partcancel");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let engine = new_engine(&root);
+    let mut s = engine.settings();
+    s.global_speed_limit = 512 * 1024;
+    engine.update_settings(s).unwrap();
+
+    let id = engine
+        .add(AddTaskRequest {
+            url: format!("http://{}/x.bin", srv.addr),
+            save_dir: Some(out.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if engine.get(&id).unwrap().downloaded > 100 * 1024 {
+            break;
+        }
+    }
+    let save_path = engine.get(&id).unwrap().save_path;
+    let part = part_of(&save_path);
+    assert!(part.exists(), "下载中应有 .part");
+
+    engine.cancel(&id, true).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(!part.exists(), "删除任务后 .part 必须一并清理");
+    assert!(
+        !std::path::Path::new(&save_path).exists(),
+        "删除任务后占位文件也应清理"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -201,6 +201,19 @@ pub fn file_anchor(path: &Path) -> Option<crate::model::ResumeAnchor> {
     })
 }
 
+/// 下载中的临时文件名：`<最终名>.part`。
+///
+/// 直接往最终文件名里写有三个问题：暂停/失败会留下半截文件，用户点开就是坏的；
+/// 目录里的其他工具（同步盘、杀软、播放器）会看到「已完成」的文件；
+/// 覆盖安装/重启后也无法区分「完整」与「下了 3%」。
+pub fn part_path(final_path: &Path) -> PathBuf {
+    let name = final_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "download".into());
+    final_path.with_file_name(format!("{name}.part"))
+}
+
 /// 根据 Content-Type 补扩展名
 pub fn ensure_extension(name: &str, content_type: Option<&str>) -> String {
     let p = Path::new(name);

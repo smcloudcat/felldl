@@ -1188,13 +1188,15 @@ impl Engine {
         client: &Client,
         cancel: &CancellationToken,
     ) -> Result<()> {
+        // 合并结果先写 `<最终名>.part`，由 finish_task 在完成时 rename 成最终名
         let save_path = { rt.task.lock().save_path.clone() };
+        let work_path = crate::util::part_path(std::path::Path::new(&save_path));
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
-            .open(&save_path)
-            .with_context(|| format!("无法创建文件: {save_path}"))?;
+            .open(&work_path)
+            .with_context(|| format!("无法创建文件: {}", work_path.display()))?;
 
         // 密钥按 URL 缓存：轮换播放列表里相邻分片常共用同一个 key，不必每片重下
         let mut key_cache: std::collections::HashMap<String, Vec<u8>> =

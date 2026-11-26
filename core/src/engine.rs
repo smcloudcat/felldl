@@ -1266,13 +1266,18 @@ impl Engine {
             )
         };
 
+        // 写入永远落在 `<最终名>.part`，完成时才 rename 成最终名：
+        // 这样暂停/中断/失败都不会在目录里留下一个「看起来已完成」的半成品。
+        let local_path = std::path::PathBuf::from(&save_path);
+        let work_path = util::part_path(&local_path);
+        migrate_legacy_part(&local_path, &work_path);
+
         // 续传前先核对本地文件身份：被删除 / 截短 / 替换过，旧分片进度一律作废，
         // 否则会跳过“已完成”的分片，留下一个稀疏文件冒充完成品。
-        let local_path = std::path::PathBuf::from(&save_path);
-        self.verify_resume(&rt, &local_path);
+        self.verify_resume(&rt, &work_path);
         // 再核对远端实体：断点期间服务器换了包，续传会把新旧字节拼成「长度对、内容错」的文件。
         // 作废后分片会被重新规划，所以下面要重新读取探测信息。
-        self.verify_remote(&rt, &local_path).await;
+        self.verify_remote(&rt, &work_path).await;
         let (total, supports_range) = {
             let t = rt.task.lock();
             (t.size, t.supports_range)
@@ -1320,8 +1325,8 @@ impl Engine {
                 .create(true)
                 .write(true)
                 .read(true)
-                .open(&save_path)
-                .with_context(|| format!("无法创建文件: {save_path}"))?,
+                .open(&work_path)
+                .with_context(|| format!("无法创建文件: {}", work_path.display()))?,
         );
         let meta_len = file.metadata()?.len();
         if meta_len < total.unwrap() {
@@ -1330,7 +1335,7 @@ impl Engine {
         // 记录本次进度对应的文件身份，供下次续传核对
         {
             let mut t = rt.task.lock();
-            t.resume_anchor = util::file_anchor(&local_path);
+            t.resume_anchor = util::file_anchor(&work_path);
         }
 
         // 起始已下载量
@@ -1543,8 +1548,9 @@ impl Engine {
         };
         let client = self.client(Some(&task_snapshot))?;
         // 断点可信性：文件被删 / 截短 / 替换后不能按旧偏移发 Range，只能从头来
-        let local_path = std::path::PathBuf::from(&save_path);
-        let start = if self.verify_resume(rt, &local_path) {
+        let work_path = util::part_path(std::path::Path::new(&save_path));
+        migrate_legacy_part(std::path::Path::new(&save_path), &work_path);
+        let start = if self.verify_resume(rt, &work_path) {
             rt.downloaded.load(Ordering::Relaxed)
         } else {
             0
@@ -1586,10 +1592,10 @@ impl Engine {
             .create(true)
             .write(true)
             .truncate(false)
-            .open(&save_path)?;
+            .open(&work_path)?;
         {
             let mut t = rt.task.lock();
-            t.resume_anchor = util::file_anchor(&local_path);
+            t.resume_anchor = util::file_anchor(&work_path);
         }
 
         let mut stream = resp.bytes_stream();
@@ -1670,6 +1676,19 @@ impl Engine {
 
     pub(crate) fn finish_task(&self, rt: &Arc<Runtime>) -> Result<()> {
         *rt.running.lock() = false;
+        // 先落地再改状态：rename 失败（磁盘满/权限/被杀软占用）时任务必须是 Error，
+        // 不能出现「状态 Completed 但文件还叫 xxx.part」这种自相矛盾的结果。
+        {
+            let (path, kind) = {
+                let t = rt.task.lock();
+                (t.save_path.clone(), t.kind)
+            };
+            // BT 的文件由 rqbit 自己管理（多文件/DHT 目录），不参与单文件 rename
+            if kind != TaskKind::Bt {
+                commit_part(Path::new(&path))
+                    .with_context(|| format!("保存下载文件失败: {path}"))?;
+            }
+        }
         let mut t = rt.task.lock();
         let total = t.size.unwrap_or(rt.downloaded.load(Ordering::Relaxed));
         // 确保分片状态与总量一致
@@ -1933,10 +1952,47 @@ struct SegmentJob {
 ///
 /// 安全边界：只删除“单个文件”。绝不对目录做递归删除——BT 的顶层名称可能
 /// 与用户原有同名目录重合，`remove_dir_all` 会越出任务自有产物范围。
+/// 把 `<最终名>.part` 落地为最终文件名。
+///
+/// 同盘 rename 是原子的：目录里要么是旧的完整文件，要么是新的完整文件，
+/// 不会出现「一半新一半旧」。目标可能还留着建任务时预占的 0 字节占位文件，
+/// Windows 下 std 的 rename 走 MoveFileExW(MOVEFILE_REPLACE_EXISTING)，可覆盖。
+fn commit_part(final_path: &Path) -> Result<()> {
+    let part = util::part_path(final_path);
+    if !part.exists() {
+        // 没有 .part：可能是重复调用（周期同步/已提交过），或协议自己写了最终文件
+        return Ok(());
+    }
+    std::fs::rename(&part, final_path)
+        .with_context(|| format!("无法把 {} 重命名为 {}", part.display(), final_path.display()))?;
+    Ok(())
+}
+
+/// 老版本直接往最终文件名里写：升级后首次续传时把已有的部分数据搬到 `.part`，
+/// 避免把用户已经下了一半的进度当垃圾丢掉。
+fn migrate_legacy_part(final_path: &Path, part: &Path) {
+    if part.exists() || final_path == part {
+        return;
+    }
+    let Ok(meta) = std::fs::metadata(final_path) else {
+        return;
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return;
+    }
+    if let Err(e) = std::fs::rename(final_path, part) {
+        eprintln!("[migrate] 无法把旧的部分文件搬到 .part（将从头重下）: {e}");
+    }
+}
+
 async fn remove_downloaded(path: &str) {
     if path.trim().is_empty() {
         return;
     }
+    // 未完成的下载落在 `<最终名>.part`：删任务必须连临时文件一起清，
+    // 否则目录里会留下一堆没人认领的半成品
+    let part = util::part_path(std::path::Path::new(path));
+    let _ = std::fs::remove_file(&part);
     for i in 0..8u64 {
         match std::fs::symlink_metadata(path) {
             Ok(meta) if meta.is_dir() => {

@@ -311,12 +311,15 @@ pub(crate) async fn download(
         target.password = pass;
     }
 
+    // 与 HTTP 一致：写入走 `<最终名>.part`，完成时由 finish_task 原子提交。
+    // 未完成的任务不会在目录里留下一个「看起来已完成」的文件。
+    let work_path = crate::util::part_path(std::path::Path::new(&save_path));
     let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .read(true)
-        .open(&save_path)
-        .with_context(|| format!("无法创建文件: {save_path}"))?;
+        .open(&work_path)
+        .with_context(|| format!("无法创建文件: {}", work_path.display()))?;
     if start == 0 {
         let _ = file.set_len(0);
     }
