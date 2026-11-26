@@ -603,6 +603,18 @@ pub struct TaskProgress {
 }
 
 impl Task {
+    /// 对外（HTTP API / 日志 / 分享）使用的脱敏副本。
+    ///
+    /// `cookie` 与 `password` 是给下载器自己用的凭据：接口返回完整 Task 会把它们
+    /// 明文送到任何拿到 API token 的客户端（浏览器扩展面板、第三方脚本、日志），
+    /// 一旦泄露就等于把用户账号交出去。这里只保留「有没有」的信息量。
+    pub fn redacted(&self) -> Task {
+        let mut t = self.clone();
+        t.cookie = self.cookie.as_ref().map(|_| "***".to_string());
+        t.password = self.password.as_ref().map(|_| "***".to_string());
+        t
+    }
+
     /// 生成进度增量快照（不含静态字段）
     pub fn progress_snapshot(&self) -> TaskProgress {
         TaskProgress {

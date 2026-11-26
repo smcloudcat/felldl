@@ -123,7 +123,10 @@ async fn list_tasks(State(st): State<ApiState>, Query(q): Query<TokenQuery>, hea
     if let Err(r) = check_token(&st.engine, &headers, &q) {
         return r;
     }
-    Json(json!({"ok": true, "tasks": st.engine.snapshot()})).into_response()
+    // 对外只给脱敏副本：cookie / password 是下载器自用的凭据，
+    // 不能随「列出任务」发给任何拿到 token 的客户端
+    let tasks: Vec<_> = st.engine.snapshot().iter().map(|t| t.redacted()).collect();
+    Json(json!({"ok": true, "tasks": tasks})).into_response()
 }
 
 async fn stats(State(st): State<ApiState>) -> impl IntoResponse {
