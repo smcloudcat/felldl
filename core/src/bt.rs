@@ -151,7 +151,7 @@ impl Engine {
         let id = t.id.clone();
         let rt = Runtime::new(t.clone());
         *rt.running.lock() = true;
-        self.tasks.lock().insert(id.clone(), rt);
+        self.index_task(rt);
         let _ = self.store.save_task(&t);
         self.emit(EngineEvent::TaskUpdated(t));
         Ok(id)
@@ -190,8 +190,11 @@ impl Engine {
         let mut pending: Vec<Task> = Vec::new();
         {
             let mut tried = self.bt_restore_tried.lock();
+            let bt_ids = self.bt_ids.lock();
             let map = self.tasks.lock();
-            for rt in map.values() {
+            // 只遍历 BT 索引：HTTP 历史任务再多也不需要在这里被锁一遍
+            for id in bt_ids.iter() {
+                let Some(rt) = map.get(id) else { continue };
                 let t = rt.task.lock().clone();
                 if t.kind != TaskKind::Bt || tried.contains(&t.id) {
                     continue;
@@ -273,6 +276,7 @@ impl Engine {
         t.rev = rt.bump_rev();
         let snap = t.clone();
         drop(t);
+        self.sync_live(&snap.id, snap.state);
         let _ = self.store.save_task(&snap);
         self.emit(EngineEvent::TaskUpdated(snap));
     }
@@ -299,6 +303,7 @@ impl Engine {
         t.rev = rt.bump_rev();
         let snap = t.clone();
         drop(t);
+        self.sync_live(&snap.id, snap.state);
         self.emit(EngineEvent::TaskUpdated(snap));
     }
 
@@ -321,12 +326,13 @@ impl Engine {
         let Some(bt) = self.bt_session.get() else {
             return;
         };
-        // 收集所有 BT 任务快照
+        // 收集所有 BT 任务快照（只遍历 BT 索引，不扫全表）
         let bt_tasks: Vec<(String, Arc<Runtime>)> = {
+            let bt_ids = self.bt_ids.lock();
             let map = self.tasks.lock();
-            map.iter()
-                .filter(|(_, r)| r.task.lock().kind == TaskKind::Bt)
-                .map(|(k, r)| (k.clone(), r.clone()))
+            bt_ids
+                .iter()
+                .filter_map(|k| map.get(k).map(|r| (k.clone(), r.clone())))
                 .collect()
         };
         if bt_tasks.is_empty() {
@@ -405,9 +411,11 @@ impl Engine {
                 self.store.enqueue_save(&snap);
             }
             if was_running != *rt.running.lock() || snap.state.is_active() {
-                self.emit(EngineEvent::TaskUpdated(snap));
+                self.emit(EngineEvent::TaskUpdated(snap.clone()));
             }
-            let _ = id;
+            // BT 的状态是 rqbit 侧推过来的（暂停 / 出错 / 做完），
+            // 必须同步活跃索引，否则完成后的种子会被 tick 一直当作活跃任务。
+            self.sync_live(&id, snap.state);
         }
     }
 }

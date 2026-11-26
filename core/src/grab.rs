@@ -1152,7 +1152,7 @@ impl Engine {
         *rt.cancel.lock() = CancellationToken::new();
         // HLS 任务在这里就「开工」了，同样分配运行代号
         let generation = rt.next_generation();
-        self.tasks.lock().insert(id.clone(), rt.clone());
+        self.index_task(rt.clone());
         let _ = self.store.save_task(&t);
         self.emit(EngineEvent::TaskUpdated(t));
 

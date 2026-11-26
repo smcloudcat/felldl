@@ -141,6 +141,15 @@ pub struct Engine {
     pub(crate) store: Store,
     settings: RwLock<Settings>,
     pub(crate) tasks: Mutex<HashMap<TaskId, Arc<Runtime>>>,
+    /// 活跃任务索引：**非终态**任务的 id。
+    ///
+    /// 后台 tick（500ms）只遍历这里。历史任务（已完成 / 出错）可能上万条，
+    /// 以前每轮都要遍历全表并逐个加任务锁，历史越多 CPU 越白烧；
+    /// 现在 tick 的开销只与「活跃任务数」相关，与历史总量无关。
+    live: Mutex<std::collections::HashSet<TaskId>>,
+    /// BT 任务索引（含已完成但仍在做种的）：rqbit 状态轮询只遍历这里，
+    /// 不再为了找出几个种子而锁住全表每一个任务。
+    pub(crate) bt_ids: Mutex<std::collections::HashSet<TaskId>>,
     events: broadcast::Sender<EngineEvent>,
     /// 全局限速器
     global_limiter: Arc<RateLimiter>,
@@ -307,6 +316,8 @@ impl Engine {
             store,
             settings: RwLock::new(settings),
             tasks: Mutex::new(HashMap::new()),
+            live: Mutex::new(std::collections::HashSet::new()),
+            bt_ids: Mutex::new(std::collections::HashSet::new()),
             events: tx,
             global_limiter: limiter,
             clients: Mutex::new(ClientCache::default()),
@@ -318,12 +329,8 @@ impl Engine {
 
         // 载入历史任务（进行中的已回落为 Paused）
         let loaded = engine.store.load_tasks();
-        {
-            let mut map = engine.tasks.lock();
-            for t in loaded {
-                let id = t.id.clone();
-                map.insert(id, Runtime::new(t));
-            }
+        for t in loaded {
+            engine.index_task(Runtime::new(t));
         }
         // 后台循环负责：速度统计、进度广播、定时触发、并发泵
         engine.spawn_background();
@@ -802,11 +809,47 @@ impl Engine {
     }
 
     fn insert_task(&self, t: Task) {
-        let id = t.id.clone();
-        let rt = Runtime::new(t.clone());
-        self.tasks.lock().insert(id, rt);
+        self.index_task(Runtime::new(t.clone()));
         let _ = self.store.save_task(&t);
         self.emit(EngineEvent::TaskUpdated(t));
+    }
+
+    /// 任务进内存索引（不落盘、不广播）。启动加载 / 新建 / 各协议内部共用。
+    ///
+    /// 索引是**派生数据**：`tasks` 表是唯一事实来源，这里只是给 tick 提供
+    /// 「该关注谁」的捷径。因此索引短暂不一致不影响正确性（tick 会跳过查不到的 id）。
+    pub(crate) fn index_task(&self, rt: Arc<Runtime>) {
+        let (id, kind, state) = {
+            let t = rt.task.lock();
+            (t.id.clone(), t.kind, t.state)
+        };
+        if kind == TaskKind::Bt {
+            self.bt_ids.lock().insert(id.clone());
+        }
+        if !state.is_terminal() {
+            self.live.lock().insert(id.clone());
+        }
+        self.tasks.lock().insert(id, rt);
+    }
+
+    /// 任务离开内存索引（删除 / 清空已完成）。
+    fn unindex_task(&self, id: &str) {
+        self.tasks.lock().remove(id);
+        self.live.lock().remove(id);
+        self.bt_ids.lock().remove(id);
+    }
+
+    /// 状态变化后同步活跃索引：终态移出，其余（含暂停）留在里面。
+    ///
+    /// 暂停的任务留在索引里是有意的：tick 的「首次快照」逻辑靠它补发状态，
+    /// 而数量级上暂停任务通常很少，代价可忽略。
+    pub(crate) fn sync_live(&self, id: &str, state: TaskState) {
+        let mut live = self.live.lock();
+        if state.is_terminal() {
+            live.remove(id);
+        } else {
+            live.insert(id.to_string());
+        }
     }
 
     // ───────────────────────── 探测 ─────────────────────────
@@ -1029,11 +1072,14 @@ impl Engine {
             }
             *g = true;
         }
-        // 并发闸门：统计「其他」正在运行的任务数
+        // 并发闸门：统计「其他」正在运行的任务数。
+        // 只数活跃索引里的（完成/出错的任务不可能在跑），历史再多也不影响这里。
         let active_others = {
+            let live = self.live.lock();
             let map = self.tasks.lock();
-            map.iter()
-                .filter(|(k, r)| k.as_str() != id && *r.running.lock())
+            live.iter()
+                .filter(|k| k.as_str() != id)
+                .filter(|k| map.get(*k).map(|r| *r.running.lock()).unwrap_or(false))
                 .count()
         };
         let max = self.settings.read().max_concurrent_tasks.max(1);
@@ -1096,7 +1142,7 @@ impl Engine {
             let t = rt.task.lock();
             t.save_path.clone()
         };
-        self.tasks.lock().remove(id);
+        self.unindex_task(id);
         if let Err(e) = self.store.delete_task(id) {
             // 删不掉就明说：否则重启后这个任务会重新出现，用户只会觉得「删了又回来」
             self.emit(EngineEvent::Notice(format!("任务记录未能删除：{e}")));
@@ -1130,7 +1176,7 @@ impl Engine {
                     self.bt_remove(&rt, false).await;
                 }
             }
-            self.tasks.lock().remove(&id);
+            self.unindex_task(&id);
             if let Err(e) = self.store.delete_task(&id) {
                 self.emit(EngineEvent::Notice(format!("任务记录未能删除：{e}")));
             }
@@ -1168,6 +1214,8 @@ impl Engine {
         t.rev = rt.bump_rev();
         let snap = t.clone();
         drop(t);
+        // 活跃索引跟着状态走：完成/出错后不再参与 tick（历史再长也不拖慢后台循环）
+        self.sync_live(&snap.id, to);
         // 持久化失败必须可见：否则界面显示「已暂停」，重启后却回到下载中
         if let Err(e) = self.store.save_task(&snap) {
             self.emit(EngineEvent::Notice(format!("任务状态未能保存：{e}")));
@@ -1896,26 +1944,12 @@ impl Engine {
                     last_persist = now;
                 }
 
-                // 只对「正在运行」的任务做深克隆与进度广播；
-                // 历史/已完成任务只保留一份缓存，不再每 500ms 复制整个 Task。
-                let running_list: Vec<(TaskId, Arc<Runtime>, u64)> = {
-                    let map = me.tasks.lock();
-                    map.iter()
-                        .filter(|(_, r)| *r.running.lock())
-                        .map(|(k, r)| {
-                            (k.clone(), r.clone(), r.downloaded.load(Ordering::Relaxed))
-                        })
-                        .collect()
-                };
-                // 首次出现（或从非运行态转入）的任务，广播一次当前快照，保证 UI 不错过
-                let fresh: Vec<(TaskId, Arc<Runtime>)> = {
-                    let map = me.tasks.lock();
-                    map.iter()
-                        .filter(|(k, r)| !last.contains_key(*k) && !*r.running.lock())
-                        .map(|(k, r)| (k.clone(), r.clone()))
-                        .collect()
-                };
-                for (id, rt) in fresh {
+                // 只遍历活跃索引（排队/探测/下载/暂停/定时），
+                // 已完成 / 出错的历史任务再多也不参与这一轮的任何工作。
+                let targets = me.pick_tick_targets(&last);
+                let running_cnt = targets.running.len();
+                // 首次出现（或从终态回到活跃）的任务，广播一次当前快照，保证 UI 不错过
+                for (id, rt) in targets.fresh {
                     let mut t = rt.task.lock();
                     t.speed = 0;
                     t.downloaded = rt.downloaded.load(Ordering::Relaxed);
@@ -1925,7 +1959,7 @@ impl Engine {
                     last.insert(id, (snap.downloaded, now));
                     me.emit(EngineEvent::TaskUpdated(snap));
                 }
-                for (id, rt, dl) in running_list {
+                for (id, rt, dl) in targets.running {
                     let progress = {
                         let mut t = rt.task.lock();
                         t.downloaded = dl;
@@ -1949,49 +1983,91 @@ impl Engine {
                     me.emit(EngineEvent::TaskProgress(Box::new(progress)));
                 }
 
-                // 清理已不存在的任务的速度记录（一次加锁完成）
+                // 清理已离开活跃集合（完成/出错/删除）的进度基准
                 {
-                    let map = me.tasks.lock();
-                    last.retain(|k, _| map.contains_key(k));
+                    let live = me.live.lock();
+                    last.retain(|k, _| live.contains(k));
                 }
 
                 // 定时任务触发
-                let due: Vec<TaskId> = {
-                    let map = me.tasks.lock();
-                    map.iter()
-                        .filter(|(_, r)| {
-                            let t = r.task.lock();
-                            t.state == TaskState::Scheduled
-                                && t.scheduled_at.map(|ms| ms <= now_ms()).unwrap_or(false)
-                        })
-                        .map(|(k, _)| k.clone())
-                        .collect()
-                };
-                for id in due {
+                for id in targets.due {
                     let _ = me.resume(&id).await;
                 }
 
                 // 并发泵：把排队任务提起来
                 let max = me.settings.read().max_concurrent_tasks.max(1);
-                let running_cnt = {
-                    let map = me.tasks.lock();
-                    map.values().filter(|r| *r.running.lock()).count()
-                };
                 if running_cnt < max {
-                    let queued: Vec<TaskId> = {
-                        let map = me.tasks.lock();
-                        map.iter()
-                            .filter(|(_, r)| r.task.lock().state == TaskState::Queued)
-                            .map(|(k, _)| k.clone())
-                            .collect()
-                    };
-                    for id in queued.into_iter().take(max - running_cnt) {
+                    for id in targets.queued.into_iter().take(max - running_cnt) {
                         let _ = me.resume(&id).await;
                     }
                 }
             }
         });
     }
+
+    /// tick 的选取阶段：从活跃索引挑出本轮要处理的任务。
+    ///
+    /// 关键点：这里**只**遍历 `live`（非终态任务），不再扫全表。
+    /// 已完成/出错的历史任务可能上万条，以前每 500ms 都要遍历一遍并逐个加锁，
+    /// 历史越多后台 CPU 越高；现在开销只与活跃任务数相关。
+    ///
+    /// `examined` 是实际检查过的任务数，测试用它守住「不退回全表扫描」。
+    fn pick_tick_targets(
+        &self,
+        last: &HashMap<TaskId, (u64, std::time::Instant)>,
+    ) -> TickTargets {
+        // 先克隆 id 再拿表：两把锁只短暂嵌套，且顺序固定为 live → tasks
+        let ids: Vec<TaskId> = self.live.lock().iter().cloned().collect();
+        let map = self.tasks.lock();
+        let now = now_ms();
+        let mut out = TickTargets {
+            examined: ids.len(),
+            ..Default::default()
+        };
+        for id in ids {
+            // 任务刚被删除、索引还没同步：跳过即可（索引是派生数据，不是事实来源）
+            let Some(rt) = map.get(&id) else { continue };
+            let running = *rt.running.lock();
+            let (state, due) = {
+                let t = rt.task.lock();
+                let due = t.state == TaskState::Scheduled
+                    && t.scheduled_at.map(|ms| ms <= now).unwrap_or(false);
+                (t.state, due)
+            };
+            if running {
+                out.running
+                    .push((id, rt.clone(), rt.downloaded.load(Ordering::Relaxed)));
+                continue;
+            }
+            // 跑过的任务每轮都会进 last，所以这里只会命中「首次出现 / 重新活跃」
+            if !last.contains_key(&id) {
+                out.fresh.push((id.clone(), rt.clone()));
+            }
+            if due {
+                out.due.push(id.clone());
+            }
+            if state == TaskState::Queued {
+                out.queued.push(id);
+            }
+        }
+        out
+    }
+}
+
+/// 一轮 tick 需要处理的任务集合（全部来自活跃索引）。
+#[derive(Default)]
+struct TickTargets {
+    /// 正在运行：广播进度、算速度、周期落盘
+    running: Vec<(TaskId, Arc<Runtime>, u64)>,
+    /// 本轮需要补发一次完整快照的任务
+    fresh: Vec<(TaskId, Arc<Runtime>)>,
+    /// 到点该启动的定时任务
+    due: Vec<TaskId>,
+    /// 排队等待并发槽的任务
+    queued: Vec<TaskId>,
+    /// 本轮实际检查的任务数（只应随活跃任务数增长）
+    #[cfg_attr(not(test), allow(dead_code))]
+    examined: usize,
 }
 
 trait IfEmpty {
@@ -2567,7 +2643,7 @@ mod tests {
     async fn revision_advances_with_every_state_write() {
         let (engine, dir) = engine_in_temp("rev");
         let rt = Runtime::new(test_task("t1", TaskState::Paused));
-        engine.tasks.lock().insert("t1".to_string(), rt.clone());
+        engine.index_task(rt.clone());
         let mut rx = engine.subscribe();
 
         let gen = rt.next_generation();
@@ -2612,6 +2688,118 @@ mod tests {
 
         let wrote = engine.commit_state(&rt, gen, TaskState::Paused, |t| t.downloaded = 1);
         assert!(!wrote, "已删除任务的状态写入应被丢弃");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 活跃索引跟着状态走：终态离开、暂停保留、删除后彻底消失。
+    ///
+    /// 索引是 tick 的唯一遍历对象，一旦它漏掉「该关注的」任务，进度就停了；
+    /// 一旦它留下「已完成的」，历史越多 CPU 越白烧 —— 两个方向都要守住。
+    #[tokio::test]
+    async fn live_index_tracks_state_and_removal() {
+        let (engine, dir) = engine_in_temp("live");
+        let rt = Runtime::new(test_task("t1", TaskState::Queued));
+        engine.index_task(rt.clone());
+        assert!(engine.live.lock().contains("t1"), "新建任务应进入活跃索引");
+
+        let gen = rt.next_generation();
+        assert!(engine.commit_state(&rt, gen, TaskState::Probing, |_| {}));
+        assert!(engine.commit_state(&rt, gen, TaskState::Downloading, |_| {}));
+        assert!(
+            engine.live.lock().contains("t1"),
+            "运行中的任务必须在活跃索引里（否则进度不再上报）"
+        );
+
+        assert!(engine.commit_state(&rt, gen, TaskState::Completed, |_| {}));
+        assert!(!engine.live.lock().contains("t1"), "完成后必须离开活跃索引");
+        assert!(engine.tasks.lock().contains_key("t1"), "任务本身仍在表里");
+
+        // 周期同步 / 手动重开：终态重新回到活跃
+        assert!(engine.commit_state(&rt, gen, TaskState::Scheduled, |_| {}));
+        assert!(engine.live.lock().contains("t1"), "重新调度后应回到活跃索引");
+        assert!(engine.commit_state(&rt, gen, TaskState::Probing, |_| {}));
+        assert!(engine.commit_state(&rt, gen, TaskState::Downloading, |_| {}));
+        assert!(engine.commit_state(&rt, gen, TaskState::Paused, |_| {}));
+        assert!(
+            engine.live.lock().contains("t1"),
+            "暂停的任务保留在索引里，靠它补发快照"
+        );
+
+        engine.unindex_task("t1");
+        assert!(!engine.tasks.lock().contains_key("t1"));
+        assert!(!engine.live.lock().contains("t1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// tick 的选取只与活跃任务数有关：几千条历史也不参与本轮任何工作。
+    ///
+    /// 回归护栏：如果有人把全表扫描加回 `pick_tick_targets`，
+    /// `examined` 会从 3 跳到 2003，这条断言立刻失败。
+    #[tokio::test]
+    async fn tick_only_scans_live_tasks() {
+        let (engine, dir) = engine_in_temp("tick-index");
+        // 模拟大量历史：直接进内存索引，不写盘（每个任务一个 JSON 文件太慢）
+        for i in 0..2000 {
+            let state = if i % 2 == 0 {
+                TaskState::Completed
+            } else {
+                TaskState::Error
+            };
+            engine.index_task(Runtime::new(test_task(&format!("old{i}"), state)));
+        }
+        engine.index_task(Runtime::new(test_task("q1", TaskState::Queued)));
+        engine.index_task(Runtime::new(test_task("q2", TaskState::Queued)));
+        let running = Runtime::new(test_task("run", TaskState::Downloading));
+        *running.running.lock() = true;
+        engine.index_task(running);
+
+        assert_eq!(engine.tasks.lock().len(), 2003, "历史确实在任务表里");
+        assert_eq!(engine.live.lock().len(), 3, "只有非终态任务进活跃索引");
+
+        let last = HashMap::new();
+        let targets = engine.pick_tick_targets(&last);
+        assert_eq!(targets.examined, 3, "每轮只检查活跃任务，不扫 2000 条历史");
+        assert_eq!(targets.running.len(), 1);
+        assert_eq!(targets.queued.len(), 2);
+        assert_eq!(
+            targets.fresh.len(),
+            2,
+            "非运行任务补一次完整快照，运行中的走进度通道"
+        );
+        assert!(targets.due.is_empty());
+
+        // 定时任务到点才进 due
+        let st = Runtime::new(test_task("sch", TaskState::Scheduled));
+        st.task.lock().scheduled_at = Some(now_ms() - 1);
+        engine.index_task(st);
+        let targets = engine.pick_tick_targets(&last);
+        assert_eq!(targets.due, vec!["sch".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// BT 索引独立于活跃索引：做完的种子仍要做种，必须还能被 rqbit 轮询到，
+    /// 但不再占用进度 tick。
+    #[tokio::test]
+    async fn bt_index_keeps_seeding_tasks() {
+        let (engine, dir) = engine_in_temp("bt-index");
+        let mut done = test_task("bt1", TaskState::Completed);
+        done.kind = TaskKind::Bt;
+        engine.index_task(Runtime::new(done));
+        assert!(engine.bt_ids.lock().contains("bt1"), "BT 任务进 BT 索引");
+        assert!(
+            !engine.live.lock().contains("bt1"),
+            "做完的种子不进活跃索引"
+        );
+
+        let mut active = test_task("bt2", TaskState::Downloading);
+        active.kind = TaskKind::Bt;
+        engine.index_task(Runtime::new(active));
+        assert!(engine.bt_ids.lock().contains("bt2"));
+        assert!(engine.live.lock().contains("bt2"));
+
+        // 删除后两个索引都要清干净
+        engine.unindex_task("bt1");
+        assert!(!engine.bt_ids.lock().contains("bt1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
