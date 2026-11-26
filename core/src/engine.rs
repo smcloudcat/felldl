@@ -1069,7 +1069,10 @@ impl Engine {
             t.save_path.clone()
         };
         self.tasks.lock().remove(id);
-        self.store.delete_task(id);
+        if let Err(e) = self.store.delete_task(id) {
+            // 删不掉就明说：否则重启后这个任务会重新出现，用户只会觉得「删了又回来」
+            self.emit(EngineEvent::Notice(format!("任务记录未能删除：{e}")));
+        }
         if delete_file && !is_bt {
             remove_downloaded(&path).await;
         }
@@ -1100,7 +1103,9 @@ impl Engine {
                 }
             }
             self.tasks.lock().remove(&id);
-            self.store.delete_task(&id);
+            if let Err(e) = self.store.delete_task(&id) {
+                self.emit(EngineEvent::Notice(format!("任务记录未能删除：{e}")));
+            }
             self.emit(EngineEvent::TaskRemoved(id));
         }
     }
@@ -1134,7 +1139,10 @@ impl Engine {
         t.state = to;
         let snap = t.clone();
         drop(t);
-        let _ = self.store.save_task(&snap);
+        // 持久化失败必须可见：否则界面显示「已暂停」，重启后却回到下载中
+        if let Err(e) = self.store.save_task(&snap) {
+            self.emit(EngineEvent::Notice(format!("任务状态未能保存：{e}")));
+        }
         self.emit(EngineEvent::TaskUpdated(snap));
         true
     }
@@ -2526,7 +2534,7 @@ mod tests {
         let rt = Runtime::new(test_task("gone", TaskState::Downloading));
         let gen = rt.next_generation();
         *rt.running.lock() = true;
-        engine.store.delete_task("gone");
+        engine.store.delete_task("gone").expect("删除应成功");
 
         let wrote = engine.commit_state(&rt, gen, TaskState::Paused, |t| t.downloaded = 1);
         assert!(!wrote, "已删除任务的状态写入应被丢弃");
