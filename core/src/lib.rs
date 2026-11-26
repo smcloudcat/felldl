@@ -17,6 +17,7 @@ pub mod mirror;
 pub mod model;
 pub mod remote;
 pub mod store;
+pub mod update;
 pub mod util;
 
 pub use engine::Engine;

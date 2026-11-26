@@ -35,6 +35,9 @@ russh-sftp = "4"
 # FTPS 根证书
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 webpki-roots = "1"
+# 更新包验签（Ed25519）与 SHA256 摘要：ring 已在依赖树中，不引入额外 TLS/加密后端
+ring = "0.17"
+base64 = "0.22"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

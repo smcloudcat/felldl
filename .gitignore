@@ -25,6 +25,10 @@ src-tauri/gen/android/keystore.properties
 *.jks
 *.keystore
 
+# 更新签名私钥：离线保存，绝不入库（公钥在 core/src/update.rs）
+src-tauri/keys/
+*.pkcs8
+
 # 构建产物
 dist/
 *.apk
