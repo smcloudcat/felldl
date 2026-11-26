@@ -115,8 +115,13 @@ cd src-tauri/gen/android
 - arm64（真机）：`src-tauri/gen/android/app/build/outputs/apk/arm64/release/app-arm64-release.apk`
 - x86_64（模拟器）：`src-tauri/gen/android/app/build/outputs/apk/x86_64/release/app-x86_64-release.apk`
 
-签名信息：`src-tauri/gen/android/keystore/felldl-release.jks`，alias `felldl`，密码 `felldl123`
-（自签自用；上架应用商店请替换为正式证书）。
+签名配置（不入库）：在 `src-tauri/gen/android/keystore.properties` 中填写
+`storeFile` / `storePassword` / `keyAlias` / `keyPassword`，可参考同目录的
+`keystore.properties.example`；CI 可用 `FELLDL_KEYSTORE_FILE`、`FELLDL_KEYSTORE_PASSWORD`、
+`FELLDL_KEY_ALIAS`、`FELLDL_KEY_PASSWORD` 环境变量注入。
+
+> 密钥库 `.jks` 与口令**不得提交到 Git**（已在 `.gitignore` 中）。历史版本曾提交过的密钥应视为已泄露，
+> 后续应评估密钥轮换与旧版本升级兼容，而不是删文件了事。
 
 > ⚠️ 两个必须注意的点：
 > 1. `src-tauri/capabilities/default.json` 必须存在。Tauri 2 在缺失 capability 时

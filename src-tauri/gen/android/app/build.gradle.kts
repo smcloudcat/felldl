@@ -14,18 +14,41 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// 签名材料不入库：优先读取 gen/android/keystore.properties（已 gitignore），其次读环境变量。
+// 不要把 .jks 或口令提交到 Git；示例见 keystore.properties.example。
+val signingProperties = Properties().apply {
+    val propFile = rootProject.file("keystore.properties")
+    if (propFile.exists()) {
+        propFile.inputStream().use { load(it) }
+    }
+}
+
+fun signingValue(property: String, envName: String): String? =
+    (signingProperties.getProperty(property) ?: System.getenv(envName))
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+
+val releaseStoreFile = signingValue("storeFile", "FELLDL_KEYSTORE_FILE")
+    ?.let { rootProject.file(it) }
+    ?.takeIf { it.exists() }
+val releaseStorePassword = signingValue("storePassword", "FELLDL_KEYSTORE_PASSWORD")
+val releaseKeyAlias = signingValue("keyAlias", "FELLDL_KEY_ALIAS")
+val releaseKeyPassword = signingValue("keyPassword", "FELLDL_KEY_PASSWORD")
+val hasReleaseSigning = releaseStoreFile != null &&
+    releaseStorePassword != null &&
+    releaseKeyAlias != null &&
+    releaseKeyPassword != null
+
 android {
     compileSdk = 36
     namespace = "com.felldl.app"
     signingConfigs {
-        create("release") {
-            // 自签密钥（开发/自用）：如需上架请替换为自己的正式签名
-            val ks = rootProject.file("keystore/felldl-release.jks")
-            if (ks.exists()) {
-                storeFile = ks
-                storePassword = "felldl123"
-                keyAlias = "felldl"
-                keyPassword = "felldl123"
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = releaseStoreFile
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
             }
         }
     }
@@ -51,9 +74,13 @@ android {
             }
         }
         getByName("release") {
-            val ks = rootProject.file("keystore/felldl-release.jks")
-            if (ks.exists()) {
+            if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
+            } else {
+                logger.warn(
+                    "[Felldl] 未找到 release 签名配置：keystore.properties 缺失或字段不全，release 包将为未签名状态。" +
+                        " 参考 keystore.properties.example，不要把密钥或口令提交到 Git。"
+                )
             }
             optimization {
                enable = true

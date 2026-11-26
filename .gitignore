@@ -19,6 +19,12 @@ src-tauri/gen/android/.gradle/
 src-tauri/gen/android/.idea/
 src-tauri/gen/android/local.properties
 src-tauri/gen/android/app/src/main/jniLibs/
+# 签名材料：绝不入库（私钥或口令一旦进入历史即视为泄露）
+src-tauri/gen/android/keystore/
+src-tauri/gen/android/keystore.properties
+*.jks
+*.keystore
+
 # 构建产物
 dist/
 *.apk
