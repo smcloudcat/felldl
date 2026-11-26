@@ -74,6 +74,11 @@ export const api = {
   requestAllFilesAccess: () => invoke("request_all_files_access") as Promise<void>,
   dirWritable: (path: string) => invoke("dir_writable", { path }) as Promise<boolean>,
 
+  // 安卓更新：是否允许「安装未知应用」/ 打开对应设置页
+  canInstallPackages: () => invoke("can_install_packages") as Promise<boolean>,
+  openInstallPermissionSettings: () =>
+    invoke("open_install_permission_settings") as Promise<void>,
+
   // 应用内直接更新：URL 与文件名都来自签名清单，前端不传（也就无法被诱导下载别的）
   // 下载进度走 update://progress 事件；返回一次性 token，applyUpdate 只接受 token
   downloadUpdate: () => invoke("download_update") as Promise<string>,

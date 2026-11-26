@@ -20,6 +20,8 @@ use tauri::{
 mod android;
 // 纯路径映射不带 cfg：桌面端也能跑它的单元测试
 mod android_paths;
+// APK 安装前的元数据校验（纯逻辑，桌面端可测）
+mod apk_update;
 // 更新落地 helper（同一 exe 的隐藏子命令，main 里在 Tauri 初始化前分流）
 pub mod update_helper;
 
@@ -267,6 +269,35 @@ async fn request_all_files_access(app: tauri::AppHandle) -> Result<(), String> {
     {
         let _ = app;
         Ok(())
+    }
+}
+
+/// 安卓「安装未知应用」授权状态；其它平台恒为 true
+#[tauri::command]
+async fn can_install_packages(app: tauri::AppHandle) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        return android::can_install_packages(&app);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(true)
+    }
+}
+
+/// 打开「安装未知应用」授权页（仅安卓有意义）
+#[tauri::command]
+async fn open_install_permission_settings(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let pkg = app.config().identifier.clone();
+        return android::open_install_settings(&app, &pkg);
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("当前平台不需要安装授权".into())
     }
 }
 
@@ -1510,9 +1541,29 @@ async fn apply_update(
         app.exit(0);
         Ok("restarting".into())
     }
-    #[cfg(not(target_os = "windows"))]
+    // 安卓：先核对「这确实是本应用的新版本、签名一致」，再用 content:// 拉起安装器。
+    // 不能走 tauri-plugin-opener：它把路径当 URL 交给 ACTION_VIEW，Android 上
+    // 要么找不到启动器（静默失败），要么因 file:// 直接 FileUriExposedException。
+    #[cfg(target_os = "android")]
     {
-        // 安卓：调起系统安装器；失败就让用户自己去文件管理器点安装
+        let pkg = app.config().identifier.clone();
+        let path = update.path().to_string_lossy().to_string();
+
+        if !android::can_install_packages(&app)? {
+            return Err("install.need_permission: 需要允许「安装未知应用」才能更新".into());
+        }
+        let installed = android::installed_apk_info(&app, &pkg)
+            .map_err(|e| format!("读取已安装版本信息失败：{e}"))?;
+        let apk = android::apk_info(&app, &path)
+            .map_err(|e| format!("更新包不可用：{e}"))?;
+        apk_update::verify_installable(&pkg, &installed, &apk, update.version_code)
+            .map_err(|e| format!("更新包校验失败：{e}"))?;
+        android::install_apk(&app, &path)?;
+        Ok("installing".into())
+    }
+    // 其它桌面平台：交回系统默认程序
+    #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
+    {
         use tauri_plugin_opener::OpenerExt;
         match app.opener().open_path(update.path(), None::<&str>) {
             Ok(_) => Ok("opened".into()),
@@ -1764,6 +1815,8 @@ pub fn run() {
             app_version,
             all_files_access,
             request_all_files_access,
+            can_install_packages,
+            open_install_permission_settings,
             dir_writable,
             open_file,
             show_in_folder,

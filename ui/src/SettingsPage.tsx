@@ -178,15 +178,25 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       setPhase("apply");
       const mode = await api.applyUpdate(token);
       // Windows 走「退出→覆盖→重启」，这一步之后进程就没了；
-      // 其它平台返回 opened / manual，提示用户手动确认安装
-      if (mode !== "restarting") {
-        setPhase("idle");
-        toast(t("set.manualInstall"));
-      }
+      // 安卓返回 installing（已拉起系统安装器），其它平台返回 opened / manual
+      if (mode === "restarting") return;
+      setPhase("idle");
+      toast(t(mode === "installing" ? "set.installing" : "set.manualInstall"));
     } catch (e: any) {
       setPhase("idle");
       setPercent(0);
-      toast(typeof e === "string" ? e : String(e?.message ?? e), "error");
+      const msg = typeof e === "string" ? e : String(e?.message ?? e);
+      // 安卓首次更新需要用户允许「安装未知应用」：直接把人带到设置页
+      if (msg.startsWith("install.need_permission")) {
+        toast(t("set.needInstallPermission"), "error");
+        try {
+          await api.openInstallPermissionSettings();
+        } catch {
+          /* 打开失败就只剩提示，用户可以自己去系统设置里开 */
+        }
+      } else {
+        toast(msg, "error");
+      }
     }
   }
 
