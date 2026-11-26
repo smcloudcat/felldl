@@ -37,6 +37,10 @@ export interface Task {
   downloaded: number;
   state: TaskState;
   error: string | null;
+  /** 稳定机器码：http.not_found / net.timeout / disk.full … 文案可以变，它不变 */
+  error_code?: string | null;
+  /** 自动重试是否有意义；null/缺省表示当前没有错误 */
+  retryable?: boolean | null;
   connections: number;
   segments: Segment[];
   supports_range: boolean;

@@ -41,6 +41,8 @@ fn seed_task_with_secrets(root: &std::path::Path, save_dir: &str) -> String {
         downloaded: 0,
         state: TaskState::Paused,
         error: None,
+        error_code: None,
+        retryable: None,
         connections: 8,
         segments: Vec::new(),
         supports_range: true,

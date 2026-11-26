@@ -344,7 +344,10 @@ async fn error_paths_are_reported() {
     let root = temp_root("err");
     let engine = new_engine(&root);
 
-    for (path, expect_kw) in [("/deny", "403"), ("/missing", "404")] {
+    for (path, expect_kw, expect_code) in [
+        ("/deny", "403", "http.auth"),
+        ("/missing", "404", "http.not_found"),
+    ] {
         let url = format!("http://{}{}", srv.addr, path);
         let id = engine
             .add(AddTaskRequest {
@@ -361,6 +364,13 @@ async fn error_paths_are_reported() {
             msg.contains(expect_kw),
             "{path} 错误信息应包含 {expect_kw}，实际: {msg}"
         );
+        assert_eq!(
+            t.error_code.as_deref(),
+            Some(expect_code),
+            "{path} 的错误码应可机器判断，实际 {:?}",
+            t.error_code
+        );
+        assert_eq!(t.retryable, Some(false), "{path} 不该被自动重试");
     }
 
     let _ = std::fs::remove_dir_all(&root);
@@ -840,6 +850,14 @@ async fn rejects_bad_partial_content(tag: &str, mode: &'static str, expect_msg: 
     assert_eq!(t.state, TaskState::Error, "不应把错误数据当成完成");
     let msg = t.error.clone().unwrap_or_default();
     assert!(!msg.is_empty(), "失败任务必须带上可读原因");
+    // 206 说的和要的不一致 = 数据不可信；自动重试没有意义
+    assert_eq!(
+        t.error_code.as_deref(),
+        Some("integrity"),
+        "区间/实体不符应归为 integrity，实际 {:?}",
+        t.error_code
+    );
+    assert_eq!(t.retryable, Some(false), "完整性错误不应被自动重试");
     if !expect_msg.is_empty() {
         assert!(
             msg.contains(expect_msg),

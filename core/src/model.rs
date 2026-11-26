@@ -426,6 +426,13 @@ pub struct Task {
     pub state: TaskState,
     #[serde(default)]
     pub error: Option<String>,
+    /// 错误的稳定标识（`http.not_found` / `disk.full` …），见 `crate::error`。
+    /// `error` 是给人看的中文，`error_code` 才是给代码判断的。
+    #[serde(default)]
+    pub error_code: Option<String>,
+    /// 自动重试是否有意义；`None` 表示当前没有错误。
+    #[serde(default)]
+    pub retryable: Option<bool>,
     #[serde(default)]
     pub connections: usize,
     #[serde(default)]
@@ -599,6 +606,8 @@ pub struct TaskProgress {
     pub upload_speed: u64,
     pub segments: Vec<Segment>,
     pub error: Option<String>,
+    pub error_code: Option<String>,
+    pub retryable: Option<bool>,
     pub completed_at: Option<i64>,
 }
 
@@ -627,8 +636,35 @@ impl Task {
             upload_speed: self.upload_speed,
             segments: self.segments.clone(),
             error: self.error.clone(),
+            error_code: self.error_code.clone(),
+            retryable: self.retryable,
             completed_at: self.completed_at,
         }
+    }
+}
+
+impl Task {
+    /// 清掉错误（以及随错误一起出现的 code/retryable），用于重试/状态回退。
+    /// 单独改 `error = None` 会留下过期的 code，UI 就会在正常状态上显示旧错误码。
+    pub fn clear_error(&mut self) {
+        self.error = None;
+        self.error_code = None;
+        self.retryable = None;
+    }
+
+    /// 记录一个带分类的错误
+    pub fn set_error(&mut self, err: &anyhow::Error) {
+        let info = crate::error::classify(err);
+        self.error = Some(format!("{err:#}"));
+        self.error_code = Some(info.code.to_string());
+        self.retryable = Some(info.retryable);
+    }
+
+    /// 只有一句人话、没有类型信息的错误（例如由外部字符串传入）
+    pub fn set_error_message(&mut self, msg: impl Into<String>) {
+        self.error = Some(msg.into());
+        self.error_code = Some(crate::error::ErrorInfo::UNKNOWN.code.to_string());
+        self.retryable = Some(false);
     }
 }
 

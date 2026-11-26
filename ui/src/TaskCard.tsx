@@ -194,7 +194,15 @@ function TaskCardInner({ task, meta, onPause, onResume, onRemove, onOpen, onReve
             )}
           </div>
 
-          {task.error && <div className="task-error-msg">⚠ {task.error}</div>}
+          {task.error && (
+            <div
+              className="task-error-msg"
+              /* 悬停能看到机器码，排查/反馈问题时不必靠猜文案 */
+              title={task.error_code ? `错误码: ${task.error_code}` : undefined}
+            >
+              ⚠ {task.error}
+            </div>
+          )}
 
           {/* 进度区：一条进度条搞定。下载中时用分片刻度线画出「多线程并行」的细节 */}
           {!isDone && task.state !== "error" && (

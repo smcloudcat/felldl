@@ -1118,6 +1118,8 @@ impl Engine {
             downloaded: 0,
             state: TaskState::Downloading,
             error: None,
+            error_code: None,
+            retryable: None,
             connections: 1,
             segments: Vec::new(),
             supports_range: false,
@@ -1172,8 +1174,7 @@ impl Engine {
                     me.emit(EngineEvent::TaskUpdated(snap));
                 }
                 Err(e) => {
-                    let msg = format!("{e:#}");
-                    me.fail_task(&task_id, msg);
+                    me.fail_task(&task_id, &e);
                 }
                 Ok(()) => {}
             }

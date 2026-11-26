@@ -307,6 +307,8 @@ mod tests {
             downloaded: 400,
             state: TaskState::Downloading,
             error: None,
+            error_code: None,
+            retryable: None,
             connections: 8,
             segments: vec![],
             supports_range: true,

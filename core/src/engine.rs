@@ -6,6 +6,7 @@
 //! * 每个分片的 `done` 持久化在任务 JSON 里，进程重启后从 `start + done` 继续。
 //! * 用 `If-Range` + ETag/Last-Modified 校验，服务器文件变了就整体重下，避免拼出坏文件。
 
+use crate::error::FellError;
 use crate::model::*;
 use crate::store::Store;
 use crate::util::{self, RateLimiter};
@@ -496,7 +497,7 @@ impl Engine {
                         t.etag = info.etag.clone();
                         t.supports_range = info.supports_range;
                         t.mirrors = hits.into_iter().map(|(u, _)| u).collect();
-                        t.error = None;
+                        t.clear_error();
                         t.state = TaskState::Queued;
                         let scheduled = req.scheduled_at.filter(|&ms| ms > now_ms());
                         if scheduled.is_some() {
@@ -511,7 +512,7 @@ impl Engine {
                     }
                 }
                 t.state = TaskState::Error;
-                t.error = Some(format!("{e:#}"));
+                t.set_error(&e);
                 self.insert_task(t.clone());
                 return Ok(t.id);
             }
@@ -720,6 +721,8 @@ impl Engine {
             downloaded: 0,
             state: TaskState::Queued,
             error: None,
+            error_code: None,
+            retryable: None,
             connections: req.connections.unwrap_or(s.default_connections).clamp(1, 64),
             segments: Vec::new(),
             supports_range: probe.supports_range,
@@ -896,11 +899,19 @@ impl Engine {
                 .unwrap_or(false)
                 && info.size.unwrap_or(0) > 0;
         } else if status == StatusCode::NOT_FOUND {
-            bail!("服务器返回 404，文件不存在");
+            return Err(FellError::http(404, "服务器返回 404，文件不存在").into());
         } else if status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED {
-            bail!("服务器拒绝访问（403），可能需要 Referer / Cookie");
+            return Err(FellError::http(
+                status.as_u16(),
+                format!("服务器拒绝访问（{}），可能需要 Referer / Cookie", status.as_u16()),
+            )
+            .into());
         } else {
-            bail!("服务器返回异常状态 {}", status.as_u16());
+            return Err(FellError::http(
+                status.as_u16(),
+                format!("服务器返回异常状态 {}", status.as_u16()),
+            )
+            .into());
         }
         Ok(info)
     }
@@ -978,7 +989,7 @@ impl Engine {
             let mut t = rt.task.lock();
             if t.state != TaskState::Queued {
                 t.state = TaskState::Queued;
-                t.error = None;
+                t.clear_error();
                 let snap = t.clone();
                 drop(t);
                 let _ = self.store.save_task(&snap);
@@ -993,7 +1004,7 @@ impl Engine {
         {
             let mut t = rt.task.lock();
             t.state = TaskState::Probing;
-            t.error = None;
+            t.clear_error();
             t.speed = 0;
         }
 
@@ -1002,7 +1013,7 @@ impl Engine {
         tokio::spawn(async move {
             let res = engine.clone().run_task(&id2, new_cancel).await;
             if let Err(e) = res {
-                engine.fail_task(&id2, format!("{e:#}"));
+                engine.fail_task(&id2, &e);
             }
         });
         Ok(())
@@ -1062,12 +1073,12 @@ impl Engine {
         }
     }
 
-    pub(crate) fn fail_task(&self, id: &str, msg: String) {
+    pub(crate) fn fail_task(&self, id: &str, err: &anyhow::Error) {
         if let Some(rt) = self.tasks.lock().get(id).cloned() {
             *rt.running.lock() = false;
             let mut t = rt.task.lock();
             t.state = TaskState::Error;
-            t.error = Some(msg);
+            t.set_error(err);
             t.speed = 0;
             let snap = t.clone();
             drop(t);
@@ -1222,7 +1233,7 @@ impl Engine {
                 {
                     let mut t = rt.task.lock();
                     t.state = TaskState::Downloading;
-                    t.error = None;
+                    t.clear_error();
                     t.speed = 0;
                 }
                 let snap = { rt.task.lock().clone() };
@@ -1241,7 +1252,7 @@ impl Engine {
             {
                 let mut t = rt.task.lock();
                 t.state = TaskState::Downloading;
-                t.error = None;
+                t.clear_error();
                 t.speed = 0;
                 t.downloaded = 0;
             }
@@ -1301,7 +1312,7 @@ impl Engine {
         {
             let mut t = rt.task.lock();
             t.state = TaskState::Downloading;
-            t.error = None;
+            t.clear_error();
         }
         let snap = { rt.task.lock().clone() };
         self.emit(EngineEvent::TaskUpdated(snap));
@@ -1505,11 +1516,10 @@ impl Engine {
         }
 
         if let Some(e) = first_err {
-            let msg = format!("{e:#}");
             // 分片出错：若已有进度，保留为错误态以便重试续传
             let mut t = rt.task.lock();
             t.state = TaskState::Error;
-            t.error = Some(msg);
+            t.set_error(&e);
             t.speed = 0;
             t.downloaded = rt.downloaded.load(Ordering::Relaxed);
             let snap = t.clone();
@@ -1708,7 +1718,7 @@ impl Engine {
         t.state = TaskState::Completed;
         t.completed_at = Some(now_ms());
         t.speed = 0;
-        t.error = None;
+        t.clear_error();
 
         // 周期性同步：完成后按间隔重新调度（保持文件始终最新）
         let reschedule = t.interval_secs > 0;
@@ -1968,8 +1978,13 @@ fn commit_part(final_path: &Path) -> Result<()> {
         // 没有 .part：可能是重复调用（周期同步/已提交过），或协议自己写了最终文件
         return Ok(());
     }
-    std::fs::rename(&part, final_path)
-        .with_context(|| format!("无法把 {} 重命名为 {}", part.display(), final_path.display()))?;
+    std::fs::rename(&part, final_path).map_err(|e| {
+        FellError::from(e).context(format!(
+            "无法把 {} 重命名为 {}",
+            part.display(),
+            final_path.display()
+        ))
+    })?;
     Ok(())
 }
 
@@ -2043,7 +2058,11 @@ fn check_partial_content(
             .map(|v| v.trim_matches('"'))
         {
             if !got.is_empty() && got != want {
-                bail!("远端文件已变化（ETag 期望 \"{want}\"，实际 \"{got}\"），不能续传");
+                return Err(FellError::new(
+                    crate::error::ErrorKind::Integrity,
+                    format!("远端文件已变化（ETag 期望 \"{want}\"，实际 \"{got}\"），不能续传"),
+                )
+                .into());
             }
         }
     }
@@ -2052,30 +2071,58 @@ fn check_partial_content(
         .get(CONTENT_RANGE)
         .and_then(|v| v.to_str().ok())
     else {
-        bail!("服务器返回 206 但缺少 Content-Range，无法确认数据区间");
+        return Err(FellError::new(
+            crate::error::ErrorKind::Integrity,
+            "服务器返回 206 但缺少 Content-Range，无法确认数据区间",
+        )
+        .into());
     };
     let Some((start, end, total)) = util::parse_content_range(cr) else {
-        bail!("Content-Range 无法解析: {cr}");
+        return Err(FellError::new(
+            crate::error::ErrorKind::Integrity,
+            format!("Content-Range 无法解析: {cr}"),
+        )
+        .into());
     };
     if end < start {
-        bail!("Content-Range 区间非法（{start}-{end}）");
+        return Err(FellError::new(
+            crate::error::ErrorKind::Integrity,
+            format!("Content-Range 区间非法（{start}-{end}）"),
+        )
+        .into());
     }
     if start != expected_start {
-        bail!("服务器返回的区间起点不符（期望 {expected_start}，实际 {start}）");
+        return Err(FellError::new(
+            crate::error::ErrorKind::Integrity,
+            format!("服务器返回的区间起点不符（期望 {expected_start}，实际 {start}）"),
+        )
+        .into());
     }
     if let Some(want_end) = expected_end {
         if end > want_end {
-            bail!("服务器返回的区间超出请求（请求到 {want_end}，实际到 {end}）");
+            return Err(FellError::new(
+                crate::error::ErrorKind::Integrity,
+                format!("服务器返回的区间超出请求（请求到 {want_end}，实际到 {end}）"),
+            )
+            .into());
         }
     }
     if let (Some(want), Some(got)) = (expected_total, total) {
         if want != got {
-            bail!("服务器声明的总长度不一致（期望 {want}，实际 {got}）");
+            return Err(FellError::new(
+                crate::error::ErrorKind::Integrity,
+                format!("服务器声明的总长度不一致（期望 {want}，实际 {got}）"),
+            )
+            .into());
         }
     }
     if let (Some(e), Some(t)) = (expected_end, total) {
         if t <= e {
-            bail!("Content-Range 总长度 {t} 不足以覆盖请求终点 {e}");
+            return Err(FellError::new(
+                crate::error::ErrorKind::Integrity,
+                format!("Content-Range 总长度 {t} 不足以覆盖请求终点 {e}"),
+            )
+            .into());
         }
     }
     Ok(())
@@ -2139,15 +2186,19 @@ async fn fetch_segment(
         job.basic.as_ref().map(|(u, p)| (u.as_str(), p.as_str())),
     );
     let req = creds.apply(req, url);
-    let resp = req.send().await?;
+    let resp = req.send().await.map_err(FellError::from)?;
     let status = resp.status();
 
     if status == StatusCode::OK {
         // 服务器忽略了 Range（If-Range 校验失败或本身不支持）
-        return Err(anyhow!("服务器不支持分段（返回 200），请减少连接数后重试"));
+        return Err(FellError::new(
+            crate::error::ErrorKind::Unsupported,
+            "服务器不支持分段（返回 200），请减少连接数后重试",
+        )
+        .into());
     }
     if status != StatusCode::PARTIAL_CONTENT {
-        return Err(anyhow!("分片请求失败: HTTP {}", status.as_u16()));
+        return Err(FellError::http(status.as_u16(), format!("分片请求失败: HTTP {}", status.as_u16())).into());
     }
     // 206 必须与请求区间严格对应，否则写入位置会错位
     check_partial_content(&resp, *cursor, Some(job.end), job.total, job.etag.as_deref())?;
@@ -2173,7 +2224,7 @@ async fn fetch_segment(
                         if !job.limiter.acquire_cancellable(part.len() as u64, cancel).await {
                             return Ok(());
                         }
-                        write_at(&job.file, part, *cursor)?;
+                        write_at(&job.file, part, *cursor).map_err(FellError::from)?;
                         *cursor += part.len() as u64;
                         if job.tx.send((job.index, part.len() as u64)).await.is_err() {
                             // 接收端已关闭（取消/收工），正常退出
@@ -2183,9 +2234,15 @@ async fn fetch_segment(
                             return Ok(());
                         }
                     }
-                    Some(Err(e)) => return Err(anyhow!("读取数据失败: {e}")),
+                    Some(Err(e)) => {
+                        return Err(FellError::from(e).context("读取数据失败").into());
+                    }
                     None => {
-                        return Err(anyhow!("连接提前结束（{}/{}）", *cursor, job.end + 1));
+                        return Err(FellError::new(
+                            crate::error::ErrorKind::Network,
+                            format!("连接提前结束（{}/{}）", *cursor, job.end + 1),
+                        )
+                        .into());
                     }
                 }
             }

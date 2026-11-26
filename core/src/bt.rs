@@ -121,6 +121,8 @@ impl Engine {
             downloaded: 0,
             state: TaskState::Downloading,
             error: None,
+            error_code: None,
+            retryable: None,
             connections: 0,
             segments: Vec::new(),
             supports_range: false,
@@ -247,7 +249,7 @@ impl Engine {
                     Err(e) => {
                         // 允许用户点「恢复」时再试一次
                         me2.bt_restore_tried.lock().remove(&t.id);
-                        me2.fail_task(&t.id, format!("{e:#}"));
+                        me2.fail_task(&t.id, &e);
                     }
                 }
             });
@@ -449,6 +451,8 @@ mod restore_tests {
             downloaded: 0,
             state: TaskState::Paused,
             error: None,
+            error_code: None,
+            retryable: None,
             connections: 0,
             segments: Vec::new(),
             supports_range: false,
