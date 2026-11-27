@@ -111,9 +111,18 @@ async fn tasks_endpoint_never_returns_credentials() {
         !resp.contains("super-secret-pass"),
         "password 明文泄露到 API 响应: {resp}"
     );
+    // 凭据已经搬进加密凭据库（`Engine::new` 载入时迁移），任务 JSON 里不再有
+    // cookie/password —— 所以 API 侧只剩「字段为空」，没有可掩码的内容。
+    // 「有凭据 → ***」的掩码逻辑由 `model::Task::redacted` 的单元测试直接覆盖，
+    // 这里继续保证的是「任何形式的明文都不能出现在响应里」。
     assert!(
-        resp.contains("***"),
-        "应保留「有没有凭据」的信息量（脱敏为 ***）: {resp}"
+        resp.contains("\"cookie\":null") && resp.contains("\"password\":null"),
+        "凭据字段应为空而不是明文: {resp}"
+    );
+    // 凭据仍要能追溯到归属：auth_origin 与 username 照常返回
+    assert!(
+        resp.contains("https://example.com") && resp.contains("alice"),
+        "凭据归属信息应保留: {resp}"
     );
     // 非敏感字段仍然照常返回，脱敏不能把接口搞坏
     assert!(resp.contains("private.bin"), "文件名应保留: {resp}");
