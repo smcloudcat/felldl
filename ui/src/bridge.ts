@@ -69,9 +69,9 @@ export const api = {
   openUrl: (url: string) => invoke("open_url", { url }) as Promise<void>,
   appVersion: () => invoke("app_version") as Promise<string>,
 
-  // 安卓存储：是否已获得「所有文件访问」/ 申请授权 / 目录可写性自检
-  allFilesAccess: () => invoke("all_files_access") as Promise<boolean>,
-  requestAllFilesAccess: () => invoke("request_all_files_access") as Promise<void>,
+  // 安卓存储：「所有文件访问」状态 / 申请授权 / 目录可写性自检
+  allFilesAccess: () => invoke("all_files_access") as Promise<AllFilesAccess>,
+  requestAllFilesAccess: () => invoke("request_all_files_access") as Promise<AllFilesAccess>,
   dirWritable: (path: string) => invoke("dir_writable", { path }) as Promise<boolean>,
 
   // 安卓更新：是否允许「安装未知应用」/ 打开对应设置页
@@ -129,6 +129,16 @@ export const api = {
 export function subscribe(cb: (e: EngineEvent) => void): Promise<UnlistenFn> {
   return listen<EngineEvent>("engine://event", (evt) => cb(evt.payload));
 }
+
+/**
+ * 安卓「所有文件访问」三态。
+ *
+ * 这个权限是 Android 11（API 30）才有的，而应用 minSdk 是 24，所以不能用布尔：
+ * - `granted`：已授权；
+ * - `denied`：有这个开关但没开，可以引导用户去系统设置；
+ * - `na`：系统没有这个开关，别显示授权按钮，也别报「缺少权限」——那时唯一的判据是目录能不能写。
+ */
+export type AllFilesAccess = "granted" | "denied" | "na";
 
 export interface UpdateProgress {
   downloaded: number;

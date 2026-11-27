@@ -25,6 +25,8 @@ mod ipc;
 mod android_paths;
 // APK 安装前的元数据校验（纯逻辑，桌面端可测）
 mod apk_update;
+// 「所有文件访问」三态（纯逻辑，桌面端可测）
+mod storage_access;
 // 更新落地 helper（同一 exe 的隐藏子命令，main 里在 Tauri 初始化前分流）
 pub mod update_helper;
 
@@ -299,30 +301,34 @@ async fn open_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
     }
 }
 
-/// 安卓「所有文件访问」状态；其它平台恒为 true
+/// 安卓「所有文件访问」状态：`granted` / `denied` / `na`；其它平台恒为 `granted`
+///
+/// 不返回布尔的原因：这个权限是 API 30 才有的，minSdk 24。`na` 表示系统根本没有这个开关，
+/// 前端据此不显示授权按钮、也不报「缺少权限」，只用目录可写性判断。
 #[tauri::command]
-async fn all_files_access(app: tauri::AppHandle) -> Result<bool, String> {
+async fn all_files_access(app: tauri::AppHandle) -> Result<String, String> {
     #[cfg(target_os = "android")]
     {
-        return android::has_all_files_access(&app);
+        return android::all_files_access(&app).map(|s| s.as_str().to_string());
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
-        Ok(true)
+        Ok(storage_access::AllFiles::Granted.as_str().to_string())
     }
 }
 
+/// 打开「所有文件访问」授权页；API 30 以下无事可做（返回 `na`）
 #[tauri::command]
-async fn request_all_files_access(app: tauri::AppHandle) -> Result<(), String> {
+async fn request_all_files_access(app: tauri::AppHandle) -> Result<String, String> {
     #[cfg(target_os = "android")]
     {
-        return android::request_all_files_access(&app);
+        return android::request_all_files_access(&app).map(|s| s.as_str().to_string());
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
-        Ok(())
+        Ok(storage_access::AllFiles::Granted.as_str().to_string())
     }
 }
 

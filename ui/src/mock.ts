@@ -268,9 +268,9 @@ export const mockEngine = {
       case "app_version":
         return "0.3.8";
       case "all_files_access":
-        return true;
+        return "granted";
       case "request_all_files_access":
-        return null;
+        return "granted";
       case "dir_writable":
         return true;
       case "check_update":

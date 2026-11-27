@@ -199,76 +199,48 @@ pub fn reveal(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
     })
 }
 
-/// 是否已获得「所有文件访问」（Android 11+）
-pub fn has_all_files_access(app: &tauri::AppHandle) -> Result<bool, String> {
-    exec_ret(app, |env, _activity| {
-        let env_cls = env
-            .find_class("android/os/Environment")
-            .map_err(|e| format!("找不到 Environment: {e}"))?;
-        let granted = env
-            .call_static_method(env_cls, "isExternalStorageManager", "()Z", &[])
-            .map_err(|e| format!("查询权限失败: {e}"))?
-            .z()
-            .map_err(|e| format!("读取权限结果失败: {e}"))?;
-        Ok(granted)
-    })
+/// 「所有文件访问」状态：`Granted` / `Denied` / `NotApplicable`
+///
+/// **不能在这里直接调 `Environment.isExternalStorageManager()`**：该方法是 API 30 才有的，
+/// minSdk 是 24。在 API 24~29 上 `call_static_method` 会撞 `NoSuchMethodError`，
+/// 线程上留一个 pending 异常（和之前安装器闪退同一类问题）。版本判断交给 Kotlin 的
+/// `StorageAccess.status`，Rust 只解析三态。
+pub fn all_files_access(app: &tauri::AppHandle) -> Result<crate::storage_access::AllFiles, String> {
+    let raw = exec_ret(app, |env, activity| {
+        helper_string(
+            env,
+            activity,
+            STORAGE_HELPER_CLASS,
+            "status",
+            "(Landroid/content/Context;)Ljava/lang/String;",
+            &[],
+        )
+    })?;
+    crate::storage_access::AllFiles::parse(&raw)
 }
 
-/// 打开本应用的系统设置页，让用户手动授予「所有文件访问」
-pub fn request_all_files_access(app: &tauri::AppHandle) -> Result<(), String> {
+/// 打开「所有文件访问」授权页；API 30 以下返回 `NotApplicable`（没有这个开关）
+pub fn request_all_files_access(
+    app: &tauri::AppHandle,
+) -> Result<crate::storage_access::AllFiles, String> {
     let pkg = app.config().identifier.clone();
-    exec(app, move |env, activity| {
-        let uri_cls = env
-            .find_class("android/net/Uri")
-            .map_err(|e| format!("找不到 Uri: {e}"))?;
-        let s = env
-            .new_string(format!("package:{pkg}"))
-            .map_err(|e| format!("构造 Uri 失败: {e}"))?;
-        let juri = env
-            .call_static_method(
-                uri_cls,
-                "parse",
-                "(Ljava/lang/String;)Landroid/net/Uri;",
-                &[JValue::Object(&s)],
-            )
-            .and_then(|v| v.l())
-            .map_err(|e| format!("解析 Uri 失败: {e}"))?;
-        let intent_cls = env
-            .find_class("android/content/Intent")
-            .map_err(|e| format!("找不到 Intent: {e}"))?;
-        let action = env
-            .new_string("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION")
-            .map_err(|e| format!("构造 action 失败: {e}"))?;
-        let intent = env
-            .new_object(
-                intent_cls,
-                "(Ljava/lang/String;)V",
-                &[JValue::Object(&action)],
-            )
-            .map_err(|e| format!("创建 Intent 失败: {e}"))?;
-        env.call_method(
-            &intent,
-            "setData",
-            "(Landroid/net/Uri;)Landroid/content/Intent;",
-            &[JValue::Object(&juri)],
-        )
-        .map_err(|e| format!("设置数据失败: {e}"))?;
-        env.call_method(
-            &intent,
-            "addFlags",
-            "(I)Landroid/content/Intent;",
-            &[JValue::Int(FLAG_ACTIVITY_NEW_TASK)],
-        )
-        .map_err(|e| format!("设置标志失败: {e}"))?;
-        env.call_method(
+    let raw = exec_ret(app, move |env, activity| {
+        helper_string(
+            env,
             activity,
-            "startActivity",
-            "(Landroid/content/Intent;)V",
-            &[JValue::Object(&intent)],
+            STORAGE_HELPER_CLASS,
+            "openSettings",
+            "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+            &[&pkg],
         )
-        .map_err(|e| format!("启动设置页失败: {e}"))?;
-        check_exception(env, "系统拒绝了设置页请求")
-    })
+    })?;
+    // Kotlin 侧 `OK:` / `OK:na` 都算成功：`OK:na` 表示系统没有该开关，无需授权
+    if raw.trim_start().starts_with("OK:") {
+        return Ok(crate::storage_access::AllFiles::parse(&raw)
+            .unwrap_or(crate::storage_access::AllFiles::Granted));
+    }
+    expect_ok(&raw)?;
+    Ok(crate::storage_access::AllFiles::Granted)
 }
 
 // ───────────────────────── 更新包安装（APK） ─────────────────────────
@@ -279,6 +251,7 @@ pub fn request_all_files_access(app: &tauri::AppHandle) -> Result<(), String> {
 // 解析与「能不能装」的判断在 `crate::apk_update`（纯 Rust，可单测）。
 
 const APK_HELPER_CLASS: &str = "com/felldl/app/ApkInstaller";
+const STORAGE_HELPER_CLASS: &str = "com/felldl/app/StorageAccess";
 
 /// 清掉 JNI 调用留下的 pending 异常。
 ///
@@ -291,7 +264,7 @@ fn clear_pending(env: &mut JNIEnv) {
     }
 }
 
-/// 找到 `ApkInstaller` 类。
+/// 找到应用自己的 Kotlin 辅助类。
 ///
 /// **不能用 `env.find_class`**：在这个 JNI 线程上它走的是启动类加载器，只认识
 /// `java.*` / `android.*`，找不到应用自己的类 —— 真机上实测是 `NoClassDefFoundError`
@@ -300,6 +273,7 @@ fn clear_pending(env: &mut JNIEnv) {
 fn helper_class<'a>(
     env: &mut JNIEnv<'a>,
     activity: &JObject,
+    class: &str,
 ) -> Result<jni::objects::JClass<'a>, String> {
     let loader = match env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[]) {
         Ok(v) => v.l().map_err(|e| format!("读取类加载器失败: {e}"))?,
@@ -308,7 +282,7 @@ fn helper_class<'a>(
             return Err(format!("读取类加载器失败: {e}"));
         }
     };
-    let dotted = APK_HELPER_CLASS.replace('/', ".");
+    let dotted = class.replace('/', ".");
     let jname = env
         .new_string(&dotted)
         .map_err(|e| format!("构造类名失败: {e}"))?;
@@ -318,24 +292,25 @@ fn helper_class<'a>(
         "(Ljava/lang/String;)Ljava/lang/Class;",
         &[JValue::Object(&jname)],
     ) {
-        Ok(v) => v.l().map_err(|e| format!("加载安装辅助类失败: {e}"))?,
+        Ok(v) => v.l().map_err(|e| format!("加载辅助类失败: {e}"))?,
         Err(e) => {
             clear_pending(env);
-            return Err(format!("找不到安装辅助类（APK 未包含 ApkInstaller）: {e}"));
+            return Err(format!("找不到辅助类 {dotted}（APK 未包含该 Kotlin 文件）: {e}"));
         }
     };
     Ok(jni::objects::JClass::from(cls))
 }
 
-/// 调 `ApkInstaller` 的静态方法：第一个参数固定是 Activity，其余为字符串
+/// 调 Kotlin 辅助对象的静态方法：第一个参数固定是 Activity/Context，其余为字符串
 fn helper_string(
     env: &mut JNIEnv,
     activity: &JObject,
+    class: &str,
     method: &str,
     sig: &str,
     args: &[&str],
 ) -> Result<String, String> {
-    let cls = helper_class(env, activity)?;
+    let cls = helper_class(env, activity, class)?;
     let jargs: Vec<jni::objects::JString> = args
         .iter()
         .map(|a| env.new_string(a))
@@ -383,6 +358,7 @@ pub fn installed_apk_info(app: &tauri::AppHandle, package: &str) -> Result<Insta
         helper_string(
             env,
             activity,
+            APK_HELPER_CLASS,
             "installedInfo",
             "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
             &[&pkg],
@@ -398,6 +374,7 @@ pub fn apk_info(app: &tauri::AppHandle, path: &str) -> Result<ApkInfo, String> {
         helper_string(
             env,
             activity,
+            APK_HELPER_CLASS,
             "apkInfo",
             "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
             &[&p],
@@ -409,7 +386,7 @@ pub fn apk_info(app: &tauri::AppHandle, path: &str) -> Result<ApkInfo, String> {
 /// 是否已允许「安装未知应用」（API 26+；更低版本恒为 true）
 pub fn can_install_packages(app: &tauri::AppHandle) -> Result<bool, String> {
     exec_ret(app, |env, activity| {
-        let cls = helper_class(env, activity)?;
+        let cls = helper_class(env, activity, APK_HELPER_CLASS)?;
         let out = env
             .call_static_method(
                 cls,
@@ -429,6 +406,7 @@ pub fn open_install_settings(app: &tauri::AppHandle, package: &str) -> Result<()
         helper_string(
             env,
             activity,
+            APK_HELPER_CLASS,
             "openInstallSettings",
             "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
             &[&pkg],
@@ -448,6 +426,7 @@ pub fn install_apk(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
         helper_string(
             env,
             activity,
+            APK_HELPER_CLASS,
             "install",
             "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
             &[&uri, mime],

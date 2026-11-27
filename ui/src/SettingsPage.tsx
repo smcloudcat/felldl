@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Settings, UpdateInfo } from "./types";
-import { api, subscribeUpdateProgress } from "./bridge";
+import { api, subscribeUpdateProgress, type AllFilesAccess } from "./bridge";
 import { toIpcError, type IpcError } from "./ipcError";
 import { useI18n, setLang } from "./i18n";
 import {
@@ -115,8 +115,9 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   // 真机验证安装链路用的入口：由后端能力探测决定，debug 安卓构建才出现。
   // release 包里 `debug_capabilities` 恒为 false，命令本身也只返回 install.unsupported。
   const [debugStaged, setDebugStaged] = useState(false);
-  // 安卓存储：是否已获得「所有文件访问」、当前目录是否可写
-  const [storageOk, setStorageOk] = useState<boolean | null>(null);
+  // 安卓存储：「所有文件访问」三态（granted/denied/na）与当前目录是否可写。
+  // 不存布尔是因为 API 30 以下根本没有这个开关，得把「不适用」和「被拒」分开。
+  const [storage, setStorage] = useState<AllFilesAccess | null>(null);
   const [dirOk, setDirOk] = useState<boolean | null>(null);
   const isAndroid = document.documentElement.dataset.platform === "android";
 
@@ -342,8 +343,31 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
 
   useEffect(() => {
     if (!isAndroid) return;
-    api.allFilesAccess().then(setStorageOk).catch(() => setStorageOk(null));
+    api.allFilesAccess().then(setStorage).catch(() => setStorage(null));
   }, [isAndroid]);
+
+  /**
+   * 从系统设置页回来后重新读一次真实状态。
+   *
+   * 原来这里是 `setTimeout(…, 1500)` 猜用户什么时候回来：猜早了读到旧值，
+   * 猜晚了用户已经看着「未授权」干等。改成监听页面可见性与窗口焦点——
+   * 安卓把设置页盖在上面时 WebView 会 hidden、回来时 visible，事件时机就是
+   * 「用户真的回来了」，不需要任何时长假设。
+   */
+  useEffect(() => {
+    if (!isAndroid) return;
+    const refresh = () => {
+      if (document.visibilityState !== "visible") return;
+      api.allFilesAccess().then(setStorage).catch(() => {});
+      api.dirWritable(draft.download_dir).then(setDirOk).catch(() => {});
+    };
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [isAndroid, draft.download_dir]);
 
   useEffect(() => {
     let alive = true;
@@ -402,12 +426,9 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
 
   async function grantStorage() {
     try {
-      await api.requestAllFilesAccess();
-      toast(t("set.storageSettingsHint"));
-      // 用户回来后重新查一次
-      setTimeout(() => {
-        api.allFilesAccess().then(setStorageOk).catch(() => {});
-      }, 1500);
+      const next = await api.requestAllFilesAccess();
+      // `na`：系统没有「所有文件访问」这个开关（API 30 以下），别让用户去设置里瞎找
+      toast(next === "na" ? t("set.storageNaHint") : t("set.storageSettingsHint"));
     } catch (e: any) {
       toast(typeof e === "string" ? e : String(e?.message ?? e), "error");
     }
@@ -512,7 +533,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
                   {t("dlg.browse")}
                 </button>
               )}
-              {isAndroid && storageOk !== true && (
+              {isAndroid && storage === "denied" && (
                 <button className="btn btn-soft" onClick={grantStorage} type="button">
                   {t("set.grantStorage")}
                 </button>
@@ -533,15 +554,15 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
                     </button>
                   ))}
                 </div>
-                {(storageOk === false || dirOk === false) && (
+                {(storage === "denied" || dirOk === false) && (
                   <div className="field-hint warn">
                     ⚠{" "}
-                    {storageOk === false
+                    {storage === "denied"
                       ? t("set.needStorage")
                       : t("set.dirNotWritable")}
                   </div>
                 )}
-                {storageOk === true && dirOk === true && (
+                {storage !== "denied" && dirOk === true && (
                   <div className="field-hint ok">✓ {t("set.storageOk")}</div>
                 )}
               </>
