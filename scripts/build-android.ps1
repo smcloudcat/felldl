@@ -182,6 +182,39 @@ try {
 } finally { $ErrorActionPreference = $prevEap }
 if ($rustExit -ne 0) { Write-Host "[!] Rust 编译失败" -ForegroundColor Red; exit 1 }
 
+# ── 5.5 剥离调试信息（仅 debug 包）────────────────────────
+# 不裁剪时 arm64 的 .so 有 400MB 左右，整包 800MB+：每次 adb install 都要传近 1GB，
+# 真机迭代会慢到无法接受。这里用 NDK 自带的 llvm-strip 只删 .debug_* 段，
+# 保留符号表（native 崩溃栈仍能显示函数名），体积通常降到 1/10 以下。
+# release 已在 Cargo profile 里 strip = true，不重复处理。
+if (-not $Release) {
+    $stripExe = Get-ChildItem (Join-Path $ndkPath "toolchains\llvm\prebuilt") -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName "bin\llvm-strip.exe" } |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Select-Object -First 1
+    $soPath = Join-Path $jniDir "$($cfg.RustTarget)\libfelldl_lib.so"
+    if (-not $stripExe) {
+        Write-Host "[!] 未找到 llvm-strip，跳过调试信息剥离（APK 会很大）" -ForegroundColor Yellow
+    } elseif (-not (Test-Path -LiteralPath $soPath)) {
+        Write-Host "[!] 未找到 $soPath，跳过调试信息剥离" -ForegroundColor Yellow
+    } else {
+        $sizeBefore = (Get-Item -LiteralPath $soPath).Length
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & $stripExe --strip-debug $soPath
+            $stripExit = $LASTEXITCODE
+        } finally { $ErrorActionPreference = $prevEap }
+        $sizeAfter = (Get-Item -LiteralPath $soPath).Length
+        if ($stripExit -ne 0) {
+            Write-Host "[!] llvm-strip 失败（退出码 $stripExit），继续用未剥离的库打包" -ForegroundColor Yellow
+        } else {
+            Write-Host ("[OK] 剥离调试信息: {0} MB -> {1} MB" -f `
+                [math]::Round($sizeBefore/1MB, 1), [math]::Round($sizeAfter/1MB, 1)) -ForegroundColor Green
+        }
+    }
+}
+
 # CARGO_HOME 切换后，旧 Cargo build 输出可能仍引用旧 registry。
 # 先检查官方生成文件，避免表面使用新缓存，Gradle 实际仍编译旧盘源码。
 $settingsFile = Join-Path $androidProject "tauri.settings.gradle"
@@ -240,6 +273,19 @@ if ($Release) {
 $gradleTask = "assemble$($cfg.GradleFlavor)$(if ($Release) { 'Release' } else { 'Debug' })"
 $skipTask = "rustBuild$($cfg.GradleFlavor)$(if ($Release) { 'Release' } else { 'Debug' })"
 Write-Host "[..] Gradle 打包：$gradleTask ..." -ForegroundColor Yellow
+
+# 先删掉上一次的 APK：AGP 增量打包会复用旧包的布局，当 libfelldl_lib.so 变小
+# （例如本次给 debug 包剥了调试信息，388MB → 89MB）时，缩掉的字节会留成文件里的空洞。
+# 实测：内容只有 93MB 的包，文件本身 413MB，adb install 白传 320MB。
+# 删掉后打包任务重写整个 zip，包体积才和内容一致。
+$apkOutDir = Join-Path "src-tauri\gen\android\app\build\outputs\apk" (Join-Path $cfg.GradleFlavor.ToLower() $profileLabel)
+if (Test-Path -LiteralPath $apkOutDir) {
+    Get-ChildItem -LiteralPath $apkOutDir -Filter "*.apk" -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            Write-Host ("[..] 清除旧产物 {0} ({1} MB)" -f $_.Name, [math]::Round($_.Length/1MB, 1)) -ForegroundColor DarkGray
+            Remove-Item -LiteralPath $_.FullName -Force
+        }
+}
 
 Push-Location "src-tauri\gen\android"
 $prevEap = $ErrorActionPreference
