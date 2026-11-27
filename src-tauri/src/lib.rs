@@ -2062,6 +2062,15 @@ async fn cancel_grab(state: State<'_, AppState>, job_id: String) -> Result<bool,
     Ok(state.engine.cancel_grab(&job_id))
 }
 
+/// 当前还在跑的整站抓取任务。
+///
+/// 抓取在引擎侧后台执行，UI 可能中途离开再回来：事件只推增量、不补发，
+/// 所以重新进入抓取页时必须能主动查一次「现在有什么在跑」。
+#[tauri::command]
+async fn grab_jobs(state: State<'_, AppState>) -> Result<Vec<felldl_core::GrabStatus>, String> {
+    Ok(state.engine.grab_status())
+}
+
 #[tauri::command]
 async fn download_hls(
     state: State<'_, AppState>,
@@ -2265,6 +2274,7 @@ pub fn run() {
             analyze_url,
             grab_site,
             cancel_grab,
+            grab_jobs,
             download_hls,
             list_interfaces,
         ])

@@ -1,17 +1,20 @@
 /**
  * 网页抓取页：资源嗅探 / 整站抓取 / HLS 下载
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { GrabResource, Settings } from "./types";
 import { api } from "./bridge";
 import { cx } from "./format";
 import { useI18n } from "./i18n";
+import { useGrabJobs } from "./useGrabJobs";
+import { grabStore } from "./grabStore";
 import {
   IconBolt,
   IconCheck,
   IconFolder,
   IconGlobe,
   IconLink,
+  IconX,
 } from "./icons";
 
 interface Props {
@@ -52,10 +55,21 @@ export function GrabPage({ settings, toast }: Props) {
   const [depth, setDepth] = useState(1);
   const [maxPages, setMaxPages] = useState(30);
   const [includeAssets, setIncludeAssets] = useState(true);
-  const [grabbing, setGrabbing] = useState(false);
+  // 只表示「这次 IPC 请求还没回来」；任务真正跑多久由引擎侧的 job 列表反映
+  const [starting, setStarting] = useState(false);
+  // 抓取任务在引擎里跑，页面切走再回来靠 store 恢复（事件不补发）
+  const jobs = useGrabJobs();
+
+  // 进入页面时对齐一次：错过的事件（例如任务在别的页面时结束）不会补发
+  useEffect(() => {
+    api
+      .grabJobs()
+      .then((list) => grabStore.setAll(list))
+      .catch(() => {});
+  }, []);
 
   const media = (result?.resources ?? []).filter(
-    (r) => r.kind === "video" || r.kind === "audio" || r.kind === "hls"
+    (r) => r.kind === "video" || r.kind === "audio" || r.kind === "hls",
   );
 
   async function analyze() {
@@ -74,10 +88,15 @@ export function GrabPage({ settings, toast }: Props) {
         setErr(t("grab.analyzeFail"));
         return;
       }
-      setResult({ url: a.url, title: a.title, resources: a.resources ?? [], links: a.links ?? [] });
+      setResult({
+        url: a.url,
+        title: a.title,
+        resources: a.resources ?? [],
+        links: a.links ?? [],
+      });
       setTab("resources");
     } catch (e: any) {
-      setErr(typeof e === "string" ? e : e?.message ?? t("grab.analyzeFail"));
+      setErr(typeof e === "string" ? e : (e?.message ?? t("grab.analyzeFail")));
     } finally {
       setAnalyzing(false);
     }
@@ -114,44 +133,115 @@ export function GrabPage({ settings, toast }: Props) {
 
   async function downloadHls(r: GrabResource) {
     try {
-      await api.downloadHls(r.url, settings.download_dir, r.name.replace(/\.m3u8$/, ".ts"));
+      await api.downloadHls(
+        r.url,
+        settings.download_dir,
+        r.name.replace(/\.m3u8$/, ".ts"),
+      );
       toast(t("grab.hlsQueued"));
     } catch (e: any) {
       toast(typeof e === "string" ? e : t("grab.grabFail"), "error");
     }
   }
 
-  async function grabSite() {
-    const u = url.trim();
+  async function startGrab(opts?: { url?: string; maxPages?: number }) {
+    const u = (opts?.url ?? url).trim();
     if (!u.startsWith("http://") && !u.startsWith("https://")) {
       setErr(t("dlg.errEmpty"));
       return;
     }
-    setGrabbing(true);
+    setStarting(true);
     try {
       await api.grabSite({
         url: u,
         save_dir: settings.download_dir,
-        max_depth: depth,
-        max_pages: maxPages,
+        max_depth: opts?.maxPages === 1 ? 1 : depth,
+        max_pages: opts?.maxPages ?? maxPages,
         include_assets: includeAssets,
       });
       toast(t("grab.grabbing"));
     } catch (e: any) {
       toast(typeof e === "string" ? e : t("grab.grabFail"), "error");
     } finally {
-      setGrabbing(false);
+      setStarting(false);
+    }
+  }
+
+  async function cancelJob(id: string) {
+    try {
+      const ok = await api.cancelGrab(id);
+      // 引擎会随后推一条 finished；本地先移除，取消按钮不必等一个来回才有反馈
+      if (ok) grabStore.drop(id);
+      toast(
+        ok ? t("grab.cancelled") : t("grab.cancelFail"),
+        ok ? "ok" : "error",
+      );
+    } catch (e: any) {
+      toast(typeof e === "string" ? e : t("grab.cancelFail"), "error");
     }
   }
 
   const tabList: { key: Tab; label: string; count: number }[] = [
-    { key: "resources", label: t("grab.tab.resources"), count: result?.resources.length ?? 0 },
+    {
+      key: "resources",
+      label: t("grab.tab.resources"),
+      count: result?.resources.length ?? 0,
+    },
     { key: "media", label: t("grab.tab.media"), count: media.length },
-    { key: "links", label: t("grab.tab.links"), count: result?.links.length ?? 0 },
+    {
+      key: "links",
+      label: t("grab.tab.links"),
+      count: result?.links.length ?? 0,
+    },
   ];
 
   return (
     <div className="grab-page">
+      {/* 正在进行的整站抓取：任务在引擎侧后台跑，离开页面也不会停 */}
+      {jobs.length > 0 && (
+        <div className="card grab-jobs">
+          <div className="card-head">
+            <div className="card-icon">
+              <IconGlobe />
+            </div>
+            <div style={{ minWidth: 0 }}>
+              <div className="card-title">{t("grab.jobs")}</div>
+              <div className="card-sub">{t("grab.jobsHint")}</div>
+            </div>
+          </div>
+          {jobs.map((j) => {
+            const pct = j.total > 0 ? Math.min(1, j.done / j.total) : 0;
+            return (
+              <div key={j.id} className="grab-job-row">
+                <div className="grab-job-main">
+                  <div className="grab-job-url" title={j.url}>
+                    {j.url}
+                  </div>
+                  <div className="grab-job-bar">
+                    <div
+                      className="grab-job-fill"
+                      style={{ transform: `scaleX(${pct})` }}
+                    />
+                  </div>
+                </div>
+                <div className="grab-job-count">
+                  {t("grab.jobProgress", { done: j.done, total: j.total })}
+                </div>
+                <button
+                  className="btn btn-soft btn-sm"
+                  type="button"
+                  onClick={() => cancelJob(j.id)}
+                  title={t("grab.cancelJob")}
+                >
+                  <IconX size={13} />
+                  {t("grab.cancelJob")}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* 输入区 */}
       <div className="card">
         <div className="card-head">
@@ -193,10 +283,21 @@ export function GrabPage({ settings, toast }: Props) {
           </div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            gap: 12,
+            marginTop: 12,
+          }}
+        >
           <div className="field" style={{ margin: 0 }}>
             <label className="field-label">{t("grab.depth")}</label>
-            <select className="select" value={depth} onChange={(e) => setDepth(Number(e.target.value))}>
+            <select
+              className="select"
+              value={depth}
+              onChange={(e) => setDepth(Number(e.target.value))}
+            >
               {[1, 2, 3, 4, 5].map((n) => (
                 <option key={n} value={n}>
                   {t("grab.depthN", { n })}
@@ -241,27 +342,21 @@ export function GrabPage({ settings, toast }: Props) {
         </label>
         <div className="field-hint">{t("grab.selectHint")}</div>
 
-        <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
-          <button className="btn btn-primary" onClick={grabSite} disabled={grabbing || !url.trim()}>
+        <div
+          style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}
+        >
+          <button
+            className="btn btn-primary"
+            onClick={() => startGrab()}
+            disabled={starting || !url.trim()}
+          >
             {t("grab.grabSite")}
           </button>
           {result && (
             <button
               className="btn btn-soft"
-              onClick={async () => {
-                try {
-                  await api.grabSite({
-                    url: result.url,
-                    save_dir: settings.download_dir,
-                    max_depth: 1,
-                    max_pages: 1,
-                    include_assets: includeAssets,
-                  });
-                  toast(t("grab.grabbing"));
-                } catch (e: any) {
-                  toast(typeof e === "string" ? e : t("grab.grabFail"), "error");
-                }
-              }}
+              onClick={() => startGrab({ url: result.url, maxPages: 1 })}
+              disabled={starting}
             >
               {t("grab.grabSel")}
             </button>
@@ -296,7 +391,12 @@ export function GrabPage({ settings, toast }: Props) {
               <div className="card-title" style={{ wordBreak: "break-all" }}>
                 {t("grab.analysisOf", { title: result.title || result.url })}
               </div>
-              <div className="card-sub">{t("grab.found", { n: result.resources.length, m: result.links.length })}</div>
+              <div className="card-sub">
+                {t("grab.found", {
+                  n: result.resources.length,
+                  m: result.links.length,
+                })}
+              </div>
             </div>
           </div>
 
@@ -320,7 +420,10 @@ export function GrabPage({ settings, toast }: Props) {
               ) : (
                 <>
                   <div className="grab-actions">
-                    <button className="btn btn-primary btn-sm" onClick={downloadSelected}>
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={downloadSelected}
+                    >
                       <IconCheck size={13} />
                       {t("grab.downloadSel", { n: selected.size })}
                     </button>
@@ -340,13 +443,18 @@ export function GrabPage({ settings, toast }: Props) {
                 <div className="grab-list">
                   {media.map((r) => (
                     <div key={r.url} className="grab-row">
-                      <div className="grab-kind">{KIND_LABEL[r.kind] ?? r.kind}</div>
+                      <div className="grab-kind">
+                        {KIND_LABEL[r.kind] ?? r.kind}
+                      </div>
                       <div className="grab-name" title={r.url}>
                         {r.name}
                       </div>
                       <div className="grab-ops">
                         {r.kind === "hls" ? (
-                          <button className="btn btn-primary btn-sm" onClick={() => downloadHls(r)}>
+                          <button
+                            className="btn btn-primary btn-sm"
+                            onClick={() => downloadHls(r)}
+                          >
                             {t("grab.dlHls")}
                           </button>
                         ) : (
@@ -390,7 +498,11 @@ export function GrabPage({ settings, toast }: Props) {
                       title={l}
                     >
                       <IconLink size={13} />
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{l}</span>
+                      <span
+                        style={{ overflow: "hidden", textOverflow: "ellipsis" }}
+                      >
+                        {l}
+                      </span>
                     </button>
                   ))}
                 </div>

@@ -608,9 +608,25 @@ fn default_true_g() -> bool {
 
 /// 整站抓取任务句柄（支持取消）
 pub struct GrabJob {
+    pub id: String,
     pub cancel: CancellationToken,
     pub pages_done: Arc<AtomicU64>,
     pub total_pages: u32,
+    /// 入口 URL：重新进入抓取页时靠它把「正在抓什么」显示出来
+    pub url: String,
+}
+
+impl GrabStatus {
+    /// 由任务句柄生成一条进度快照（`finished` 只影响 UI 是否移除这一行）
+    fn from_job(job: &GrabJob, finished: bool) -> Self {
+        Self {
+            id: job.id.clone(),
+            url: job.url.clone(),
+            done: job.pages_done.load(Ordering::Relaxed),
+            total: job.total_pages,
+            finished,
+        }
+    }
 }
 
 /// URL → 本地相对路径（保目录结构；/ 结尾补 index.html）
@@ -634,18 +650,25 @@ impl Engine {
         let cancel = CancellationToken::new();
         let pages_done = Arc::new(AtomicU64::new(0));
         let job = Arc::new(GrabJob {
+            id: id.clone(),
             cancel: cancel.clone(),
             pages_done: pages_done.clone(),
             total_pages: req.max_pages,
+            url: req.url.clone(),
         });
-        self.grab_jobs.lock().insert(id.clone(), job);
+        self.grab_jobs.lock().insert(id.clone(), job.clone());
+        // 先发一条 done=0：UI 可能是在任务启动之后才打开的，靠它把进度条画出来
+        self.emit(EngineEvent::GrabStatus(GrabStatus::from_job(&job, false)));
 
         let me = self.clone();
         let me2 = me.clone();
         let job_id = id.clone();
+        let job2 = job.clone();
         tokio::spawn(async move {
-            let res = me2.clone().grab_site_run(&req, cancel, pages_done).await;
+            let res = me2.clone().grab_site_run(&req, job2.clone()).await;
             me2.grab_jobs.lock().remove(&job_id);
+            // 收尾事件必须在移除之后发：UI 收到 finished=true 就知道可以清掉这一行
+            me2.emit(EngineEvent::GrabStatus(GrabStatus::from_job(&job2, true)));
             match res {
                 Ok(n) => me.emit(EngineEvent::Notice(format!("整站抓取完成：{n} 个页面"))),
                 Err(e) => {
@@ -656,6 +679,15 @@ impl Engine {
             }
         });
         Ok(id)
+    }
+
+    /// 当前还在跑的抓取任务（按启动顺序无关，UI 只用来恢复显示）
+    pub fn grab_status(&self) -> Vec<GrabStatus> {
+        self.grab_jobs
+            .lock()
+            .iter()
+            .map(|(_, job)| GrabStatus::from_job(job, false))
+            .collect()
     }
 
     pub fn cancel_grab(&self, id: &str) -> bool {
@@ -671,9 +703,10 @@ impl Engine {
     async fn grab_site_run(
         self: Arc<Self>,
         req: &GrabSiteRequest,
-        cancel: CancellationToken,
-        pages_done: Arc<AtomicU64>,
+        job: Arc<GrabJob>,
     ) -> Result<usize> {
+        let cancel = job.cancel.clone();
+        let pages_done = job.pages_done.clone();
         let client = self.client(None)?;
         let _base = reqwest::Url::parse(&req.url)?;
         let mut queue = VecDeque::new();
@@ -786,6 +819,8 @@ impl Engine {
                 .with_context(|| format!("写入 {}", html_path.display()))?;
             saved += 1;
             pages_done.store(saved as u64, Ordering::Relaxed);
+            // 每存下一页推一次进度：抓取是分钟级任务，只在结束时报数等于没有反馈
+            self.emit(EngineEvent::GrabStatus(GrabStatus::from_job(&job, false)));
 
             // 同域页面递归
             if depth + 1 < req.max_depth {

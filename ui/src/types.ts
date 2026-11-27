@@ -147,6 +147,20 @@ export interface PageAnalysis {
   links: string[];
 }
 
+/**
+ * 整站抓取任务的状态（引擎侧后台任务）。
+ *
+ * `done / total` 是「已存页面 / 页面上限」，不是字节进度；`finished` 为真表示
+ * 这条是收尾推送（成功、取消或失败），UI 应从活动列表里移除。
+ */
+export interface GrabStatus {
+  id: string;
+  url: string;
+  done: number;
+  total: number;
+  finished: boolean;
+}
+
 export type FilterKey =
   | "all"
   | "downloading"

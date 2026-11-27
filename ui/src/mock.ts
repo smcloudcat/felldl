@@ -215,6 +215,16 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export const __devTasks = tasks;
 
+/** 假抓取任务：让浏览器预览也能看到「进度 + 取消」，不必起真引擎 */
+const grabJobs = new Map<string, { id: string; url: string; done: number; total: number; timer: any }>();
+
+function emitGrab(job: { id: string; url: string; done: number; total: number }, finished: boolean) {
+  emitEvent("engine://event", {
+    type: "grabStatus",
+    payload: { id: job.id, url: job.url, done: job.done, total: job.total, finished },
+  });
+}
+
 export const mockEngine = {
   async invoke(cmd: string, args?: any): Promise<any> {
     await sleep(60);
@@ -434,6 +444,58 @@ export const mockEngine = {
         return ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"];
       case "open_file":
       case "show_in_folder":
+      case "analyze_url": {
+        const url: string = args?.url ?? "https://example.com/";
+        const host = url.replace(/^https?:\/\//, "").split("/")[0] || "example.com";
+        return {
+          url,
+          title: `示例页面 · ${host}`,
+          resources: [
+            { url: `${url.replace(/\/$/, "")}/media/movie.mp4`, kind: "video", name: "movie.mp4" },
+            { url: `${url.replace(/\/$/, "")}/media/poster.jpg`, kind: "image", name: "poster.jpg" },
+            { url: `${url.replace(/\/$/, "")}/media/stream.m3u8`, kind: "hls", name: "stream.m3u8" },
+          ],
+          links: [`${url.replace(/\/$/, "")}/about.html`, `${url.replace(/\/$/, "")}/docs/index.html`],
+        };
+      }
+      case "grab_site": {
+        const id = `grab-${++counter}`;
+        const url: string = args?.url ?? "https://example.com/";
+        const total: number = Math.max(1, Math.min(Number(args?.max_pages) || 10, 8));
+        const job = { id, url, done: 0, total, timer: 0 as any };
+        grabJobs.set(id, job);
+        emitGrab(job, false);
+        // 每 700ms 存一页：慢到足以在界面上看到进度条，也不至于让验收脚本等太久
+        job.timer = setInterval(() => {
+          job.done += 1;
+          if (job.done >= job.total) {
+            clearInterval(job.timer);
+            grabJobs.delete(id);
+            emitGrab(job, true);
+          } else {
+            emitGrab(job, false);
+          }
+        }, 700);
+        return id;
+      }
+      case "grab_jobs":
+        return [...grabJobs.values()].map(({ id, url, done, total }) => ({
+          id,
+          url,
+          done,
+          total,
+          finished: false,
+        }));
+      case "cancel_grab": {
+        const job = grabJobs.get(args?.jobId);
+        if (!job) return false;
+        clearInterval(job.timer);
+        grabJobs.delete(job.id);
+        emitGrab(job, true);
+        return true;
+      }
+      case "download_hls":
+        return `mock-hls-${++counter}`;
       case "set_task_speed_limit":
         return null;
       default:

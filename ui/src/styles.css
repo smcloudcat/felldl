@@ -1790,6 +1790,50 @@ textarea {
   max-width: 860px;
 }
 
+/* 正在进行的整站抓取：一行一个任务，进度条 + 取消 */
+.grab-jobs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.grab-job-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.grab-job-main {
+  flex: 1;
+  min-width: 0;
+}
+.grab-job-url {
+  font-size: 12.6px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.grab-job-bar {
+  height: 6px;
+  margin-top: 6px;
+  border-radius: var(--r-full);
+  background: var(--track);
+  overflow: hidden;
+}
+/* 用 transform 推进：每 700ms 一次的进度更新不触发重排 */
+.grab-job-fill {
+  height: 100%;
+  width: 100%;
+  transform-origin: left center;
+  background: var(--brand-grad);
+  transition: transform 0.32s var(--ease);
+}
+.grab-job-count {
+  font-size: 11.8px;
+  color: var(--text-mute);
+  white-space: nowrap;
+}
+
 .grab-actions {
   display: flex;
   gap: 8px;

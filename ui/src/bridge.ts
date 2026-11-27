@@ -8,6 +8,7 @@
 import type {
   AddTaskRequest,
   BatchReport,
+  GrabStatus,
   Settings,
   Task,
   TaskPage,
@@ -19,7 +20,13 @@ import type {
 type UnlistenFn = () => void;
 
 interface EngineEvent {
-  type: "taskUpdated" | "taskProgress" | "taskRemoved" | "settingsUpdated" | "notice";
+  type:
+    | "taskUpdated"
+    | "taskProgress"
+    | "taskRemoved"
+    | "settingsUpdated"
+    | "grabStatus"
+    | "notice";
   payload: any;
 }
 
@@ -132,6 +139,8 @@ export const api = {
     include_assets: boolean;
   }) => invoke("grab_site", opts) as Promise<string>,
   cancelGrab: (jobId: string) => invoke("cancel_grab", { jobId }) as Promise<boolean>,
+  /** 当前还在跑的抓取任务：重新进入抓取页时用它恢复显示（事件不补发） */
+  grabJobs: () => invoke("grab_jobs") as Promise<GrabStatus[]>,
   downloadHls: (url: string, saveDir?: string, fileName?: string) =>
     invoke("download_hls", {
       url,

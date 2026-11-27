@@ -690,8 +690,27 @@ pub enum EngineEvent {
     TaskRemoved(TaskId),
     SettingsUpdated(Settings),
     Notice(String),
+    /// 整站抓取进度（开始 / 每页 / 收尾）。`finished = true` 表示这条之后
+    /// 任务已从引擎的活动表里移除，UI 应从「正在抓取」列表里删掉它。
+    GrabStatus(GrabStatus),
     /// 系统动作请求（如 "shutdown" / "sleep"），由宿主层执行
     SystemAction(String),
+}
+
+/// 整站抓取任务的状态快照。
+///
+/// 抓取是引擎侧的后台任务：切到别的页面、甚至关掉抓取页，任务仍在跑。
+/// UI 靠「事件 + 一次性查询」两件事恢复视图：事件推增量，重新进入页面时
+/// 用 `grab_jobs` 把当前活动任务拉一遍（错过的事件不会补发）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrabStatus {
+    pub id: String,
+    pub url: String,
+    /// 已完成的页面数
+    pub done: u64,
+    /// 计划抓取的页面上限（不是最终数量：实际可能更少）
+    pub total: u32,
+    pub finished: bool,
 }
 
 /// 列表分页的一页任务。

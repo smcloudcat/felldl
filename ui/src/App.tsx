@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   BatchReport,
   FilterKey,
+  GrabStatus,
   Settings,
   Task,
   TaskStats,
@@ -19,6 +20,8 @@ import { cx, formatSpeed } from "./format";
 import { applyAppearance } from "./appearance";
 import { useI18n } from "./i18n";
 import { updateJob, useUpdateJob, wireUpdateJob } from "./useUpdateJob";
+import { grabStore } from "./grabStore";
+import { useGrabJobs } from "./useGrabJobs";
 import {
   filterEligible,
   keepFailed,
@@ -134,6 +137,8 @@ export default function App() {
   // 更新状态是全局 job：这里和设置页看的是同一份，切页面不重置
   const job = useUpdateJob();
   const updateInfo = job.info;
+  // 抓取任务在引擎侧后台跑：这里只订阅「有哪些在跑」，用于非抓取页的角标
+  const grabJobs = useGrabJobs();
   const toastId = useRef(0);
   // 取快照（list_tasks）期间收到的事件：用来判断「谁是更新的那一份」，
   // 避免旧快照把已经推进到新状态的任务盖回去（见 taskMerge.ts）
@@ -241,6 +246,11 @@ export default function App() {
   useEffect(() => {
     if (!settings) return;
     wireUpdateJob();
+    // 启动时对齐一次抓取任务：UI 还没订阅到的事件不会补发
+    api
+      .grabJobs()
+      .then((list) => grabStore.setAll(list))
+      .catch(() => {});
     // job 里已有结果（例如刚在设置页检查过）就不再重复请求；
     // 后端本身也有 10 分钟缓存与 ETag
     if (updateJob.getState().info) return;
@@ -309,6 +319,9 @@ export default function App() {
           break;
         case "settingsUpdated":
           setSettings(e.payload);
+          break;
+        case "grabStatus":
+          grabStore.apply(e.payload as GrabStatus);
           break;
         case "notice":
           toast(String(e.payload));
@@ -832,6 +845,20 @@ export default function App() {
                   : `${Math.round(job.percent)}%`}
               </button>
             )}
+            {/* 抓取在后台跑时，切到别的页面也能看到进度并一键回到抓取页 */}
+            {grabJobs.length > 0 && view !== "grab" && (
+              <button
+                className="btn btn-soft btn-sm"
+                onClick={() => setView("grab")}
+                title={t("grab.jobsHint")}
+              >
+                <IconGlobe size={13} />
+                {t("grab.jobBadge", {
+                  done: grabJobs.reduce((n, j) => n + j.done, 0),
+                  total: grabJobs.reduce((n, j) => n + j.total, 0),
+                })}
+              </button>
+            )}
             {view === "downloads" && selectMode && (
               <>
                 <button
@@ -979,34 +1006,46 @@ export default function App() {
               onChange={setSettings}
               toast={toast}
             />
-          ) : view === "grab" ? (
-            <GrabPage settings={settings} toast={toast} />
-          ) : visible.length === 0 ? (
-            <EmptyState filter={filter} onNew={() => setShowNew(true)} t={t} />
           ) : (
-            // 上下占位用 padding 而不是空 div：`.task-list` 是 flex + gap 布局，
-            // 空 div 会被额外加上一行 gap，占位高度就不准了。
-            <div
-              className="task-list"
-              ref={listRef}
-              style={{ paddingTop: padTop, paddingBottom: padBottom }}
-            >
-              {shownTasks.map((id) => (
-                <TaskCard
-                  key={id}
-                  taskId={id}
-                  meta={settings.task_meta}
-                  onPause={handlePause}
-                  onResume={handleResume}
-                  onRemove={handleRemove}
-                  onOpen={handleOpen}
-                  onReveal={handleReveal}
-                  selectable={selectMode}
-                  selected={selected.has(id)}
-                  onToggle={toggleOne}
-                />
-              ))}
-            </div>
+            <>
+              {/* 抓取页保持挂载、只切显隐：输入草稿、分析结果、勾选与滚动位置
+                  切走再回来都还在（卸载重建会把它们全部丢掉） */}
+              <div style={{ display: view === "grab" ? undefined : "none" }}>
+                <GrabPage settings={settings} toast={toast} />
+              </div>
+              {view === "downloads" &&
+                (visible.length === 0 ? (
+                  <EmptyState
+                    filter={filter}
+                    onNew={() => setShowNew(true)}
+                    t={t}
+                  />
+                ) : (
+                  // 上下占位用 padding 而不是空 div：`.task-list` 是 flex + gap 布局，
+                  // 空 div 会被额外加上一行 gap，占位高度就不准了。
+                  <div
+                    className="task-list"
+                    ref={listRef}
+                    style={{ paddingTop: padTop, paddingBottom: padBottom }}
+                  >
+                    {shownTasks.map((id) => (
+                      <TaskCard
+                        key={id}
+                        taskId={id}
+                        meta={settings.task_meta}
+                        onPause={handlePause}
+                        onResume={handleResume}
+                        onRemove={handleRemove}
+                        onOpen={handleOpen}
+                        onReveal={handleReveal}
+                        selectable={selectMode}
+                        selected={selected.has(id)}
+                        onToggle={toggleOne}
+                      />
+                    ))}
+                  </div>
+                ))}
+            </>
           )}
         </div>
       </main>
