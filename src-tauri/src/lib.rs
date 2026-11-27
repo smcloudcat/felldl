@@ -1827,6 +1827,25 @@ fn in_progress_part(p: &std::path::Path) -> std::path::PathBuf {
     p.with_file_name(format!("{name}.part"))
 }
 
+/// 打开/定位前的统一校验：路径必须存在、类型受支持，且不能是「还在下载」。
+///
+/// 抽成纯函数是为了能单测——真正的 `open_path` 需要 `AppHandle`（会真的拉起文件管理器），
+/// 而「哪些路径该被拦住」的判断不该只能靠人点。
+#[cfg(not(target_os = "android"))]
+fn check_path_ready(path: &str, verb: &str) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    // 未完成的下载只有 `<名>.part` 有数据，最终路径是 0 字节占位：
+    // 直接打开会得到空文件，必须明确告诉用户「还没下完」
+    if in_progress_part(p).exists() {
+        return Err(format!("文件仍在下载或校验中，完成后才能{verb}"));
+    }
+    match std::fs::metadata(p) {
+        Ok(m) if m.is_file() || m.is_dir() => Ok(()),
+        Ok(_) => Err(format!("不支持{verb}该类型的路径")),
+        Err(e) => Err(format!("路径不可用：{e}")),
+    }
+}
+
 #[cfg(not(target_os = "android"))]
 fn open_path(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -1834,17 +1853,7 @@ fn open_path(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
     // 只用原生打开接口（Windows 下为 ShellExecuteExW），**不把用户路径拼进
     // cmd /C start 之类的命令行**：文件名里的 & % 括号都是合法字符，一旦进入
     // 二次解析就成了命令注入面。这里仍然限制允许打开的目标类型。
-    let p = std::path::Path::new(path);
-    // 未完成的下载只有 `<名>.part` 有数据，最终路径是 0 字节占位：
-    // 直接打开会得到空文件，必须明确告诉用户「还没下完」
-    if in_progress_part(p).exists() {
-        return Err("文件仍在下载或校验中，完成后才能打开".into());
-    }
-    match std::fs::metadata(p) {
-        Ok(m) if m.is_file() || m.is_dir() => {}
-        Ok(_) => return Err("不支持打开该类型的路径".into()),
-        Err(e) => return Err(format!("路径不可用：{e}")),
-    }
+    check_path_ready(path, "打开")?;
     app.opener()
         .open_path(path, None::<&str>)
         .map_err(|e| e.to_string())
@@ -1856,10 +1865,8 @@ fn reveal_path(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
 
     // 定位到文件所在目录并选中它：同样走插件原生实现，
     // 不再用 `explorer /select,{path}` 这种字符串拼接方式。
+    check_path_ready(path, "定位")?;
     let p = std::path::Path::new(path);
-    if in_progress_part(p).exists() {
-        return Err("文件仍在下载或校验中，完成后才能定位".into());
-    }
     match std::fs::metadata(p) {
         Ok(m) if m.is_file() => app
             .opener()
@@ -2335,5 +2342,67 @@ mod update_cache_tests {
         let missing =
             std::env::temp_dir().join(format!("felldl-none-{}", uuid::Uuid::new_v4()));
         assert_eq!(remove_files_in(&missing), 0);
+    }
+}
+
+/// 「打开/定位」的准入判断：以前这些路径会被拼进 `cmd /C start`，文件名里一个 `&`
+/// 就能改变命令含义。现在走原生接口，这里只负责存在性/类型/未下完的判断。
+#[cfg(all(test, not(target_os = "android")))]
+mod open_path_tests {
+    use super::{check_path_ready, in_progress_part};
+
+    fn temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("felldl-open-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// `& % 空格 括号 中文` 都是合法文件名字符，必须一路走到「可以打开」，
+    /// 而不是被当成命令行片段拒绝或改写。
+    #[test]
+    fn accepts_names_with_shell_metacharacters() {
+        let dir = temp_dir();
+        let name = "a&b 100% (测试) 文件.txt";
+        let p = dir.join(name);
+        std::fs::write(&p, b"x").unwrap();
+
+        assert!(
+            check_path_ready(&p.to_string_lossy(), "打开").is_ok(),
+            "含特殊字符的普通文件应允许打开"
+        );
+        assert_eq!(
+            in_progress_part(&p),
+            dir.join(format!("{name}.part")),
+            "临时文件后缀必须原样保留文件名"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_unfinished_download() {
+        let dir = temp_dir();
+        let final_p = dir.join("movie & 100% (1).mp4");
+        std::fs::write(&final_p, b"").unwrap();
+        std::fs::write(in_progress_part(&final_p), b"x").unwrap();
+
+        let err = check_path_ready(&final_p.to_string_lossy(), "打开").unwrap_err();
+        assert!(err.contains("仍在下载"), "未下完应给出明确原因，实际：{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accepts_directory_but_reports_missing() {
+        let dir = temp_dir();
+        let sub = dir.join("下载 & 目录");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert!(
+            check_path_ready(&sub.to_string_lossy(), "定位").is_ok(),
+            "目录应允许定位"
+        );
+
+        let missing = dir.join("nope.bin");
+        let err = check_path_ready(&missing.to_string_lossy(), "定位").unwrap_err();
+        assert!(err.contains("路径不可用"), "路径不存在要直说，实际：{err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
