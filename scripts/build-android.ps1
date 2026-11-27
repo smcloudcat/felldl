@@ -19,7 +19,12 @@ param(
     [ValidateSet("arm64", "armv7", "x86_64")]
     [string]$Abi = "arm64",
     # 留空则按版本号取已安装的最高 NDK；指定时必须是 ndk\<版本> 下已存在的目录名
-    [string]$NdkVersion = ""
+    [string]$NdkVersion = "",
+    # debug 也用 custom-protocol 把前端资源嵌进 .so。
+    # 不加这个开关时 debug 包是「dev server 模式」，装到真机上只会白屏并报
+    # `error sending request for url (http://localhost:1420/)` —— 要在设备上验证
+    # 安装/权限这类原生链路，必须带 -Embed。
+    [switch]$Embed
 )
 
 $ErrorActionPreference = "Stop"
@@ -159,11 +164,13 @@ if ($npmExit -ne 0) { Write-Host "[!] 前端构建失败" -ForegroundColor Red; 
 # ── 5. 编译 Rust .so 并输出到 jniLibs ────────────────────
 $jniDir = "src-tauri\gen\android\app\src\main\jniLibs"
 $profileLabel = if ($Release) { "release" } else { "debug" }
-Write-Host "[..] 编译 Rust（$profileLabel, $($cfg.RustTarget)）..." -ForegroundColor Yellow
+$embedLabel = if ($Release -or $Embed) { "内嵌前端" } else { "dev server 模式" }
+Write-Host "[..] 编译 Rust（$profileLabel, $($cfg.RustTarget), $embedLabel）..." -ForegroundColor Yellow
 # --platform 24：NDK r26+ 默认 minSdk 更高，不显式指定会出现 getifaddrs 未定义
 # 参数用数组一次性拼好再 splat：散着写 @var 在 PowerShell 5.1 下会被拆坏
 $rustArgs = @("ndk", "--platform", "24", "-t", $cfg.RustTarget, "-o", $jniDir, "build")
 if ($Release) { $rustArgs += @("--release", "--features", "custom-protocol") }
+elseif ($Embed) { $rustArgs += @("--features", "custom-protocol") }
 $rustArgs += @("-p", "felldl")
 # PowerShell 5.1 会把原生命令写到 stderr 的正常日志当成 NativeCommandError；
 # 这里临时放宽，失败仍以 $LASTEXITCODE 判定
