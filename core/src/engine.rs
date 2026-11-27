@@ -209,6 +209,15 @@ pub struct Engine {
     /// 所以断网且有任务在等重试时，引擎自己按 30s 节流去连一次目标主机端口，
     /// 通了就把标志翻回可用。只连端口、不动任务状态，界面上不会出现「闪一下下载中」。
     net_probe: Mutex<Option<std::time::Instant>>,
+    /// 定时任务的到期堆：`(到期毫秒, id)` 的**最小堆**（用 `Reverse` 包一层）。
+    ///
+    /// 为什么不用每轮扫活跃集合：1000 个定时任务就是每 500ms 拿 1000 次任务锁，
+    /// 而真正到点的通常只有 0~1 个。堆让「没有任务到点」的代价降到一次 `peek`。
+    /// 堆里允许有失效条目（用户改过时间、暂停、删除），取出时按真实状态校验后丢弃。
+    sched_due: Mutex<std::collections::BinaryHeap<std::cmp::Reverse<(i64, TaskId)>>>,
+    /// 唤醒信号：没有活干时 tick 挂起等待，新增任务 / 恢复 / 网络变化时主动叫醒，
+    /// 避免「闲着也每 500ms 醒一次」。
+    wake: tokio::sync::Notify,
     /// BT 任务索引（含已完成但仍在做种的）：rqbit 状态轮询只遍历这里，
     /// 不再为了找出几个种子而锁住全表每一个任务。
     pub(crate) bt_ids: Mutex<std::collections::HashSet<TaskId>>,
@@ -382,6 +391,8 @@ impl Engine {
             retries: Mutex::new(crate::retry::RetryBook::default()),
             network_available: std::sync::atomic::AtomicBool::new(true),
             net_probe: Mutex::new(None),
+            sched_due: Mutex::new(std::collections::BinaryHeap::new()),
+            wake: tokio::sync::Notify::new(),
             bt_ids: Mutex::new(std::collections::HashSet::new()),
             events: tx,
             global_limiter: limiter,
@@ -500,6 +511,9 @@ impl Engine {
             for id in waiting {
                 book.hurry(&id, now);
             }
+            drop(book);
+            // 排期被提前到现在了，叫醒 tick 立刻处理（否则要等下一轮空闲间隔）
+            self.wake.notify_one();
         }
     }
 
@@ -997,9 +1011,18 @@ impl Engine {
     /// 索引是**派生数据**：`tasks` 表是唯一事实来源，这里只是给 tick 提供
     /// 「该关注谁」的捷径。因此索引短暂不一致不影响正确性（tick 会跳过查不到的 id）。
     pub(crate) fn index_task(&self, rt: Arc<Runtime>) {
-        let (id, kind, state) = {
+        let (id, kind, state, sched) = {
             let t = rt.task.lock();
-            (t.id.clone(), t.kind, t.state)
+            (
+                t.id.clone(),
+                t.kind,
+                t.state,
+                if t.state == TaskState::Scheduled {
+                    t.scheduled_at
+                } else {
+                    None
+                },
+            )
         };
         if kind == TaskKind::Bt {
             self.bt_ids.lock().insert(id.clone());
@@ -1007,7 +1030,97 @@ impl Engine {
         if !state.is_terminal() {
             self.live.lock().insert(id.clone());
         }
-        self.tasks.lock().insert(id, rt);
+        self.tasks.lock().insert(id.clone(), rt);
+        if let Some(at) = sched {
+            self.note_schedule(&id, at);
+        }
+        self.wake.notify_one();
+    }
+
+    /// 记一个定时到期点。允许重复/失效：`take_due_scheduled` 会按真实状态过滤。
+    fn note_schedule(&self, id: &str, at_ms: i64) {
+        self.sched_due
+            .lock()
+            .push(std::cmp::Reverse((at_ms, id.to_string())));
+    }
+
+    /// 取出所有已到点、且状态仍然有效的定时任务。
+    fn take_due_scheduled(&self, now_ms: i64) -> Vec<TaskId> {
+        let mut heap = self.sched_due.lock();
+        let mut out = Vec::new();
+        loop {
+            let next_at = match heap.peek() {
+                Some(std::cmp::Reverse((at, _))) => *at,
+                None => break,
+            };
+            if next_at > now_ms {
+                break;
+            }
+            let Some(std::cmp::Reverse((at, id))) = heap.pop() else {
+                break;
+            };
+            // 堆里的条目只是「候选」：用户可能改过时间、暂停或删了它。
+            // 只有状态与到期时间都对得上才算数，否则直接丢弃。
+            let valid = self
+                .tasks
+                .lock()
+                .get(&id)
+                .map(|rt| {
+                    let t = rt.task.lock();
+                    t.state == TaskState::Scheduled && t.scheduled_at == Some(at)
+                })
+                .unwrap_or(false);
+            if valid {
+                out.push(id);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// 有没有「需要每 500ms 跟进」的活：在跑的、排队的、等重试的。
+    ///
+    /// 暂停、定时、错误态都不算——它们不产生进度，只能被事件推着走。
+    fn has_active_work(&self) -> bool {
+        if self.retry_waiting() > 0 {
+            return true;
+        }
+        let ids: Vec<TaskId> = self.live.lock().iter().cloned().collect();
+        let map = self.tasks.lock();
+        for id in ids {
+            let Some(rt) = map.get(&id) else { continue };
+            if *rt.running.lock() {
+                return true;
+            }
+            if matches!(
+                rt.task.lock().state,
+                TaskState::Queued | TaskState::Probing | TaskState::Downloading
+            ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 这一轮该等多久。
+    ///
+    /// - 有活：500ms（进度、速度、落盘节流都靠它）
+    /// - 只剩定时任务：睡到最近一个到期点（封顶 30s）
+    /// - 什么都没有：30s 兜底，同时等 `wake` 事件
+    fn next_tick_delay(&self) -> std::time::Duration {
+        const ACTIVE: std::time::Duration = std::time::Duration::from_millis(500);
+        const IDLE_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+        if self.has_active_work() {
+            return ACTIVE;
+        }
+        if let Some(std::cmp::Reverse((at, _))) = self.sched_due.lock().peek() {
+            let now = now_ms();
+            if *at > now {
+                let ms = (*at - now) as u64;
+                return std::time::Duration::from_millis(ms.clamp(50, 30_000));
+            }
+        }
+        IDLE_MAX
     }
 
     /// 任务离开内存索引（删除 / 清空已完成）。
@@ -1234,6 +1347,8 @@ impl Engine {
         let Some(rt) = self.tasks.lock().get(id).cloned() else {
             bail!("任务不存在");
         };
+        // 从「睡着」到「有活」：叫醒 tick 切回 500ms 节奏
+        self.wake.notify_one();
         // 已完成或正在运行则忽略
         {
             let t = rt.task.lock();
@@ -2123,14 +2238,17 @@ impl Engine {
         // 周期性同步：完成后按间隔重新调度（保持文件始终最新）
         if reschedule {
             let now = now_ms();
-            self.commit_state(rt, generation, TaskState::Scheduled, |t| {
-                t.scheduled_at = Some(now + t.interval_secs as i64 * 1000);
+            let next_at = now + rt.task.lock().interval_secs as i64 * 1000;
+            self.commit_state(&rt, generation, TaskState::Scheduled, |t| {
+                t.scheduled_at = Some(next_at);
                 // 清零进度等待下一轮；**保留已下载文件**，到点后按 ETag/大小
                 // 重新校验，内容未变化则无需重下（避免同步期间文件消失）
                 t.downloaded = 0;
                 t.segments.clear();
                 t.completed_at = Some(now);
             });
+            // 重新进到期堆，否则下一轮永远不会被触发（堆里是派生索引，不会自动更新）
+            self.note_schedule(&rt.task.lock().id, next_at);
             rt.downloaded.store(0, Ordering::Relaxed);
         } else {
             // 全部任务都完成 → 触发「下载后动作」（关机 / 睡眠）
@@ -2167,9 +2285,14 @@ impl Engine {
         tokio::spawn(async move {
             let mut last: HashMap<TaskId, (u64, std::time::Instant)> = HashMap::new();
             let mut last_persist = std::time::Instant::now();
-            let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
             loop {
-                tick.tick().await;
+                // 闲着就别空转：有活 500ms 一轮；只剩定时任务就睡到最近到期点；
+                // 完全空闲时挂起等 `wake`（新增任务 / 恢复 / 网络变化都会叫醒）。
+                let wait = me.next_tick_delay();
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = me.wake.notified() => {}
+                }
                 // 进程重启后 BT 会话是空的：先把持久化任务重新挂回去，再轮询状态
                 me.bt_restore_pending().await;
                 me.bt_update_all();
@@ -2304,22 +2427,19 @@ impl Engine {
     ) -> TickTargets {
         // 先克隆 id 再拿表：两把锁只短暂嵌套，且顺序固定为 live → tasks
         let ids: Vec<TaskId> = self.live.lock().iter().cloned().collect();
+        // 到期任务走堆，不再逐任务比对 `scheduled_at`（1000 个定时任务也不产生 1000 次加锁）
+        let due = self.take_due_scheduled(now_ms());
         let map = self.tasks.lock();
-        let now = now_ms();
         let mut out = TickTargets {
             examined: ids.len(),
+            due,
             ..Default::default()
         };
         for id in ids {
             // 任务刚被删除、索引还没同步：跳过即可（索引是派生数据，不是事实来源）
             let Some(rt) = map.get(&id) else { continue };
             let running = *rt.running.lock();
-            let (state, due) = {
-                let t = rt.task.lock();
-                let due = t.state == TaskState::Scheduled
-                    && t.scheduled_at.map(|ms| ms <= now).unwrap_or(false);
-                (t.state, due)
-            };
+            let state = rt.task.lock().state;
             if running {
                 out.running
                     .push((id, rt.clone(), rt.downloaded.load(Ordering::Relaxed)));
@@ -2328,9 +2448,6 @@ impl Engine {
             // 跑过的任务每轮都会进 last，所以这里只会命中「首次出现 / 重新活跃」
             if !last.contains_key(&id) {
                 out.fresh.push((id.clone(), rt.clone()));
-            }
-            if due {
-                out.due.push(id.clone());
             }
             if state == TaskState::Queued {
                 out.queued.push(id);
@@ -3215,6 +3332,102 @@ mod tests {
         engine.index_task(st);
         let targets = engine.pick_tick_targets(&last);
         assert_eq!(targets.due, vec!["sch".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 到期任务走堆：失效条目（改过时间、被暂停）必须丢掉，否则会被重复拉起。
+    #[tokio::test]
+    async fn schedule_heap_drops_stale_entries() {
+        let (engine, dir) = engine_in_temp("sched-heap");
+        let now = now_ms();
+        let rt = Runtime::new(test_task("s1", TaskState::Scheduled));
+        rt.task.lock().scheduled_at = Some(now - 1);
+        engine.index_task(rt.clone());
+        assert_eq!(
+            engine.take_due_scheduled(now),
+            vec!["s1".to_string()],
+            "到点的定时任务应被取出"
+        );
+
+        // 用户把时间往后改：堆里的旧条目还在，但不能被当成「到点」
+        engine.note_schedule("s1", now - 1);
+        rt.task.lock().scheduled_at = Some(now + 60_000);
+        assert!(
+            engine.take_due_scheduled(now).is_empty(),
+            "改过时间的旧条目必须失效"
+        );
+
+        // 暂停同理：堆是派生索引，真实状态才是事实
+        engine.note_schedule("s1", now - 1);
+        {
+            let mut t = rt.task.lock();
+            t.scheduled_at = Some(now - 1);
+            t.state = TaskState::Paused;
+        }
+        assert!(
+            engine.take_due_scheduled(now).is_empty(),
+            "暂停的任务不该被定时任务拉起"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 空闲时不该每 500ms 醒一次；只剩定时任务时睡到最近到期点。
+    #[tokio::test]
+    async fn tick_sleeps_when_idle() {        let (engine, dir) = engine_in_temp("tick-idle");
+        assert_eq!(
+            engine.next_tick_delay(),
+            std::time::Duration::from_secs(30),
+            "完全空闲应等 30s 兜底，而不是 500ms 空转"
+        );
+
+        engine.index_task(Runtime::new(test_task("q", TaskState::Queued)));
+        assert_eq!(
+            engine.next_tick_delay(),
+            std::time::Duration::from_millis(500),
+            "排队任务要按 500ms 跟进"
+        );
+
+        engine.tasks.lock().remove("q");
+        engine.live.lock().remove("q");
+        let s = Runtime::new(test_task("s", TaskState::Scheduled));
+        s.task.lock().scheduled_at = Some(now_ms() + 5_000);
+        engine.index_task(s);
+        let d = engine.next_tick_delay();
+        assert!(
+            d > std::time::Duration::from_millis(500) && d <= std::time::Duration::from_secs(30),
+            "只有定时任务时应睡到到期点，实际 {d:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 性能护栏：定时任务很多时，单轮 tick 的选取要保持在毫秒级。
+    ///
+    /// 真正省掉的是**唤醒次数**：改之前不管有没有活都 500ms 一轮（120 次/分钟），
+    /// 现在只剩将来才到点的定时任务时睡到到期点（封顶 30s，即 2 次/分钟）。
+    /// 这里量的是「一轮本身的代价」，防止有人把 O(n) 的加锁扫描加回来。
+    #[tokio::test]
+    async fn tick_pick_cost_stays_flat_with_many_scheduled() {
+        let (engine, dir) = engine_in_temp("tick-many-sched");
+        let future = now_ms() + 3_600_000;
+        for i in 0..5000 {
+            let rt = Runtime::new(test_task(&format!("s{i}"), TaskState::Scheduled));
+            rt.task.lock().scheduled_at = Some(future);
+            engine.index_task(rt);
+        }
+
+        let empty = HashMap::new();
+        let t0 = std::time::Instant::now();
+        for _ in 0..20 {
+            let _ = engine.pick_tick_targets(&empty);
+        }
+        let per_round = t0.elapsed() / 20;
+        eprintln!("[perf] 5000 个未来定时任务，单轮 pick 耗时 {per_round:?}");
+        assert!(
+            per_round < std::time::Duration::from_millis(50),
+            "单轮选取不该随定时任务数量爆炸，实际 {per_round:?}"
+        );
+        // 而且这些任务都在将来：一轮里不会误触发
+        assert!(engine.take_due_scheduled(now_ms()).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
