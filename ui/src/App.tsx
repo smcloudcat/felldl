@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FilterKey, Settings, Task, UpdateInfo } from "./types";
 import { api, subscribe, subscribeResync } from "./bridge";
 import { mergeSnapshot, revOf } from "./taskMerge";
-import { INITIAL_LIMIT, STEP, nextLimit, visibleSlice } from "./taskWindow";
+import { useVirtualList } from "./useVirtualList";
 import { TaskCard } from "./TaskCard";
 import { NewTaskDialog } from "./NewTaskDialog";
 import { SettingsPage } from "./SettingsPage";
@@ -347,19 +347,20 @@ export default function App() {
 
   // ── 列表渲染窗口 ──
   // 历史任务可能上千条，全量挂载 TaskCard 会让首屏和每次进度事件都变卡；
-  // 首屏只渲染前 N 条（排序是「新建在前」，进行中的总在上面），其余按需展开。
-  // 切换视图 / 筛选 / 分类时收回首屏数量，避免在「已完成」里展开几百条后
-  // 切回「全部」仍要渲染那么长的列表。
-  const [renderLimit, setRenderLimit] = useState(INITIAL_LIMIT);
+  // 切换视图 / 筛选 / 分类时回到顶部：否则会停在上一个列表的深位置，
+  // 看起来像「点了筛选但列表是空的」。
+  const contentRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    setRenderLimit(INITIAL_LIMIT);
+    contentRef.current?.scrollTo({ top: 0 });
   }, [view, filter, category]);
-  const { items: shownTasks, hidden } = visibleSlice(
-    visible,
-    renderLimit,
-    // 进行中 / 排队 / 定时的任务永不被窗口挡住（老任务不会被新记录挤没）
-    (t) => isActive(t.state) || t.state === "queued" || t.state === "scheduled"
-  );
+  // 只挂载可视区域内的卡片：挂载量与历史条数无关
+  const { start, end, padTop, padBottom } = useVirtualList({
+    count: visible.length,
+    scrollRef: contentRef,
+    listRef,
+  });
+  const shownTasks = visible.slice(start, end);
 
   // ── 操作 ──
   const handlePause = useCallback(
@@ -662,7 +663,7 @@ export default function App() {
           </div>
         </header>
 
-        <div className="content">
+        <div className="content" ref={contentRef}>
           {/* 更新提示横幅 */}
           {view === "downloads" && updateInfo?.has_update && !updateDismissed && (
             <div className="update-banner">
@@ -697,7 +698,13 @@ export default function App() {
           ) : visible.length === 0 ? (
             <EmptyState filter={filter} onNew={() => setShowNew(true)} t={t} />
           ) : (
-            <div className="task-list">
+            // 上下占位用 padding 而不是空 div：`.task-list` 是 flex + gap 布局，
+            // 空 div 会被额外加上一行 gap，占位高度就不准了。
+            <div
+              className="task-list"
+              ref={listRef}
+              style={{ paddingTop: padTop, paddingBottom: padBottom }}
+            >
               {shownTasks.map((t) => (
                 <TaskCard
                   key={t.id}
@@ -710,15 +717,6 @@ export default function App() {
                   onReveal={handleReveal}
                 />
               ))}
-              {hidden > 0 && (
-                <button
-                  type="button"
-                  className="btn btn-ghost list-more"
-                  onClick={() => setRenderLimit((n) => nextLimit(n, STEP))}
-                >
-                  {t("list.more", { n: hidden })}
-                </button>
-              )}
             </div>
           )}
         </div>

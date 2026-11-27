@@ -105,6 +105,28 @@ const tasks: Task[] = [
   tasks.push(t4);
 }
 
+// `?tasks=N` 造 N 条历史任务：用来在浏览器里验证「挂载量与历史规模解耦」，
+// 不接真机、不跑真引擎也能复现「上千条记录」的列表压力。
+{
+  const q =
+    typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+  const extra = Number(q?.get("tasks") ?? 0);
+  if (Number.isFinite(extra) && extra > 0) {
+    for (let i = 0; i < extra; i++) {
+      const t = makeTask(
+        `https://example.com/archive/history-${i}.bin`,
+        `history-${i}.bin`,
+        10_000_000 + i
+      );
+      t.downloaded = t.size ?? 0;
+      t.state = "completed";
+      t.completed_at = now() - 60_000 * (i + 1);
+      t.created_at = now() - 60_000 * (i + 10);
+      tasks.push(t);
+    }
+  }
+}
+
 let settings: Settings = {
   download_dir: "/Users/you/Downloads",
   max_concurrent_tasks: 3,

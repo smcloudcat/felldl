@@ -580,13 +580,6 @@ textarea {
   gap: 9px;
 }
 
-/* 「显示更多」：列表窗口的展开按钮，与卡片同宽、弱化存在感 */
-.task-list .list-more {
-  justify-content: center;
-  width: 100%;
-  padding: 10px;
-  color: var(--text-dim);
-}
 
 .task-card {
   background: var(--bg-elev);
@@ -599,9 +592,10 @@ textarea {
   position: relative;
   overflow: hidden;
   animation: cardIn 0.34s var(--ease-out);
-  /* 长列表性能：屏幕外的卡片跳过布局/绘制，滚动进入视口时按需渲染 */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 92px;
+  /* 长列表性能交给虚拟滚动（只挂载可视区 + overscan 的卡片）。
+     这里不能再用 content-visibility: auto：它会「记住」上次的尺寸（容器外
+     测量时返回 contain-intrinsic-size），而虚拟滚动要靠真实高度校准行高，
+     两者叠加会让行高在 64 与 115 之间振荡、滚动条忽长忽短。 */
 }
 @keyframes cardIn {
   from {
