@@ -31,7 +31,11 @@ fn main() {
     }
     let result = match args[0].as_str() {
         "gen" => cmd_gen(flag(&args, "--out")),
-        "sign" => cmd_sign(flag(&args, "--key"), flag(&args, "--in"), flag(&args, "--out")),
+        "sign" => cmd_sign(
+            flag(&args, "--key"),
+            flag(&args, "--in"),
+            flag(&args, "--out"),
+        ),
         "hash" => cmd_hash(flag(&args, "--in")),
         "verify" => cmd_verify(flag(&args, "--in")),
         "-h" | "--help" | "help" => {
@@ -117,7 +121,11 @@ fn cmd_verify(input: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_sign(key: Option<String>, input: Option<String>, output: Option<String>) -> Result<(), String> {
+fn cmd_sign(
+    key: Option<String>,
+    input: Option<String>,
+    output: Option<String>,
+) -> Result<(), String> {
     let key_path = key.ok_or("sign 需要 --key <私钥.pkcs8>")?;
     let in_path = input.ok_or("sign 需要 --in <payload.json>")?;
     let out_path = output.ok_or("sign 需要 --out <manifest.json>")?;
@@ -143,7 +151,10 @@ fn cmd_sign(key: Option<String>, input: Option<String>, output: Option<String>) 
     }
     for a in &payload.artifacts {
         if !a.url.to_ascii_lowercase().starts_with("https://") {
-            return Err(format!("{} / {} 的地址不是 https: {}", a.platform, a.arch, a.url));
+            return Err(format!(
+                "{} / {} 的地址不是 https: {}",
+                a.platform, a.arch, a.url
+            ));
         }
         if a.sha256.len() != 64 {
             return Err(format!("{} / {} 的 sha256 长度不是 64", a.platform, a.arch));
@@ -163,6 +174,10 @@ fn cmd_sign(key: Option<String>, input: Option<String>, output: Option<String>) 
     std::fs::write(&out_path, format!("{pretty}\n")).map_err(|e| format!("写清单失败: {e}"))?;
 
     println!("已签名: {out_path}");
-    println!("版本: {}，产物 {} 个", payload.version, payload.artifacts.len());
+    println!(
+        "版本: {}，产物 {} 个",
+        payload.version,
+        payload.artifacts.len()
+    );
     Ok(())
 }

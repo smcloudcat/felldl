@@ -89,8 +89,7 @@ pub fn parse_and_verify(text: &str) -> Result<Payload> {
 }
 
 fn parse_and_verify_with_keys(keys: &[&str], text: &str) -> Result<Payload> {
-    let manifest: SignedManifest =
-        serde_json::from_str(text).context("更新清单格式无效")?;
+    let manifest: SignedManifest = serde_json::from_str(text).context("更新清单格式无效")?;
     let bytes = canonical_bytes(&manifest.payload)?;
     let mut last_err = None;
     for key in keys {
@@ -138,8 +137,8 @@ pub fn file_sha256(path: &Path) -> Result<String> {
     use ring::digest;
     use std::io::Read;
 
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("打开文件失败: {}", path.display()))?;
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("打开文件失败: {}", path.display()))?;
     let mut ctx = digest::Context::new(&digest::SHA256);
     let mut buf = vec![0u8; 256 * 1024];
     loop {
@@ -150,11 +149,7 @@ pub fn file_sha256(path: &Path) -> Result<String> {
         ctx.update(&buf[..n]);
     }
     let digest = ctx.finish();
-    Ok(digest
-        .as_ref()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect())
+    Ok(digest.as_ref().iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// 通过校验的更新包：只能由 [`verify_downloaded`] 构造。
@@ -180,8 +175,13 @@ impl VerifiedUpdate {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::rename(&self.path, dest)
-            .with_context(|| format!("移动更新包失败: {} → {}", self.path.display(), dest.display()))?;
+        std::fs::rename(&self.path, dest).with_context(|| {
+            format!(
+                "移动更新包失败: {} → {}",
+                self.path.display(),
+                dest.display()
+            )
+        })?;
         self.path = dest.to_path_buf();
         Ok(self)
     }
@@ -191,8 +191,8 @@ impl VerifiedUpdate {
 ///
 /// 这是"能安装"的唯一入口；任何失败都返回错误，不会产生 `VerifiedUpdate`。
 pub fn verify_downloaded(artifact: &Artifact, path: &Path) -> Result<VerifiedUpdate> {
-    let meta = std::fs::metadata(path)
-        .with_context(|| format!("更新包不存在: {}", path.display()))?;
+    let meta =
+        std::fs::metadata(path).with_context(|| format!("更新包不存在: {}", path.display()))?;
     if !meta.is_file() {
         bail!("更新包不是普通文件: {}", path.display());
     }
@@ -205,7 +205,11 @@ pub fn verify_downloaded(artifact: &Artifact, path: &Path) -> Result<VerifiedUpd
     }
     let actual = file_sha256(path)?;
     if !actual.eq_ignore_ascii_case(artifact.sha256.trim()) {
-        bail!("更新包摘要不符：清单 {}，实际 {}", artifact.sha256.trim(), actual);
+        bail!(
+            "更新包摘要不符：清单 {}，实际 {}",
+            artifact.sha256.trim(),
+            actual
+        );
     }
     Ok(VerifiedUpdate {
         version: artifact.version.clone(),
@@ -260,7 +264,12 @@ fn verify_for_install_with_keys(
             payload.version
         );
     }
-    if !artifact.url.trim().to_ascii_lowercase().starts_with("https://") {
+    if !artifact
+        .url
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("https://")
+    {
         bail!("产物地址必须是 https: {}", artifact.url);
     }
     verify_downloaded(artifact, path)
@@ -281,8 +290,7 @@ mod tests {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
         let kp = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
-        let pubkey = base64::engine::general_purpose::STANDARD
-            .encode(kp.public_key().as_ref());
+        let pubkey = base64::engine::general_purpose::STANDARD.encode(kp.public_key().as_ref());
         (pkcs8.as_ref().to_vec(), pubkey)
     }
 

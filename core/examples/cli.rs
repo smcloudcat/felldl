@@ -74,7 +74,7 @@ async fn main() -> anyhow::Result<()> {
             password: None,
             category: None,
             interval_secs: 0,
-})
+        })
         .await?;
 
     let mut last_print = std::time::Instant::now();
@@ -90,7 +90,9 @@ async fn main() -> anyhow::Result<()> {
                 "  {:>5.1}%  {} / {}  {}/s  [{}]",
                 pct,
                 felldl_core::util::human_bytes(t.downloaded),
-                t.size.map(felldl_core::util::human_bytes).unwrap_or_else(|| "?".into()),
+                t.size
+                    .map(felldl_core::util::human_bytes)
+                    .unwrap_or_else(|| "?".into()),
                 felldl_core::util::human_bytes(t.speed),
                 state_label(t.state),
             );

@@ -128,4 +128,3 @@ async fn download_uses_custom_dns() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
-

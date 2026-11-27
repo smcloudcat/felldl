@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
             password: None,
             category: None,
             interval_secs: 0,
-})
+        })
         .await?;
 
     // 等到下载量够大再中断
@@ -65,7 +65,11 @@ async fn main() -> anyhow::Result<()> {
     engine1.pause(&id).await?;
     tokio::time::sleep(Duration::from_millis(800)).await;
     let t = engine1.get(&id).unwrap();
-    println!("  暂停时状态: {:?}, 进度: {}", t.state, felldl_core::util::human_bytes(t.downloaded));
+    println!(
+        "  暂停时状态: {:?}, 进度: {}",
+        t.state,
+        felldl_core::util::human_bytes(t.downloaded)
+    );
     let paused_at = t.downloaded;
     let saved_path = t.save_path.clone();
     let seg_count = t.segments.len();
@@ -81,7 +85,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let t2 = engine2.get(&id).expect("任务应从磁盘恢复");
     println!("  恢复后状态: {:?}", t2.state);
-    println!("  保留进度: {}", felldl_core::util::human_bytes(t2.downloaded));
+    println!(
+        "  保留进度: {}",
+        felldl_core::util::human_bytes(t2.downloaded)
+    );
     println!("  分片数: {}", t2.segments.len());
     assert_eq!(t2.state, TaskState::Paused, "重启后应为暂停态");
     assert!(t2.downloaded > 0, "重启后进度丢失");
@@ -100,10 +107,7 @@ async fn main() -> anyhow::Result<()> {
                     felldl_core::util::human_bytes(t.downloaded)
                 );
                 // 从被中断点续上，不能从头再来
-                assert!(
-                    t.downloaded >= paused_at,
-                    "最终大小应不小于中断点"
-                );
+                assert!(t.downloaded >= paused_at, "最终大小应不小于中断点");
                 break;
             }
             TaskState::Error => anyhow::bail!("阶段2 出错: {:?}", t.error),

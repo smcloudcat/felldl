@@ -20,7 +20,12 @@ pub fn parse(text: &str) -> Option<(Vec<String>, Option<String>)> {
         };
         let content = rest[after_open..end].trim();
         let u = content.trim().to_string();
-        if !u.is_empty() && (u.starts_with("http://") || u.starts_with("https://") || u.starts_with("ftp://") || u.starts_with("ftps://")) {
+        if !u.is_empty()
+            && (u.starts_with("http://")
+                || u.starts_with("https://")
+                || u.starts_with("ftp://")
+                || u.starts_with("ftps://"))
+        {
             if !urls.contains(&u) {
                 urls.push(u);
             }

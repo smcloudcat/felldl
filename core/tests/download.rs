@@ -806,7 +806,12 @@ async fn spawn_liar_server(body: Vec<u8>, mode: &'static str) -> SocketAddr {
                 let slice = &body[claimed_start as usize..=(claimed_end as usize)];
                 let cr = match mode {
                     "no_header" => String::new(),
-                    "wrong_total" => format!("Content-Range: bytes {}-{}/{}\r\n", claimed_start, claimed_start + claimed_end, total + 1024),
+                    "wrong_total" => format!(
+                        "Content-Range: bytes {}-{}/{}\r\n",
+                        claimed_start,
+                        claimed_start + claimed_end,
+                        total + 1024
+                    ),
                     _ => format!(
                         "Content-Range: bytes {}-{}/{}\r\n",
                         claimed_start,
@@ -1054,7 +1059,11 @@ async fn rejects_segment_when_etag_changed_mid_download() {
         .unwrap();
 
     let t = wait_done(&engine, &id, Duration::from_secs(90)).await;
-    assert_eq!(t.state, TaskState::Error, "实体变了却当成完成（应为 Error）");
+    assert_eq!(
+        t.state,
+        TaskState::Error,
+        "实体变了却当成完成（应为 Error）"
+    );
     let msg = t.error.clone().unwrap_or_default();
     assert!(
         msg.contains("远端文件已变化"),
@@ -1068,10 +1077,7 @@ async fn rejects_segment_when_etag_changed_mid_download() {
 
 fn part_of(path: &str) -> std::path::PathBuf {
     let p = std::path::Path::new(path);
-    p.with_file_name(format!(
-        "{}.part",
-        p.file_name().unwrap().to_string_lossy()
-    ))
+    p.with_file_name(format!("{}.part", p.file_name().unwrap().to_string_lossy()))
 }
 
 /// 暂停后：最终路径只能是 0 字节占位，真实进度在 `<名>.part` 里
@@ -1112,7 +1118,9 @@ async fn paused_download_writes_only_part_file() {
     let part_len = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
     assert!(part_len > 0, "进度必须写在 .part 里，实际 {part_len} 字节");
 
-    let final_len = std::fs::metadata(&t.save_path).map(|m| m.len()).unwrap_or(0);
+    let final_len = std::fs::metadata(&t.save_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
     assert_eq!(
         final_len, 0,
         "未完成的下载不应在最终路径留下数据（否则用户点开就是坏文件）"
@@ -1145,7 +1153,12 @@ async fn completed_download_commits_part_atomically() {
     let part = part_of(&t.save_path);
     assert!(!part.exists(), "完成后 .part 必须被清理（rename 走了）");
     let got = std::fs::read(&t.save_path).unwrap();
-    assert!(got == payload, "最终文件内容不完整：{} / {} 字节", got.len(), payload.len());
+    assert!(
+        got == payload,
+        "最终文件内容不完整：{} / {} 字节",
+        got.len(),
+        payload.len()
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1170,7 +1183,9 @@ async fn failed_download_leaves_no_final_file() {
         .unwrap();
     let t = wait_done(&engine, &id, Duration::from_secs(60)).await;
     assert_eq!(t.state, TaskState::Error);
-    let final_len = std::fs::metadata(&t.save_path).map(|m| m.len()).unwrap_or(0);
+    let final_len = std::fs::metadata(&t.save_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
     assert_eq!(final_len, 0, "失败的任务不应在最终路径留下数据");
 
     let _ = std::fs::remove_dir_all(&root);

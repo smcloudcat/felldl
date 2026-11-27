@@ -63,7 +63,10 @@ fn host_of(url: &str) -> Option<&str> {
 
 /// 是否为 HuggingFace 资源地址
 fn is_hf(url: &str) -> bool {
-    matches!(host_of(url), Some("huggingface.co") | Some("cdn-lfs.huggingface.co"))
+    matches!(
+        host_of(url),
+        Some("huggingface.co") | Some("cdn-lfs.huggingface.co")
+    )
 }
 
 /// 构造候选镜像 URL（不含主地址本身）
@@ -100,7 +103,11 @@ pub fn mirror_urls(url: &str, mode: &str, custom: &str) -> Vec<String> {
 
     let prefixes: Vec<String> = if mode == "custom" {
         let p = custom.trim();
-        vec![if p.is_empty() { String::new() } else { normalize_prefix(p) }]
+        vec![if p.is_empty() {
+            String::new()
+        } else {
+            normalize_prefix(p)
+        }]
     } else {
         PRESETS
             .iter()
@@ -172,14 +179,28 @@ mod tests {
 
     #[test]
     fn custom_prefix_normalized() {
-        let v = mirror_urls("https://raw.githubusercontent.com/o/r/main/a.txt", "custom", "mirror.example");
-        assert_eq!(v, vec!["https://mirror.example/https://raw.githubusercontent.com/o/r/main/a.txt"]);
+        let v = mirror_urls(
+            "https://raw.githubusercontent.com/o/r/main/a.txt",
+            "custom",
+            "mirror.example",
+        );
+        assert_eq!(
+            v,
+            vec!["https://mirror.example/https://raw.githubusercontent.com/o/r/main/a.txt"]
+        );
     }
 
     #[test]
     fn hf_host_swap() {
-        let v = mirror_urls("https://huggingface.co/big/model/resolve/main/w.bin", "hf", "");
-        assert_eq!(v, vec!["https://hf-mirror.com/big/model/resolve/main/w.bin"]);
+        let v = mirror_urls(
+            "https://huggingface.co/big/model/resolve/main/w.bin",
+            "hf",
+            "",
+        );
+        assert_eq!(
+            v,
+            vec!["https://hf-mirror.com/big/model/resolve/main/w.bin"]
+        );
     }
 
     #[test]

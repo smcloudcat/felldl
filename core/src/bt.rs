@@ -99,10 +99,7 @@ impl Engine {
                 .map(|n| n.split('&').next().unwrap_or("BT 任务").to_string())
                 .unwrap_or_else(|| format!("BT {}", &info_hash[..8.min(info_hash.len())]))
         });
-        let folder = handle
-            .output_folder()
-            .to_string_lossy()
-            .to_string();
+        let folder = handle.output_folder().to_string_lossy().to_string();
         // 顶层名称当作“单个路径组件”处理：sanitize_name 会替换 / \ : 等分隔符、
         // 去掉首尾点（含 ".."）、处理 Windows 保留名，避免种子名把路径带出 save_dir。
         let safe_name = crate::util::sanitize_name(&name);
@@ -341,7 +338,9 @@ impl Engine {
         for (id, rt) in bt_tasks {
             let hash = { rt.task.lock().bt_info_hash.clone() };
             let Some(hash) = hash else { continue };
-            let Some(tor) = bt.torrent(&hash) else { continue };
+            let Some(tor) = bt.torrent(&hash) else {
+                continue;
+            };
             let stats = tor.stats();
             let name = tor.name();
             let total = stats.total_bytes;
@@ -352,11 +351,13 @@ impl Engine {
             let (down_rate, up_rate, peers) = stats
                 .live
                 .as_ref()
-                .map(|l| (
-                    l.download_speed.as_bytes(),
-                    l.upload_speed.as_bytes(),
-                    l.snapshot.peer_stats.live,
-                ))
+                .map(|l| {
+                    (
+                        l.download_speed.as_bytes(),
+                        l.upload_speed.as_bytes(),
+                        l.snapshot.peer_stats.live,
+                    )
+                })
                 .unwrap_or((0, 0, 0));
 
             let mut t = rt.task.lock();
@@ -395,7 +396,10 @@ impl Engine {
                     *rt.running.lock() = false;
                 }
             } else {
-                if t.state == TaskState::Probing || t.state == TaskState::Queued || t.state == TaskState::Scheduled {
+                if t.state == TaskState::Probing
+                    || t.state == TaskState::Queued
+                    || t.state == TaskState::Scheduled
+                {
                     t.state = TaskState::Downloading;
                 }
                 *rt.running.lock() = true;

@@ -203,7 +203,12 @@ async fn ftp_download_uses_binary_mode() {
     );
 
     let got = std::fs::read(&t.save_path).unwrap();
-    assert!(got == payload, "FTP 下载内容与源不一致（{} / {} 字节）", got.len(), payload.len());
+    assert!(
+        got == payload,
+        "FTP 下载内容与源不一致（{} / {} 字节）",
+        got.len(),
+        payload.len()
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -119,7 +119,11 @@ async fn add_task(
     }
 }
 
-async fn list_tasks(State(st): State<ApiState>, Query(q): Query<TokenQuery>, headers: HeaderMap) -> Response {
+async fn list_tasks(
+    State(st): State<ApiState>,
+    Query(q): Query<TokenQuery>,
+    headers: HeaderMap,
+) -> Response {
     if let Err(r) = check_token(&st.engine, &headers, &q) {
         return r;
     }

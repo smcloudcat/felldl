@@ -351,8 +351,10 @@ fn writer_loop(root: PathBuf, q: Arc<Queue>, dead: Arc<Mutex<std::collections::H
                     .0;
             }
             g.working = true;
-            let batch: Vec<(String, Option<Task>)> =
-                std::mem::take(&mut g.map).into_iter().map(|(k, (_, v))| (k, v)).collect();
+            let batch: Vec<(String, Option<Task>)> = std::mem::take(&mut g.map)
+                .into_iter()
+                .map(|(k, (_, v))| (k, v))
+                .collect();
             batch
         };
 
@@ -416,7 +418,8 @@ fn writer_loop(root: PathBuf, q: Arc<Queue>, dead: Arc<Mutex<std::collections::H
 
 fn write_atomic(path: &Path, data: &[u8], seq: &AtomicU64) -> io::Result<()> {
     let unique = seq.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()))
+    let tmp = path
+        .with_extension(format!("json.tmp.{}", std::process::id()))
         .with_extension(format!("{unique}.tmp"));
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -431,8 +434,12 @@ fn write_atomic(path: &Path, data: &[u8], seq: &AtomicU64) -> io::Result<()> {
             fn MoveFileExW(lp_existing: *const u16, lp_new: *const u16, dw_flags: u32) -> i32;
         }
         const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
-        let to_wide =
-            |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain(std::iter::once(0)).collect() };
+        let to_wide = |p: &Path| -> Vec<u16> {
+            p.as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        };
         let src = to_wide(&tmp);
         let dst = to_wide(path);
         if unsafe { MoveFileExW(src.as_ptr(), dst.as_ptr(), MOVEFILE_REPLACE_EXISTING) } == 0 {

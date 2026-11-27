@@ -32,11 +32,7 @@ impl AllFiles {
                 other => Err(format!("未知的存储权限状态: {other}")),
             };
         }
-        Err(raw
-            .strip_prefix("ERR:")
-            .unwrap_or(raw)
-            .trim()
-            .to_string())
+        Err(raw.strip_prefix("ERR:").unwrap_or(raw).trim().to_string())
     }
 
     pub fn as_str(self) -> &'static str {

@@ -94,7 +94,10 @@ pub(crate) async fn apply(engine: &Arc<Engine>, cmd: NativeCmd) {
 #[cfg(target_os = "android")]
 fn cmd_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     use tauri::Manager;
-    app.path().app_cache_dir().ok().map(|d| d.join("engine-cmd"))
+    app.path()
+        .app_cache_dir()
+        .ok()
+        .map(|d| d.join("engine-cmd"))
 }
 
 /// 安卓侧轮询循环：1s 一次。放在进程里而不是 Service 里——按钮在 Service 停掉之后

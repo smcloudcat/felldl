@@ -7,7 +7,7 @@
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -64,7 +64,10 @@ async fn handler(State(ctx): State<Ctx>, headers: HeaderMap, uri: axum::http::Ur
             (
                 StatusCode::PARTIAL_CONTENT,
                 [
-                    (header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}")),
+                    (
+                        header::CONTENT_RANGE,
+                        format!("bytes {start}-{end}/{total}"),
+                    ),
                     (header::ACCEPT_RANGES, "bytes".to_string()),
                 ],
                 Body::from(body),

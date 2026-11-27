@@ -44,7 +44,9 @@ struct AppState {
 /// 前端只拿到一次性 token，**不能传路径**：安装入口从这个表里取文件，
 /// 因此不存在「前端给个路径就执行」的信任漏洞。
 #[derive(Default)]
-struct VerifiedUpdates(std::sync::Mutex<std::collections::HashMap<String, felldl_core::update::VerifiedUpdate>>);
+struct VerifiedUpdates(
+    std::sync::Mutex<std::collections::HashMap<String, felldl_core::update::VerifiedUpdate>>,
+);
 
 impl VerifiedUpdates {
     fn insert(&self, update: felldl_core::update::VerifiedUpdate) -> String {
@@ -201,7 +203,9 @@ async fn add_tasks(
     for r in reqs {
         match state.engine.add(r).await {
             Ok(id) => out.push(serde_json::json!({ "id": id, "ok": true })),
-            Err(e) => out.push(serde_json::json!({ "id": "", "ok": false, "error": format!("{e:#}") })),
+            Err(e) => {
+                out.push(serde_json::json!({ "id": "", "ok": false, "error": format!("{e:#}") }))
+            }
         }
     }
     Ok(out)
@@ -218,7 +222,11 @@ async fn resume_task(state: State<'_, AppState>, id: String) -> Result<(), Strin
 }
 
 #[tauri::command]
-async fn remove_task(state: State<'_, AppState>, id: String, delete_file: bool) -> Result<(), String> {
+async fn remove_task(
+    state: State<'_, AppState>,
+    id: String,
+    delete_file: bool,
+) -> Result<(), String> {
     state
         .engine
         .cancel(&id, delete_file)
@@ -382,7 +390,10 @@ async fn open_install_permission_settings(app: tauri::AppHandle) -> Result<(), I
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
-        Err(IpcError::new("install.not_needed", "当前平台不需要安装授权"))
+        Err(IpcError::new(
+            "install.not_needed",
+            "当前平台不需要安装授权",
+        ))
     }
 }
 
@@ -465,7 +476,10 @@ fn refresh_info(mut info: UpdateInfo) -> UpdateInfo {
 
 enum ApiOutcome {
     /// 有更新内容（带 ETag）
-    Fresh { info: UpdateInfo, etag: Option<String> },
+    Fresh {
+        info: UpdateInfo,
+        etag: Option<String>,
+    },
     /// 304：内容没变，沿用缓存
     NotModified,
     /// 有响应但没有可用的正式版本
@@ -646,7 +660,10 @@ async fn fetch_atom(client: &reqwest::Client) -> Result<UpdateInfo, String> {
     let resp = client
         .get(UPDATE_ATOM)
         .timeout(std::time::Duration::from_secs(6))
-        .header("Accept", "application/atom+xml, application/xml;q=0.9, */*;q=0.5")
+        .header(
+            "Accept",
+            "application/atom+xml, application/xml;q=0.9, */*;q=0.5",
+        )
         .send()
         .await
         .map_err(|e| format!("Releases 订阅请求失败: {e}"))?;
@@ -715,7 +732,12 @@ const UPDATE_MANIFEST_JSON: [&str; 2] = [
 async fn fetch_version_json(client: &reqwest::Client) -> Result<UpdateInfo, String> {
     let mut last_err = String::from("version.json 源均不可用");
     for url in UPDATE_VERSION_JSON {
-        let resp = match client.get(url).timeout(std::time::Duration::from_secs(4)).send().await {
+        let resp = match client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(4))
+            .send()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 last_err = format!("{url} 请求失败: {e}");
@@ -761,9 +783,7 @@ fn info_from_version_json(body: &serde_json::Value) -> Result<UpdateInfo, String
             .as_str()
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                format!("https://github.com/smcloudcat/felldl/releases/tag/v{ver}")
-            }),
+            .unwrap_or_else(|| format!("https://github.com/smcloudcat/felldl/releases/tag/v{ver}")),
         notes: body["notes"].as_str().unwrap_or("").to_string(),
         published_at: body["published_at"].as_str().unwrap_or("").to_string(),
         assets: Vec::new(),
@@ -830,7 +850,8 @@ async fn check_update(app: tauri::AppHandle, force: Option<bool>) -> Result<Upda
 
     let atom_err = match atom_res {
         Ok(mut info) => {
-            info.note = Some("GitHub API 请求受限，已改用 Releases 订阅获取（信息略有延迟）".into());
+            info.note =
+                Some("GitHub API 请求受限，已改用 Releases 订阅获取（信息略有延迟）".into());
             cache.checked_at = now;
             info = refresh_info(info);
             cache.info = Some(info.clone());
@@ -1058,7 +1079,10 @@ mod update_tests {
     #[test]
     fn update_file_name_is_sanitized() {
         use super::safe_file_name;
-        assert_eq!(safe_file_name("Felldl-0.3.8-win-x64.exe"), "Felldl-0.3.8-win-x64.exe");
+        assert_eq!(
+            safe_file_name("Felldl-0.3.8-win-x64.exe"),
+            "Felldl-0.3.8-win-x64.exe"
+        );
         assert_eq!(safe_file_name("../../evil/x.exe"), "x.exe");
         assert_eq!(safe_file_name("..\\..\\windows\\system32\\y.exe"), "y.exe");
         assert_eq!(safe_file_name("a b@c.exe"), "a_b_c.exe");
@@ -1128,7 +1152,10 @@ mod update_tests {
         match super::fetch_version_json(&client).await {
             Ok(info) => {
                 assert!(!info.latest_version.is_empty(), "版本号不应为空");
-                assert!(info.release_url.starts_with("http"), "发布页地址应为 http(s)");
+                assert!(
+                    info.release_url.starts_with("http"),
+                    "发布页地址应为 http(s)"
+                );
             }
             Err(e) => eprintln!("version.json 源不可用，跳过: {e}"),
         }
@@ -1353,7 +1380,11 @@ async fn save_background(
 #[tauri::command]
 async fn read_background(path: String) -> Result<String, String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("读取背景图失败: {e}"))?;
-    Ok(format!("data:{};base64,{}", image_mime(&path), b64_encode(&bytes)))
+    Ok(format!(
+        "data:{};base64,{}",
+        image_mime(&path),
+        b64_encode(&bytes)
+    ))
 }
 
 /// 删除已保存的背景图文件
@@ -1386,11 +1417,7 @@ struct UpdateProgress {
 
 /// 只取文件名部分并过滤危险字符，防止路径穿越
 fn safe_file_name(name: &str) -> String {
-    let base = name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(name)
-        .trim();
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
     let cleaned: String = base
         .chars()
         .map(|c| {
@@ -2188,7 +2215,8 @@ fn execute_system_action(action: &str) {
     }
 }
 
-fn notify_done(app: &tauri::AppHandle, task: &Task) {    use tauri_plugin_notification::NotificationExt;
+fn notify_done(app: &tauri::AppHandle, task: &Task) {
+    use tauri_plugin_notification::NotificationExt;
     let enabled = app
         .try_state::<AppState>()
         .map(|s| s.engine.settings().notify_on_complete)
@@ -2264,8 +2292,6 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-
-
 #[cfg(test)]
 mod verified_update_tests {
     use super::{current_arch, current_platform, VerifiedUpdates};
@@ -2322,7 +2348,10 @@ mod verified_update_tests {
     #[test]
     fn platform_and_arch_match_manifest_values() {
         assert!(
-            matches!(current_platform(), "windows" | "macos" | "linux" | "android"),
+            matches!(
+                current_platform(),
+                "windows" | "macos" | "linux" | "android"
+            ),
             "未知平台: {}",
             current_platform()
         );
@@ -2335,7 +2364,8 @@ mod update_cache_tests {
     use super::remove_files_in;
 
     fn temp_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("felldl-update-cache-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("felldl-update-cache-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -2360,8 +2390,7 @@ mod update_cache_tests {
 
     #[test]
     fn missing_dir_is_not_an_error() {
-        let missing =
-            std::env::temp_dir().join(format!("felldl-none-{}", uuid::Uuid::new_v4()));
+        let missing = std::env::temp_dir().join(format!("felldl-none-{}", uuid::Uuid::new_v4()));
         assert_eq!(remove_files_in(&missing), 0);
     }
 }
@@ -2407,7 +2436,10 @@ mod open_path_tests {
         std::fs::write(in_progress_part(&final_p), b"x").unwrap();
 
         let err = check_path_ready(&final_p.to_string_lossy(), "打开").unwrap_err();
-        assert!(err.contains("仍在下载"), "未下完应给出明确原因，实际：{err}");
+        assert!(
+            err.contains("仍在下载"),
+            "未下完应给出明确原因，实际：{err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2487,10 +2519,7 @@ mod ipc_redaction_tests {
             let mut t = task_with_secrets();
             t.state = serde_json::from_value(serde_json::json!(state)).unwrap();
             let out = redact_tasks(vec![t]);
-            assert!(
-                out[0].segments.is_empty(),
-                "{state} 状态不该再传分片明细"
-            );
+            assert!(out[0].segments.is_empty(), "{state} 状态不该再传分片明细");
         }
     }
 

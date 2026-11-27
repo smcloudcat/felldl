@@ -78,7 +78,9 @@ pub struct HickoryDns {
 
 impl HickoryDns {
     pub fn new(servers: &[(IpAddr, u16, Protocol)]) -> Result<Self> {
-        Ok(Self { resolver: Arc::new(build_resolver(servers)?) })
+        Ok(Self {
+            resolver: Arc::new(build_resolver(servers)?),
+        })
     }
 }
 
@@ -94,7 +96,8 @@ impl reqwest::dns::Resolve for HickoryDns {
             if addrs.is_empty() {
                 return Err("DNS 未返回任何地址".into());
             }
-            Ok(Box::new(addrs.into_iter()) as Box<dyn Iterator<Item = SocketAddr> + Send + 'static>)
+            Ok(Box::new(addrs.into_iter())
+                as Box<dyn Iterator<Item = SocketAddr> + Send + 'static>)
         })
     }
 }
@@ -115,7 +118,8 @@ mod tests {
 
     #[test]
     fn parse_mixed_servers() {
-        let s = parse_servers("1.1.1.1, 8.8.8.8:5353 tcp://223.5.5.5;2001:4860:4860::8888").unwrap();
+        let s =
+            parse_servers("1.1.1.1, 8.8.8.8:5353 tcp://223.5.5.5;2001:4860:4860::8888").unwrap();
         assert_eq!(s.len(), 4);
         assert_eq!(s[0], ("1.1.1.1".parse().unwrap(), 53, Protocol::Udp));
         assert_eq!(s[1], ("8.8.8.8".parse().unwrap(), 5353, Protocol::Udp));

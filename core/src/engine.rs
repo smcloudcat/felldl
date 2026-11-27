@@ -27,7 +27,9 @@ fn apply_auth_cookie(req: reqwest::RequestBuilder, c: &str) -> reqwest::RequestB
     let lower = t.to_lowercase();
     if lower.starts_with("bearer ") || lower.starts_with("authorization:") {
         let v = if lower.starts_with("authorization:") {
-            t.split_once(':').map(|x| x.1.trim().to_string()).unwrap_or_default()
+            t.split_once(':')
+                .map(|x| x.1.trim().to_string())
+                .unwrap_or_default()
         } else {
             t.to_string()
         };
@@ -53,12 +55,12 @@ struct Creds<'a> {
 }
 
 impl<'a> Creds<'a> {
-    fn new(
-        origin: &'a str,
-        cookie: Option<&'a str>,
-        basic: Option<(&'a str, &'a str)>,
-    ) -> Self {
-        Self { origin, cookie, basic }
+    fn new(origin: &'a str, cookie: Option<&'a str>, basic: Option<(&'a str, &'a str)>) -> Self {
+        Self {
+            origin,
+            cookie,
+            basic,
+        }
     }
 
     /// 从任务快照取凭据归属；旧任务没有 auth_origin 时回退到 url 的 origin。
@@ -155,7 +157,11 @@ async fn send_with_header_timeout(
         Ok(r) => r.map_err(|e| anyhow::Error::new(e).context(ctx)),
         Err(_) => Err(crate::error::FellError::new(
             crate::error::ErrorKind::Timeout,
-            format!("{}：服务器 {} 秒没有返回响应头", ctx, RESPONSE_HEADER_TIMEOUT.as_secs()),
+            format!(
+                "{}：服务器 {} 秒没有返回响应头",
+                ctx,
+                RESPONSE_HEADER_TIMEOUT.as_secs()
+            ),
         )
         .into()),
     }
@@ -704,7 +710,10 @@ impl Engine {
         }
         // FTP / SFTP：单流下载，无需 HTTP 探测
         let lower = url.to_lowercase();
-        if lower.starts_with("ftp://") || lower.starts_with("ftps://") || lower.starts_with("sftp://") {
+        if lower.starts_with("ftp://")
+            || lower.starts_with("ftps://")
+            || lower.starts_with("sftp://")
+        {
             return self.add_remote(req, url).await;
         }
         if !(url.starts_with("http://") || url.starts_with("https://")) {
@@ -847,7 +856,11 @@ impl Engine {
         };
         // URL 自带凭据剥离
         let (clean_url, u, p) = split_url_userinfo(&url);
-        let username = req.username.clone().filter(|x| !x.is_empty()).or(u)
+        let username = req
+            .username
+            .clone()
+            .filter(|x| !x.is_empty())
+            .or(u)
             .unwrap_or_else(|| "anonymous".into());
         let password = req
             .password
@@ -866,7 +879,8 @@ impl Engine {
             content_type: None,
             ..Default::default()
         };
-        let mut t = self.build_task_with_auth(&r2, probe, &s, kind, Some(username), Some(password))?;
+        let mut t =
+            self.build_task_with_auth(&r2, probe, &s, kind, Some(username), Some(password))?;
         t.supports_range = true;
         self.insert_task(t.clone());
         if s.auto_start {
@@ -893,7 +907,12 @@ impl Engine {
         if urls.is_empty() {
             bail!("metalink 中没有可用 URL");
         }
-        if req.file_name.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+        if req
+            .file_name
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+        {
             if let Some(n) = name {
                 req.file_name = Some(util::sanitize_name(&n));
             }
@@ -903,12 +922,7 @@ impl Engine {
         Ok(req)
     }
 
-    fn build_task(
-        &self,
-        req: &AddTaskRequest,
-        probe: ProbeInfo,
-        s: &Settings,
-    ) -> Result<Task> {
+    fn build_task(&self, req: &AddTaskRequest, probe: ProbeInfo, s: &Settings) -> Result<Task> {
         let kind = TaskKind::Http;
         let auth = (req.username.clone(), req.password.clone());
         self.build_task_with_auth(req, probe, s, kind, auth.0, auth.1)
@@ -980,7 +994,10 @@ impl Engine {
             error: None,
             error_code: None,
             retryable: None,
-            connections: req.connections.unwrap_or(s.default_connections).clamp(1, 64),
+            connections: req
+                .connections
+                .unwrap_or(s.default_connections)
+                .clamp(1, 64),
             segments: Vec::new(),
             supports_range: probe.supports_range,
             etag: probe.etag,
@@ -1189,12 +1206,7 @@ impl Engine {
             .collect()
     }
 
-    async fn probe(
-        &self,
-        url: &str,
-        referer: Option<&str>,
-        creds: Creds<'_>,
-    ) -> Result<ProbeInfo> {
+    async fn probe(&self, url: &str, referer: Option<&str>, creds: Creds<'_>) -> Result<ProbeInfo> {
         let uas = self.probe_uas();
         let mut last_err = None;
         for ua in &uas {
@@ -1296,7 +1308,10 @@ impl Engine {
         } else if status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED {
             return Err(FellError::http(
                 status.as_u16(),
-                format!("服务器拒绝访问（{}），可能需要 Referer / Cookie", status.as_u16()),
+                format!(
+                    "服务器拒绝访问（{}），可能需要 Referer / Cookie",
+                    status.as_u16()
+                ),
             )
             .into());
         } else {
@@ -1308,7 +1323,6 @@ impl Engine {
         }
         Ok(info)
     }
-
 
     // ───────────────────────── 状态控制 ─────────────────────────
 
@@ -1454,8 +1468,7 @@ impl Engine {
                 }
                 None => {
                     // 没有句柄（进程重启后恢复、还没开过工）：退回轮询，行为与以前一致
-                    let deadline =
-                        std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
                     while *rt.running.lock() && std::time::Instant::now() < deadline {
                         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                     }
@@ -1585,9 +1598,11 @@ impl Engine {
             let info = crate::error::classify(err);
             if info.retryable {
                 // 断网时排期照挂，但不计入重试预算（on_failure 内部区分）
-                self.retries
-                    .lock()
-                    .on_failure(id, std::time::Instant::now(), self.network_available())
+                self.retries.lock().on_failure(
+                    id,
+                    std::time::Instant::now(),
+                    self.network_available(),
+                )
             } else {
                 self.retries.lock().clear(id);
                 None
@@ -1602,9 +1617,15 @@ impl Engine {
                 // 把「会不会自己好」写进人话：用户看到这句就不会急着去点重试
                 let wait = crate::retry::backoff_secs(n);
                 let tail = if self.network_available() {
-                    format!("（第 {n}/{} 次自动重试将在 {wait} 秒后）", crate::retry::MAX_ATTEMPTS)
+                    format!(
+                        "（第 {n}/{} 次自动重试将在 {wait} 秒后）",
+                        crate::retry::MAX_ATTEMPTS
+                    )
                 } else {
-                    format!("（第 {n}/{} 次将在网络恢复后重试）", crate::retry::MAX_ATTEMPTS)
+                    format!(
+                        "（第 {n}/{} 次将在网络恢复后重试）",
+                        crate::retry::MAX_ATTEMPTS
+                    )
                 };
                 if let Some(msg) = t.error.take() {
                     t.error = Some(format!("{msg}{tail}"));
@@ -1692,7 +1713,12 @@ impl Engine {
             .clone()
             .unwrap_or_else(|| self.settings.read().user_agent.clone());
         let info = match self
-            .probe_with_ua(&snap.url, snap.referer.as_deref(), &ua, Creds::from_task(&snap))
+            .probe_with_ua(
+                &snap.url,
+                snap.referer.as_deref(),
+                &ua,
+                Creds::from_task(&snap),
+            )
             .await
         {
             Ok(i) => i,
@@ -2118,17 +2144,15 @@ impl Engine {
                 let t = rt.task.lock();
                 (t.size, t.etag.clone())
             };
-            check_partial_content(
-                &resp,
-                start,
-                None,
-                expected_total,
-                expected_etag.as_deref(),
-            )?;
+            check_partial_content(&resp, start, None, expected_total, expected_etag.as_deref())?;
         } else if !status.is_success() {
             bail!("服务器返回 {}", status.as_u16());
         }
-        let mut offset = if start > 0 && resumed_by_server { start } else { 0 };
+        let mut offset = if start > 0 && resumed_by_server {
+            start
+        } else {
+            0
+        };
 
         let file = OpenOptions::new()
             .create(true)
@@ -2299,7 +2323,9 @@ impl Engine {
         };
         if all_done {
             self.emit(EngineEvent::SystemAction(action));
-            self.emit(EngineEvent::Notice("全部下载完成，即将执行关机/睡眠动作".into()));
+            self.emit(EngineEvent::Notice(
+                "全部下载完成，即将执行关机/睡眠动作".into(),
+            ));
         }
     }
 
@@ -2420,7 +2446,10 @@ impl Engine {
                             if me.get(&id).map(|t| t.state) == Some(TaskState::Error) {
                                 let rearmed = me.retries.lock().rearm(&id, now);
                                 if rearmed {
-                                    eprintln!("[retry] {id} 未能重启，{}s 后再试", crate::retry::REARM_SECS);
+                                    eprintln!(
+                                        "[retry] {id} 未能重启，{}s 后再试",
+                                        crate::retry::REARM_SECS
+                                    );
                                 }
                             }
                         } else {
@@ -2447,10 +2476,7 @@ impl Engine {
     /// 历史越多后台 CPU 越高；现在开销只与活跃任务数相关。
     ///
     /// `examined` 是实际检查过的任务数，测试用它守住「不退回全表扫描」。
-    fn pick_tick_targets(
-        &self,
-        last: &HashMap<TaskId, (u64, std::time::Instant)>,
-    ) -> TickTargets {
+    fn pick_tick_targets(&self, last: &HashMap<TaskId, (u64, std::time::Instant)>) -> TickTargets {
         // 先克隆 id 再拿表：两把锁只短暂嵌套，且顺序固定为 live → tasks
         let ids: Vec<TaskId> = self.live.lock().iter().cloned().collect();
         // 到期任务走堆，不再逐任务比对 `scheduled_at`（1000 个定时任务也不产生 1000 次加锁）
@@ -2789,7 +2815,12 @@ async fn fetch_segment(
     let mut req = client
         .get(url)
         .header(RANGE, format!("bytes={}-{}", *cursor, job.end))
-        .header(USER_AGENT, job.ua.clone().unwrap_or_else(|| user_agent_hdr().to_string()));
+        .header(
+            USER_AGENT,
+            job.ua
+                .clone()
+                .unwrap_or_else(|| user_agent_hdr().to_string()),
+        );
     if let Some(etag) = &job.etag {
         req = req.header(reqwest::header::IF_RANGE, format!("\"{etag}\""));
     }
@@ -2815,10 +2846,20 @@ async fn fetch_segment(
         .into());
     }
     if status != StatusCode::PARTIAL_CONTENT {
-        return Err(FellError::http(status.as_u16(), format!("分片请求失败: HTTP {}", status.as_u16())).into());
+        return Err(FellError::http(
+            status.as_u16(),
+            format!("分片请求失败: HTTP {}", status.as_u16()),
+        )
+        .into());
     }
     // 206 必须与请求区间严格对应，否则写入位置会错位
-    check_partial_content(&resp, *cursor, Some(job.end), job.total, job.etag.as_deref())?;
+    check_partial_content(
+        &resp,
+        *cursor,
+        Some(job.end),
+        job.total,
+        job.etag.as_deref(),
+    )?;
 
     let mut stream = resp.bytes_stream();
     loop {
@@ -2922,7 +2963,10 @@ mod tests {
         ] {
             let r = build(url);
             assert!(r.headers().get(COOKIE).is_none(), "{url} 不应收到 Cookie");
-            assert!(r.headers().get(AUTHORIZATION).is_none(), "{url} 不应收到 Basic");
+            assert!(
+                r.headers().get(AUTHORIZATION).is_none(),
+                "{url} 不应收到 Basic"
+            );
         }
     }
 
@@ -3145,7 +3189,11 @@ mod tests {
         let rt = Runtime::new(test_task("t1", TaskState::Queued));
         engine.index_task(rt.clone());
         assert!(engine.live.lock().contains("t1"), "新建任务应进入活跃索引");
-        assert_eq!(engine.transferring_count(), 0, "排队中不算在传，别挂前台服务");
+        assert_eq!(
+            engine.transferring_count(),
+            0,
+            "排队中不算在传，别挂前台服务"
+        );
 
         let gen = rt.next_generation();
         assert!(engine.commit_state(&rt, gen, TaskState::Probing, |_| {}));
@@ -3154,7 +3202,11 @@ mod tests {
             engine.live.lock().contains("t1"),
             "运行中的任务必须在活跃索引里（否则进度不再上报）"
         );
-        assert_eq!(engine.transferring_count(), 1, "下载中要算在传，前台服务得起来");
+        assert_eq!(
+            engine.transferring_count(),
+            1,
+            "下载中要算在传，前台服务得起来"
+        );
 
         assert!(engine.commit_state(&rt, gen, TaskState::Completed, |_| {}));
         assert!(!engine.live.lock().contains("t1"), "完成后必须离开活跃索引");
@@ -3167,7 +3219,10 @@ mod tests {
 
         // 周期同步 / 手动重开：终态重新回到活跃
         assert!(engine.commit_state(&rt, gen, TaskState::Scheduled, |_| {}));
-        assert!(engine.live.lock().contains("t1"), "重新调度后应回到活跃索引");
+        assert!(
+            engine.live.lock().contains("t1"),
+            "重新调度后应回到活跃索引"
+        );
         assert!(engine.commit_state(&rt, gen, TaskState::Probing, |_| {}));
         assert!(engine.commit_state(&rt, gen, TaskState::Downloading, |_| {}));
         assert!(engine.commit_state(&rt, gen, TaskState::Paused, |_| {}));
@@ -3205,7 +3260,10 @@ mod tests {
         assert_eq!(t.state, TaskState::Error);
         assert_eq!(t.retryable, Some(true), "网络错误必须标成可重试");
         let msg = t.error.unwrap_or_default();
-        assert!(msg.contains("自动重试将在 2 秒后"), "要告诉用户会自己重试：{msg}");
+        assert!(
+            msg.contains("自动重试将在 2 秒后"),
+            "要告诉用户会自己重试：{msg}"
+        );
         assert_eq!(engine.retry_waiting(), 1, "应已排上一次重试");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3399,7 +3457,8 @@ mod tests {
 
     /// 空闲时不该每 500ms 醒一次；只剩定时任务时睡到最近到期点。
     #[tokio::test]
-    async fn tick_sleeps_when_idle() {        let (engine, dir) = engine_in_temp("tick-idle");
+    async fn tick_sleeps_when_idle() {
+        let (engine, dir) = engine_in_temp("tick-idle");
         assert_eq!(
             engine.next_tick_delay(),
             std::time::Duration::from_secs(30),

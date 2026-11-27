@@ -326,9 +326,17 @@ pub(crate) async fn download(
         } else {
             u64::MAX
         };
-        let t = if speed_limit > 0 { speed_limit } else { u64::MAX };
+        let t = if speed_limit > 0 {
+            speed_limit
+        } else {
+            u64::MAX
+        };
         let min = g.min(t);
-        if min == u64::MAX { None } else { Some(min) }
+        if min == u64::MAX {
+            None
+        } else {
+            Some(min)
+        }
     };
 
     let outcome = if kind == TaskKind::Sftp {
@@ -444,8 +452,8 @@ fn ftp_connect_and_run(
             .map_err(|e| anyhow!("FTPS TLS 升级失败: {e}"))?;
         ftp_login_and_run(stream, target, start, file, engine, rt, cancel, limit)
     } else {
-        let stream = suppaftp::FtpStream::connect(&addr)
-            .map_err(|e| anyhow!("连接 FTP 服务器失败: {e}"))?;
+        let stream =
+            suppaftp::FtpStream::connect(&addr).map_err(|e| anyhow!("连接 FTP 服务器失败: {e}"))?;
         ftp_login_and_run(stream, target, start, file, engine, rt, cancel, limit)
     }
 }
@@ -500,7 +508,8 @@ impl russh::client::Handler for SshHandler {
             Ok(true) => Ok(true),
             // 首次见到该主机：记录后继续（TOFU，仅此一次）
             Ok(false) => {
-                if let Err(e) = learn_known_hosts_path(&self.host, self.port, &key, &self.known_hosts)
+                if let Err(e) =
+                    learn_known_hosts_path(&self.host, self.port, &key, &self.known_hosts)
                 {
                     eprintln!("[sftp] 无法保存主机密钥指纹（本次仍继续）: {e}");
                 } else {

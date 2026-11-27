@@ -8,7 +8,7 @@
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -59,7 +59,8 @@ fn build_fixture(iv_base: u64) -> Fixture {
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            felldl_core::crypto::aes128_cbc_encrypt(&KEY, &default_iv(iv_base + i as u64), p).unwrap()
+            felldl_core::crypto::aes128_cbc_encrypt(&KEY, &default_iv(iv_base + i as u64), p)
+                .unwrap()
         })
         .collect();
 
@@ -159,7 +160,11 @@ async fn hls_default_iv_uses_media_sequence() {
     let engine = Engine::new(&dir).unwrap();
 
     let id = engine
-        .download_hls(&url, Some(dir.to_string_lossy().to_string()), Some("out.ts".into()))
+        .download_hls(
+            &url,
+            Some(dir.to_string_lossy().to_string()),
+            Some("out.ts".into()),
+        )
         .await
         .unwrap();
     let t = wait(&engine, &id, 60).await;
@@ -189,7 +194,11 @@ async fn hls_undecryptable_segment_fails_loudly() {
     let engine = Engine::new(&dir).unwrap();
 
     let id = engine
-        .download_hls(&url, Some(dir.to_string_lossy().to_string()), Some("bad.ts".into()))
+        .download_hls(
+            &url,
+            Some(dir.to_string_lossy().to_string()),
+            Some("bad.ts".into()),
+        )
         .await
         .unwrap();
     let t = wait(&engine, &id, 60).await;

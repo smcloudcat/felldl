@@ -67,5 +67,8 @@ async fn custom_dns_resolves_via_given_server() {
     let ips = felldl_core::dns::resolve_with(&servers, "only-local.test")
         .await
         .unwrap();
-    assert!(ips.iter().any(|ip| ip.to_string() == "127.0.0.1"), "{ips:?}");
+    assert!(
+        ips.iter().any(|ip| ip.to_string() == "127.0.0.1"),
+        "{ips:?}"
+    );
 }

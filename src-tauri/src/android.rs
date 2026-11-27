@@ -129,7 +129,9 @@ fn build_view_intent<'a>(
         &intent,
         "addFlags",
         "(I)Landroid/content/Intent;",
-        &[JValue::Int(FLAG_GRANT_READ_URI_PERMISSION | FLAG_ACTIVITY_NEW_TASK)],
+        &[JValue::Int(
+            FLAG_GRANT_READ_URI_PERMISSION | FLAG_ACTIVITY_NEW_TASK,
+        )],
     )
     .map_err(|e| format!("设置 Intent 标志失败: {e}"))?;
     Ok(intent)
@@ -220,7 +222,13 @@ pub(crate) fn call_helper(
 /// 只给「断网时别烧自动重试次数」用；查询失败一律返回 `Err`，由调用方决定忽略
 /// （忽略 = 保持上一次的判断，而不是把任务当成断网永久挂起）。
 pub fn network_online(app: &tauri::AppHandle) -> Result<bool, String> {
-    let raw = call_helper(app, NET_HELPER_CLASS, "isOnline", "(Landroid/content/Context;)Ljava/lang/String;", Vec::new())?;
+    let raw = call_helper(
+        app,
+        NET_HELPER_CLASS,
+        "isOnline",
+        "(Landroid/content/Context;)Ljava/lang/String;",
+        Vec::new(),
+    )?;
     let v = raw
         .strip_prefix("OK:")
         .ok_or_else(|| raw.trim_start_matches("ERR:").to_string())?;
@@ -228,7 +236,11 @@ pub fn network_online(app: &tauri::AppHandle) -> Result<bool, String> {
 }
 
 /// 启动/更新下载前台服务（`text` 是通知副标题）
-pub fn start_download_service(app: &tauri::AppHandle, text: &str, active: usize) -> Result<(), String> {
+pub fn start_download_service(
+    app: &tauri::AppHandle,
+    text: &str,
+    active: usize,
+) -> Result<(), String> {
     // 闭包要 'static（JNI 调用可能在别的线程上跑），参数得自己持有
     let text = text.to_string();
     // active 只用于按钮文案（单任务「暂停」/ 多任务「全部暂停」）
@@ -336,7 +348,8 @@ fn helper_class<'a>(
     activity: &JObject,
     class: &str,
 ) -> Result<jni::objects::JClass<'a>, String> {
-    let loader = match env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[]) {
+    let loader = match env.call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+    {
         Ok(v) => v.l().map_err(|e| format!("读取类加载器失败: {e}"))?,
         Err(e) => {
             clear_pending(env);
@@ -356,7 +369,9 @@ fn helper_class<'a>(
         Ok(v) => v.l().map_err(|e| format!("加载辅助类失败: {e}"))?,
         Err(e) => {
             clear_pending(env);
-            return Err(format!("找不到辅助类 {dotted}（APK 未包含该 Kotlin 文件）: {e}"));
+            return Err(format!(
+                "找不到辅助类 {dotted}（APK 未包含该 Kotlin 文件）: {e}"
+            ));
         }
     };
     Ok(jni::objects::JClass::from(cls))

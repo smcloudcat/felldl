@@ -14,8 +14,14 @@ pub fn content_uri(pkg: &str, path: &str) -> Option<String> {
         p
     };
     let roots: [(String, &str); 6] = [
-        (format!("/storage/emulated/0/Android/data/{pkg}/files"), "ext_files"),
-        (format!("/storage/emulated/0/Android/data/{pkg}/cache"), "ext_cache"),
+        (
+            format!("/storage/emulated/0/Android/data/{pkg}/files"),
+            "ext_files",
+        ),
+        (
+            format!("/storage/emulated/0/Android/data/{pkg}/cache"),
+            "ext_cache",
+        ),
         (format!("/data/user/0/{pkg}/files"), "files"),
         (format!("/data/data/{pkg}/files"), "files"),
         (format!("/data/user/0/{pkg}/cache"), "cache"),
@@ -31,7 +37,10 @@ pub fn content_uri(pkg: &str, path: &str) -> Option<String> {
     }
     // 公共存储（Download / Movies / DCIM ...）
     if let Some(rel) = p.strip_prefix("/storage/emulated/0/") {
-        return Some(format!("content://{pkg}.fileprovider/sd/{}", encode_path(rel)));
+        return Some(format!(
+            "content://{pkg}.fileprovider/sd/{}",
+            encode_path(rel)
+        ));
     }
     None
 }
@@ -70,11 +79,7 @@ fn encode_path(s: &str) -> String {
 }
 
 pub fn mime_of(path: &str) -> &'static str {
-    let ext = path
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match ext.as_str() {
         "mp4" | "m4v" => "video/mp4",
         "mkv" => "video/x-matroska",

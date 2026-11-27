@@ -106,7 +106,8 @@ impl ResumeAnchor {
         if current.len < self.len {
             return false;
         }
-        if self.created_ms != 0 && current.created_ms != 0 && self.created_ms != current.created_ms {
+        if self.created_ms != 0 && current.created_ms != 0 && self.created_ms != current.created_ms
+        {
             return false;
         }
         true
@@ -167,7 +168,13 @@ impl ProxyConfig {
         } else {
             format!("{}:{}@", self.username, self.password)
         };
-        Some(format!("{}://{}{}:{}", scheme, auth, self.host.trim(), self.port))
+        Some(format!(
+            "{}://{}{}:{}",
+            scheme,
+            auth,
+            self.host.trim(),
+            self.port
+        ))
     }
 }
 
@@ -277,12 +284,64 @@ pub struct Category {
 
 fn default_categories() -> Vec<Category> {
     vec![
-        Category { name: "视频".into(), extensions: vec!["mp4","mkv","avi","mov","webm","flv","ts","m3u8","wmv"].into_iter().map(String::from).collect(), site_pattern: None, save_dir: None },
-        Category { name: "音乐".into(), extensions: vec!["mp3","flac","wav","aac","ogg","m4a","ape"].into_iter().map(String::from).collect(), site_pattern: None, save_dir: None },
-        Category { name: "文档".into(), extensions: vec!["pdf","doc","docx","xls","xlsx","ppt","pptx","txt","md","epub","mobi"].into_iter().map(String::from).collect(), site_pattern: None, save_dir: None },
-        Category { name: "压缩包".into(), extensions: vec!["zip","rar","7z","tar","gz","bz2","xz","iso"].into_iter().map(String::from).collect(), site_pattern: None, save_dir: None },
-        Category { name: "程序".into(), extensions: vec!["exe","msi","apk","dmg","appimage","deb","rpm"].into_iter().map(String::from).collect(), site_pattern: None, save_dir: None },
-        Category { name: "图片".into(), extensions: vec!["jpg","jpeg","png","gif","webp","bmp","svg"].into_iter().map(String::from).collect(), site_pattern: None, save_dir: None },
+        Category {
+            name: "视频".into(),
+            extensions: vec![
+                "mp4", "mkv", "avi", "mov", "webm", "flv", "ts", "m3u8", "wmv",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+            site_pattern: None,
+            save_dir: None,
+        },
+        Category {
+            name: "音乐".into(),
+            extensions: vec!["mp3", "flac", "wav", "aac", "ogg", "m4a", "ape"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            site_pattern: None,
+            save_dir: None,
+        },
+        Category {
+            name: "文档".into(),
+            extensions: vec![
+                "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "epub", "mobi",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
+            site_pattern: None,
+            save_dir: None,
+        },
+        Category {
+            name: "压缩包".into(),
+            extensions: vec!["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            site_pattern: None,
+            save_dir: None,
+        },
+        Category {
+            name: "程序".into(),
+            extensions: vec!["exe", "msi", "apk", "dmg", "appimage", "deb", "rpm"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            site_pattern: None,
+            save_dir: None,
+        },
+        Category {
+            name: "图片".into(),
+            extensions: vec!["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            site_pattern: None,
+            save_dir: None,
+        },
     ]
 }
 fn default_browser_panel() -> String {
@@ -295,7 +354,13 @@ fn default_btn_style() -> String {
     "rounded".into()
 }
 fn default_task_meta() -> Vec<String> {
-    vec!["size".into(), "speed".into(), "eta".into(), "mirrors".into(), "date".into()]
+    vec![
+        "size".into(),
+        "speed".into(),
+        "eta".into(),
+        "mirrors".into(),
+        "date".into(),
+    ]
 }
 fn default_dns_mode() -> String {
     "system".into()
@@ -594,7 +659,11 @@ pub fn split_url_userinfo(url: &str) -> (String, Option<String>, Option<String>)
         return (url.to_string(), None, None);
     }
     // 凭据里的 percent encoding 是给 URL 用的，真正做 Basic 认证时要还原成原文
-    let decode = |s: &str| percent_encoding::percent_decode_str(s).decode_utf8_lossy().to_string();
+    let decode = |s: &str| {
+        percent_encoding::percent_decode_str(s)
+            .decode_utf8_lossy()
+            .to_string()
+    };
     let user = decode(&raw_user);
     let pass = raw_pass.as_deref().map(decode);
 
@@ -731,11 +800,7 @@ pub fn now_ms() -> i64 {
 }
 
 /// 按分类规则自动归类：先匹配扩展名，再匹配站点；都不命中返回 None
-pub fn classify_category(
-    file_name: &str,
-    url: &str,
-    categories: &[Category],
-) -> Option<String> {
+pub fn classify_category(file_name: &str, url: &str, categories: &[Category]) -> Option<String> {
     let ext = file_name
         .rsplit('.')
         .next()

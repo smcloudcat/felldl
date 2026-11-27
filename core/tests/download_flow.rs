@@ -5,7 +5,7 @@
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -34,7 +34,10 @@ async fn mirror_download_produces_identical_file() {
                 (
                     StatusCode::PARTIAL_CONTENT,
                     [
-                        (header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}")),
+                        (
+                            header::CONTENT_RANGE,
+                            format!("bytes {start}-{end}/{total}"),
+                        ),
                         (header::ACCEPT_RANGES, "bytes".to_string()),
                     ],
                     Body::from(body),
@@ -127,7 +130,10 @@ async fn plain_download_ok() {
                 (
                     StatusCode::PARTIAL_CONTENT,
                     [
-                        (header::CONTENT_RANGE, format!("bytes {start}-{end}/{total}")),
+                        (
+                            header::CONTENT_RANGE,
+                            format!("bytes {start}-{end}/{total}"),
+                        ),
                         (header::ACCEPT_RANGES, "bytes".to_string()),
                     ],
                     Body::from(body),

@@ -2,7 +2,7 @@
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{StatusCode, header};
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -15,7 +15,11 @@ use std::sync::Arc;
 async fn hls_pause_then_resume_completes() {
     let segs: Arc<Vec<Vec<u8>>> = Arc::new(
         (0..3u8)
-            .map(|i| (0..64 * 1024u32).map(|j| ((i as u32 * 31 + j) % 253) as u8).collect())
+            .map(|i| {
+                (0..64 * 1024u32)
+                    .map(|j| ((i as u32 * 31 + j) % 253) as u8)
+                    .collect()
+            })
             .collect(),
     );
 
@@ -46,17 +50,23 @@ async fn hls_pause_then_resume_completes() {
             .into_response()
     }
 
-    let mut playlist = String::from("#EXTM3U
+    let mut playlist = String::from(
+        "#EXTM3U
 #EXT-X-VERSION:3
 #EXT-X-TARGETDURATION:1
-");
+",
+    );
     for i in 0..segs.len() {
-        playlist.push_str(&format!("#EXTINF:1.0,
+        playlist.push_str(&format!(
+            "#EXTINF:1.0,
 seg{i}.ts
-"));
+"
+        ));
     }
-    playlist.push_str("#EXT-X-ENDLIST
-");
+    playlist.push_str(
+        "#EXT-X-ENDLIST
+",
+    );
 
     let app = Router::new()
         .route("/{file}", get(segment))
@@ -102,7 +112,11 @@ seg{i}.ts
 
     let expected: Vec<u8> = segs.iter().flat_map(|s| s.clone()).collect();
     let got = std::fs::read(dir.join("out.ts")).unwrap();
-    assert_eq!(got.len(), expected.len(), "合并后长度不符（可能下成了播放列表）");
+    assert_eq!(
+        got.len(),
+        expected.len(),
+        "合并后长度不符（可能下成了播放列表）"
+    );
     assert!(got == expected, "分片合并内容与源不一致");
     assert_eq!(t.downloaded as usize, expected.len());
 
@@ -116,7 +130,11 @@ seg{i}.ts
 async fn hls_pause_resume_twice_completes() {
     let segs: Arc<Vec<Vec<u8>>> = Arc::new(
         (0..6u8)
-            .map(|i| (0..48 * 1024u32).map(|j| ((i as u32 * 37 + j) % 251) as u8).collect())
+            .map(|i| {
+                (0..48 * 1024u32)
+                    .map(|j| ((i as u32 * 37 + j) % 251) as u8)
+                    .collect()
+            })
             .collect(),
     );
 
@@ -179,7 +197,11 @@ async fn hls_pause_resume_twice_completes() {
         engine.pause(&id).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let t = engine.get(&id).unwrap();
-        assert_eq!(t.state, TaskState::Paused, "第 {round} 轮暂停后应处于 Paused");
+        assert_eq!(
+            t.state,
+            TaskState::Paused,
+            "第 {round} 轮暂停后应处于 Paused"
+        );
         engine.resume(&id).await.unwrap();
         // 恢复后必须真的从 Paused 变成进行中，否则下一轮 pause 只是在原地打转
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;

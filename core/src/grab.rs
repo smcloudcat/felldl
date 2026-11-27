@@ -26,29 +26,65 @@ fn classify_ext(url: &str) -> Option<(&'static str, &'static str)> {
     let url_lower = url.to_lowercase();
     const TABLE: &[(&str, &str, &str)] = &[
         // (扩展名, 类别, 中文说明)
-        ("mp4", "video", "视频"), ("mkv", "video", "视频"), ("webm", "video", "视频"),
-        ("avi", "video", "视频"), ("mov", "video", "视频"), ("flv", "video", "视频"),
-        ("wmv", "video", "视频"), ("ts", "video", "视频"), ("m3u8", "hls", "HLS 流"),
+        ("mp4", "video", "视频"),
+        ("mkv", "video", "视频"),
+        ("webm", "video", "视频"),
+        ("avi", "video", "视频"),
+        ("mov", "video", "视频"),
+        ("flv", "video", "视频"),
+        ("wmv", "video", "视频"),
+        ("ts", "video", "视频"),
+        ("m3u8", "hls", "HLS 流"),
         ("mpd", "hls", "DASH 流"),
-        ("mp3", "audio", "音频"), ("flac", "audio", "音频"), ("aac", "audio", "音频"),
-        ("ogg", "audio", "音频"), ("wav", "audio", "音频"), ("m4a", "audio", "音频"),
-        ("jpg", "image", "图片"), ("jpeg", "image", "图片"), ("png", "image", "图片"),
-        ("gif", "image", "图片"), ("webp", "image", "图片"), ("svg", "image", "图片"),
-        ("bmp", "image", "图片"), ("ico", "image", "图片"), ("avif", "image", "图片"),
-        ("zip", "archive", "压缩包"), ("rar", "archive", "压缩包"), ("7z", "archive", "压缩包"),
-        ("tar", "archive", "压缩包"), ("gz", "archive", "压缩包"), ("bz2", "archive", "压缩包"),
-        ("xz", "archive", "压缩包"), ("iso", "archive", "镜像"),
-        ("pdf", "document", "文档"), ("doc", "document", "文档"), ("docx", "document", "文档"),
-        ("xls", "document", "文档"), ("xlsx", "document", "文档"), ("ppt", "document", "文档"),
-        ("pptx", "document", "文档"), ("epub", "document", "文档"), ("txt", "document", "文档"),
-        ("srt", "subtitle", "字幕"), ("ass", "subtitle", "字幕"), ("ssa", "subtitle", "字幕"),
+        ("mp3", "audio", "音频"),
+        ("flac", "audio", "音频"),
+        ("aac", "audio", "音频"),
+        ("ogg", "audio", "音频"),
+        ("wav", "audio", "音频"),
+        ("m4a", "audio", "音频"),
+        ("jpg", "image", "图片"),
+        ("jpeg", "image", "图片"),
+        ("png", "image", "图片"),
+        ("gif", "image", "图片"),
+        ("webp", "image", "图片"),
+        ("svg", "image", "图片"),
+        ("bmp", "image", "图片"),
+        ("ico", "image", "图片"),
+        ("avif", "image", "图片"),
+        ("zip", "archive", "压缩包"),
+        ("rar", "archive", "压缩包"),
+        ("7z", "archive", "压缩包"),
+        ("tar", "archive", "压缩包"),
+        ("gz", "archive", "压缩包"),
+        ("bz2", "archive", "压缩包"),
+        ("xz", "archive", "压缩包"),
+        ("iso", "archive", "镜像"),
+        ("pdf", "document", "文档"),
+        ("doc", "document", "文档"),
+        ("docx", "document", "文档"),
+        ("xls", "document", "文档"),
+        ("xlsx", "document", "文档"),
+        ("ppt", "document", "文档"),
+        ("pptx", "document", "文档"),
+        ("epub", "document", "文档"),
+        ("txt", "document", "文档"),
+        ("srt", "subtitle", "字幕"),
+        ("ass", "subtitle", "字幕"),
+        ("ssa", "subtitle", "字幕"),
         ("vtt", "subtitle", "字幕"),
-        ("torrent", "torrent", "种子"), ("exe", "software", "程序"), ("apk", "software", "程序"),
-        ("msi", "software", "程序"), ("dmg", "software", "程序"), ("deb", "software", "程序"),
+        ("torrent", "torrent", "种子"),
+        ("exe", "software", "程序"),
+        ("apk", "software", "程序"),
+        ("msi", "software", "程序"),
+        ("dmg", "software", "程序"),
+        ("deb", "software", "程序"),
     ];
     let path = url_lower.split(['?', '#']).next().unwrap_or(&url_lower);
     let ext = path.rsplit('.').next()?;
-    TABLE.iter().find(|(e, ..)| *e == ext).map(|(_, k, d)| (*k, *d))
+    TABLE
+        .iter()
+        .find(|(e, ..)| *e == ext)
+        .map(|(_, k, d)| (*k, *d))
 }
 
 /// 前端展示用的资源条目
@@ -212,7 +248,10 @@ fn extract_title(html: &str) -> String {
         },
         None => return String::new(),
     };
-    let e = lower[s..].find("</title>").map(|p| s + p).unwrap_or(html.len());
+    let e = lower[s..]
+        .find("</title>")
+        .map(|p| s + p)
+        .unwrap_or(html.len());
     html[s..e].trim().chars().take(200).collect()
 }
 
@@ -281,7 +320,8 @@ async fn read_body_capped(mut resp: reqwest::Response, limit: usize) -> Result<V
             bail!("响应体积过大（{len} 字节 > {limit}），已跳过");
         }
     }
-    let mut buf = Vec::with_capacity(resp.content_length().unwrap_or(64 * 1024).min(limit as u64) as usize);
+    let mut buf =
+        Vec::with_capacity(resp.content_length().unwrap_or(64 * 1024).min(limit as u64) as usize);
     while let Some(chunk) = resp.chunk().await.context("读取响应体失败")? {
         if buf.len() + chunk.len() > limit {
             bail!("响应体积超过上限 {limit} 字节，已中止");
@@ -366,13 +406,22 @@ pub async fn analyze_page_with_body(
             .filter(|s| !s.is_empty())
             .map(|s| decode_entities(s))
             .unwrap_or_else(|| abs.clone());
-        resources.push(GrabResource { url: abs, kind, name });
+        resources.push(GrabResource {
+            url: abs,
+            kind,
+            name,
+        });
         if resources.len() >= MAX_RESOURCES_PER_PAGE {
             break;
         }
     }
     Ok((
-        PageAnalysis { url: final_url, title, resources, links },
+        PageAnalysis {
+            url: final_url,
+            title,
+            resources,
+            links,
+        },
         text,
     ))
 }
@@ -382,7 +431,10 @@ pub async fn analyze_page_with_body(
 /// 同名资源加序号：`a.png` → `a_2.png`
 fn dedup_name(name: &str, i: usize) -> String {
     let p = Path::new(name);
-    match (p.file_stem().and_then(|s| s.to_str()), p.extension().and_then(|s| s.to_str())) {
+    match (
+        p.file_stem().and_then(|s| s.to_str()),
+        p.extension().and_then(|s| s.to_str()),
+    ) {
         (Some(stem), Some(ext)) => format!("{stem}_{i}.{ext}"),
         _ => format!("{name}_{i}"),
     }
@@ -496,7 +548,11 @@ fn rewrite_ref_value(
 }
 
 /// 单个引用 → 本地相对路径（带原 #fragment）
-fn rewrite_one_ref(raw: &str, base: &reqwest::Url, map: &HashMap<String, String>) -> Option<String> {
+fn rewrite_one_ref(
+    raw: &str,
+    base: &reqwest::Url,
+    map: &HashMap<String, String>,
+) -> Option<String> {
     let r = raw.trim();
     if r.is_empty()
         || r.starts_with('#')
@@ -637,11 +693,14 @@ impl Engine {
                 break;
             }
             // 一次抓取同时拿到正文与引用列表（旧实现为保存 HTML 又重复请求了一次）
-            let (analysis, mut html) = match analyze_page_with_body(&client, &AnalyzeRequest {
-                url: url.clone(),
-                referer: req.referer.clone(),
-                cookie: None,
-            })
+            let (analysis, mut html) = match analyze_page_with_body(
+                &client,
+                &AnalyzeRequest {
+                    url: url.clone(),
+                    referer: req.referer.clone(),
+                    cookie: None,
+                },
+            )
             .await
             {
                 Ok(a) => a,
@@ -723,14 +782,17 @@ impl Engine {
                     html = rewrite_html_refs(&html, &page_base, &url_map);
                 }
             }
-            std::fs::write(&html_path, &html).with_context(|| format!("写入 {}", html_path.display()))?;
+            std::fs::write(&html_path, &html)
+                .with_context(|| format!("写入 {}", html_path.display()))?;
             saved += 1;
             pages_done.store(saved as u64, Ordering::Relaxed);
 
             // 同域页面递归
             if depth + 1 < req.max_depth {
                 for link in analysis.links {
-                    if visited.insert(link.clone()) && (queue.len() as u64) + 1 < req.max_pages as u64 * 3 {
+                    if visited.insert(link.clone())
+                        && (queue.len() as u64) + 1 < req.max_pages as u64 * 3
+                    {
                         queue.push_back((link, depth + 1));
                     }
                 }
@@ -833,29 +895,31 @@ async fn parse_media_playlist(_client: &Client, base_url: &str, text: &str) -> R
                 .unwrap_or(0);
         } else if line.starts_with("#EXT-X-KEY:") {
             let rest = line.strip_prefix("#EXT-X-KEY:").unwrap_or(line);
-            let method = rest.split(',').find_map(|kv| {
-                kv.trim()
-                    .strip_prefix("METHOD=")
-                    .map(|v| v.to_string())
-            });
+            let method = rest
+                .split(',')
+                .find_map(|kv| kv.trim().strip_prefix("METHOD=").map(|v| v.to_string()));
             let key_uri = rest.split(',').find_map(|kv| {
                 kv.trim()
                     .strip_prefix("URI=\"")
                     .and_then(|v| v.strip_suffix('"'))
             });
-            let iv = rest.split(',').find_map(|kv| {
-                kv.trim().strip_prefix("IV=0x").and_then(|v| parse_hex16(v))
-            });
+            let iv = rest
+                .split(',')
+                .find_map(|kv| kv.trim().strip_prefix("IV=0x").and_then(|v| parse_hex16(v)));
             // 该指令对后续所有分片生效，直到下一条 EXT-X-KEY（METHOD=NONE 表示清除）
             cur_key = match (method, key_uri) {
-                (Some(m), Some(u)) if m != "NONE" => base
-                    .join(&u)
-                    .ok()
-                    .map(|x| HlsKey { method: m, key_url: x.to_string(), iv }),
+                (Some(m), Some(u)) if m != "NONE" => base.join(&u).ok().map(|x| HlsKey {
+                    method: m,
+                    key_url: x.to_string(),
+                    iv,
+                }),
                 _ => None,
             };
         } else if !line.is_empty() && !line.starts_with('#') {
-            let abs = base.join(line).map_err(|e| anyhow!("分片地址无效: {e}"))?.to_string();
+            let abs = base
+                .join(line)
+                .map_err(|e| anyhow!("分片地址无效: {e}"))?
+                .to_string();
             segments.push(abs);
             segment_keys.push(cur_key.clone());
         }
@@ -925,7 +989,10 @@ mod tests {
 
     #[test]
     fn decode_entities_ok() {
-        assert_eq!(decode_entities("a&amp;b&lt;c&gt;d&quot;e&nbsp;f"), "a&b<c>d\"e f");
+        assert_eq!(
+            decode_entities("a&amp;b&lt;c&gt;d&quot;e&nbsp;f"),
+            "a&b<c>d\"e f"
+        );
         assert_eq!(decode_entities("plain"), "plain");
     }
 
@@ -951,11 +1018,23 @@ mod tests {
     fn rewrite_refs_to_local_paths() {
         let base = reqwest::Url::parse("https://site.com/blog/post.html").unwrap();
         let mut map = HashMap::new();
-        map.insert("https://site.com/css/a.css".to_string(), "site.com_css_a.css".to_string());
-        map.insert("https://site.com/blog/p2.html".to_string(), "site.com_blog_p2.html".to_string());
+        map.insert(
+            "https://site.com/css/a.css".to_string(),
+            "site.com_css_a.css".to_string(),
+        );
+        map.insert(
+            "https://site.com/blog/p2.html".to_string(),
+            "site.com_blog_p2.html".to_string(),
+        );
         map.insert("https://cdn.x.com/i.png".to_string(), "i.png".to_string());
-        map.insert("https://site.com/set/a.png".to_string(), "a.png".to_string());
-        map.insert("https://site.com/set/a2.png".to_string(), "a_2.png".to_string());
+        map.insert(
+            "https://site.com/set/a.png".to_string(),
+            "a.png".to_string(),
+        );
+        map.insert(
+            "https://site.com/set/a2.png".to_string(),
+            "a_2.png".to_string(),
+        );
         let html = r##"<link href="/css/a.css"><a href="p2.html#c1">x</a>
 <img src="https://cdn.x.com/i.png"><img src="other.png">
 <div style="background-image:url('/css/a.css')"></div>
@@ -967,7 +1046,10 @@ mod tests {
         assert!(out.contains(r#"src="i.png""#), "{out}");
         // 未命中的引用保持原样
         assert!(out.contains(r#"src="other.png""#), "{out}");
-        assert!(out.contains("background-image:url(site.com_css_a.css)"), "{out}");
+        assert!(
+            out.contains("background-image:url(site.com_css_a.css)"),
+            "{out}"
+        );
         assert!(out.contains("a.png 1x, a_2.png 2x"), "{out}");
         assert!(out.contains(r##"href="#anchor""##), "{out}");
         assert!(out.contains("data:image/png"), "{out}");
@@ -982,9 +1064,13 @@ mod tests {
     #[tokio::test]
     async fn parse_media_playlist_plain() {
         let text = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10.0,\nseg0.ts\n#EXTINF:9.5,\nseg1.ts\n#EXT-X-ENDLIST\n";
-        let media = parse_media_playlist(&Client::new(), "https://cdn.example.com/live/index.m3u8", text)
-            .await
-            .unwrap();
+        let media = parse_media_playlist(
+            &Client::new(),
+            "https://cdn.example.com/live/index.m3u8",
+            text,
+        )
+        .await
+        .unwrap();
         assert_eq!(media.segments.len(), 2);
         assert_eq!(media.segments[0], "https://cdn.example.com/live/seg0.ts");
         assert!(media.segment_keys.iter().all(|k| k.is_none()));
@@ -1055,12 +1141,12 @@ seg3.ts
 
     #[test]
     fn hex16_and_hex20() {
-        assert_eq!(parse_hex16("000102030405060708090a0b0c0d0e0f").unwrap()[15], 15);
-        assert!(parse_hex16("1234").is_none());
         assert_eq!(
-            crate::bt::hex_to_20(&"0".repeat(40)).unwrap(),
-            [0u8; 20]
+            parse_hex16("000102030405060708090a0b0c0d0e0f").unwrap()[15],
+            15
         );
+        assert!(parse_hex16("1234").is_none());
+        assert_eq!(crate::bt::hex_to_20(&"0".repeat(40)).unwrap(), [0u8; 20]);
     }
 
     #[test]
@@ -1089,7 +1175,9 @@ impl Engine {
         // 先解析好再建任务，尽早暴露错误
         let media = parse_hls(&client, url).await?;
 
-        let dir = save_dir.filter(|d| !d.trim().is_empty()).unwrap_or_else(|| s.download_dir.clone());
+        let dir = save_dir
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or_else(|| s.download_dir.clone());
         std::fs::create_dir_all(&dir).ok();
         let name = file_name
             .filter(|n| !n.trim().is_empty())
@@ -1097,7 +1185,10 @@ impl Engine {
             .unwrap_or_else(|| {
                 // 用页面路径猜测名字
                 let u = reqwest::Url::parse(url).ok();
-                let seg = u.as_ref().and_then(|u| u.path_segments()).and_then(|p| p.last());
+                let seg = u
+                    .as_ref()
+                    .and_then(|u| u.path_segments())
+                    .and_then(|p| p.last());
                 sanitize_name(&format!("{}.ts", seg.unwrap_or("hls-video")))
             });
         let path = crate::util::reserve_path(Path::new(&dir), &name)
@@ -1201,12 +1292,11 @@ impl Engine {
             std::collections::HashMap::new();
 
         if let Some(init_url) = &media.init {
-            let bytes = self
-                .hls_fetch_segment(client, init_url, cancel)
-                .await?;
+            let bytes = self.hls_fetch_segment(client, init_url, cancel).await?;
             use std::io::Write;
             file.write_all(&bytes)?;
-            rt.downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            rt.downloaded
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         }
 
         for (i, seg_url) in media.segments.iter().enumerate() {
@@ -1252,7 +1342,8 @@ impl Engine {
             }
             use std::io::Write;
             file.write_all(&bytes)?;
-            rt.downloaded.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            rt.downloaded
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         }
 
         drop(file);

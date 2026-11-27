@@ -21,7 +21,11 @@ fn task_json(i: usize) -> serde_json::Value {
     let segments: Vec<serde_json::Value> = (0..16)
         .map(|s| {
             let start = size / 16 * s as u64;
-            let end = if s == 15 { size - 1 } else { size / 16 * (s as u64 + 1) - 1 };
+            let end = if s == 15 {
+                size - 1
+            } else {
+                size / 16 * (s as u64 + 1) - 1
+            };
             serde_json::json!({ "index": s, "start": start, "end": end, "done": end - start + 1 })
         })
         .collect();
