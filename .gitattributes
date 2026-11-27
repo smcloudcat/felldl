@@ -1,0 +1,19 @@
+# 行尾统一：仓库内一律 LF，避免 Windows 上 rustfmt/prettier 与 CI 的判断不一致
+* text=auto eol=lf
+
+# Windows 脚本按惯例保留 CRLF（PowerShell 对 LF 也能跑，但 diff/编辑器更习惯 CRLF）
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：不要让 git 尝试做文本合并
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.zip binary
+*.exe binary
+*.so binary
+*.dll binary
