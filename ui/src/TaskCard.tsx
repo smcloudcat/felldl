@@ -10,6 +10,7 @@ import {
   cx,
 } from "./format";
 import { useI18n } from "./i18n";
+import { useTask } from "./useTaskStore";
 import {
   IconArchive,
   IconCheck,
@@ -28,7 +29,7 @@ import {
 } from "./icons";
 
 interface Props {
-  task: Task;
+  taskId: string;
   meta?: string[];
   onPause: (id: string) => void;
   onResume: (id: string) => void;
@@ -48,9 +49,12 @@ const KIND_ICON = {
   other: IconFile,
 } as const;
 
-function TaskCardInner({ task, meta, onPause, onResume, onRemove, onOpen, onReveal }: Props) {
+function TaskCardInner({ taskId, meta, onPause, onResume, onRemove, onOpen, onReveal }: Props) {
   const { t, lang } = useI18n();
+  // 按 id 订阅：一条进度事件只让这张卡重渲染，父列表与其它卡片不动
+  const task = useTask(taskId);
   const [confirmDel, setConfirmDel] = useState(false);
+  if (!task) return null;
   const kind = task.kind === "bt" ? "other" : fileKind(task.file_name);
   const Icon = KIND_ICON[kind];
   const pct = task.size ? Math.min(1, task.downloaded / task.size) : 0;

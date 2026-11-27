@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FilterKey, Settings, Task, TaskStats } from "./types";
 import { api, subscribe, subscribeResync } from "./bridge";
-import { mergeSnapshot, revOf } from "./taskMerge";
+import { mergeSnapshot } from "./taskMerge";
+import { taskStore } from "./taskStore";
+import { useTaskList } from "./useTaskStore";
 import { useVirtualList } from "./useVirtualList";
 import { TaskCard } from "./TaskCard";
 import { NewTaskDialog } from "./NewTaskDialog";
@@ -61,7 +63,6 @@ export default function App() {
     [t]
   );
 
-  const [tasks, setTasks] = useState<Task[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [view, setView] = useState<View>("downloads");
   const [filter, setFilter] = useState<FilterKey>("all");
@@ -91,6 +92,8 @@ export default function App() {
     total_speed: 0,
   });
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  // 列表只订阅「有哪些任务」这一层：进度事件不会让 App 重渲染
+  const { ids: visibleIds, counts: categoryCounts } = useTaskList();
   // 更新状态是全局 job：这里和设置页看的是同一份，切页面不重置
   const job = useUpdateJob();
   const updateInfo = job.info;
@@ -150,6 +153,8 @@ export default function App() {
     let alive = true;
     touchedRef.current.clear();
     removedRef.current.clear();
+    // 先设准入：首屏请求期间到达的新任务，只有匹配当前视图才插入
+    taskStore.setFilter((t) => matchesView(t, filter, category));
     (async () => {
       try {
         const [p, st] = await Promise.all([
@@ -159,12 +164,11 @@ export default function App() {
         if (!alive) return;
         // 取第一页期间收到的事件不能丢：mergeSnapshot 用 touched 判断谁更新；
         // 合并后再按当前视图过一遍，挡住筛选切换期间在途事件带来的不匹配任务
-        setTasks((prev) =>
-          mergeSnapshot(prev, p.items, {
-            touched: touchedRef.current,
-            removed: removedRef.current,
-          }).filter((t) => matchesView(t, filter, category))
-        );
+        const merged = mergeSnapshot(taskStore.all(), p.items, {
+          touched: touchedRef.current,
+          removed: removedRef.current,
+        }).filter((t) => matchesView(t, filter, category));
+        taskStore.setAll(merged);
         setPage({ total: p.total, hasMore: p.has_more });
         setStats(st);
       } catch (e) {
@@ -225,33 +229,9 @@ export default function App() {
       pending = new Map();
       const pdelta = progress;
       progress = new Map();
-      setTasks((prev) => {
-        let next = prev.slice();
-        let changed = false;
-        for (const [id, d] of pdelta) {
-          const i = next.findIndex((x) => x.id === id);
-          if (i === -1) continue; // 等完整快照到达后再合并
-          const cur = next[i];
-          // 已终态的任务忽略迟到进度，避免「完成/错误」被旧进度覆盖
-          if (cur.state === "completed" || cur.state === "error") continue;
-          // 版本号更小的增量是旧数据（例如补发的上一轮进度）
-          if (revOf(d) < revOf(cur)) continue;
-          next[i] = { ...cur, ...d };
-          changed = true;
-        }
-        for (const t of batch.values()) {
-          const i = next.findIndex((x) => x.id === t.id);
-          if (i === -1) {
-            next = [t, ...next];
-          } else {
-            // 本地已经更新（进度 tick 的 rev 更高）时不要被旧快照回退
-            if (revOf(next[i]) > revOf(t)) continue;
-            next[i] = t;
-          }
-          changed = true;
-        }
-        return changed ? next : prev;
-      });
+      // store 内部按 rev 水位 / 终态规则过滤，这里只管按到达顺序提交
+      for (const [id, d] of pdelta) taskStore.patch(id, d);
+      for (const t of batch.values()) taskStore.upsert(t);
     };
     const scheduleFlush = (immediate: boolean) => {
       if (immediate) {
@@ -288,7 +268,7 @@ export default function App() {
           removedRef.current.add(e.payload as string);
           pending.delete(e.payload as string);
           progress.delete(e.payload as string);
-          setTasks((prev) => prev.filter((x) => x.id !== e.payload));
+          taskStore.remove(e.payload as string);
           break;
         case "settingsUpdated":
           setSettings(e.payload);
@@ -326,7 +306,7 @@ export default function App() {
       try {
         // 分页之后「权威快照」只覆盖已加载的那一段：重新拉 0..已加载条数，
         // 不能只拉第一页，否则窗口外的任务会被 mergeSnapshot 当成已删除。
-        const want = Math.max(tasks.length, PAGE_SIZE);
+        const want = Math.max(visibleIds.length, PAGE_SIZE);
         const items: Task[] = [];
         let offset = 0;
         let more = true;
@@ -338,12 +318,11 @@ export default function App() {
           more = p.has_more && p.items.length > 0;
         }
         if (disposed) return;
-        setTasks((prev) =>
-          mergeSnapshot(prev, items, {
-            touched: touchedRef.current,
-            removed: removedRef.current,
-          }).filter((t) => matchesView(t, filter, category))
-        );
+        const merged = mergeSnapshot(taskStore.all(), items, {
+          touched: touchedRef.current,
+          removed: removedRef.current,
+        }).filter((t) => matchesView(t, filter, category));
+        taskStore.setAll(merged);
         setPage((prev) => ({ ...prev, total: Math.max(prev.total, items.length) }));
       } catch {
         /* 拉不到就等下一次信号；不要用 toast 打扰用户 */
@@ -361,8 +340,8 @@ export default function App() {
       disposed = true;
       un?.();
     };
-    // filter/category 决定重拉哪一段；tasks.length 变化说明加载窗口变了
-  }, [filter, category, tasks.length]);
+    // filter/category 决定重拉哪一段；已加载窗口长度变化说明要重新对齐
+  }, [filter, category, visibleIds.length]);
 
   // ── 主题 / 皮肤 / 按钮风格 ──
   useEffect(() => {
@@ -393,9 +372,9 @@ export default function App() {
     settings?.ui_glass,
   ]);
 
-  // 列表已由引擎按当前筛选分页返回，本地 `tasks` 就是「当前页 + 增量事件」，
+  // 列表只订阅「有哪些任务」这一层：本地 ids 就是「当前页 + 增量事件」，
   // 不再二次过滤（否则会漏掉尚未加载的历史）。
-  const visible = tasks;
+  const visible = visibleIds;
 
   // ── 列表渲染窗口 ──
   // 历史任务可能上千条，全量挂载 TaskCard 会让首屏和每次进度事件都变卡；
@@ -417,17 +396,13 @@ export default function App() {
   // 滚到接近已加载尾部就续拉下一页（虚拟列表只会挂当前视口，但数据仍需分页取）
   useEffect(() => {
     if (view !== "downloads" || !page.hasMore || loadingRef.current) return;
-    if (end < tasks.length - 5) return;
+    if (end < visible.length - 5) return;
     loadingRef.current = true;
     setLoadingMore(true);
     api
-      .listTasks({ filter, category, offset: tasks.length, limit: PAGE_SIZE })
+      .listTasks({ filter, category, offset: visible.length, limit: PAGE_SIZE })
       .then((p) => {
-        setTasks((prev) => {
-          const seen = new Set(prev.map((x) => x.id));
-          const add = p.items.filter((x) => !seen.has(x.id));
-          return add.length ? [...prev, ...add] : prev;
-        });
+        taskStore.append(p.items);
         setPage({ total: p.total, hasMore: p.has_more });
       })
       .catch(() => {})
@@ -435,7 +410,7 @@ export default function App() {
         loadingRef.current = false;
         setLoadingMore(false);
       });
-  }, [end, tasks.length, page.hasMore, filter, category, view, PAGE_SIZE]);
+  }, [end, visible.length, page.hasMore, filter, category, view, PAGE_SIZE]);
 
   // ── 操作 ──
   const handlePause = useCallback(
@@ -617,7 +592,7 @@ export default function App() {
                 {t("filter.all")}
               </button>
               {settings.categories.map((c) => {
-                const count = tasks.filter((t) => t.category === c.name).length;
+                const count = categoryCounts[c.name] ?? 0;
                 return (
                   <button
                     key={c.name}
@@ -793,10 +768,10 @@ export default function App() {
               ref={listRef}
               style={{ paddingTop: padTop, paddingBottom: padBottom }}
             >
-              {shownTasks.map((t) => (
+              {shownTasks.map((id) => (
                 <TaskCard
-                  key={t.id}
-                  task={t}
+                  key={id}
+                  taskId={id}
                   meta={settings.task_meta}
                   onPause={handlePause}
                   onResume={handleResume}
