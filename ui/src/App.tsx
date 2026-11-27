@@ -31,6 +31,7 @@ import { grabStore } from "./grabStore";
 import { useGrabJobs } from "./useGrabJobs";
 import { settingsDraft } from "./settingsDraft";
 import { useDialogA11y } from "./useDialogA11y";
+import { useAndroidBack } from "./useAndroidBack";
 import {
   filterEligible,
   keepFailed,
@@ -149,6 +150,25 @@ export default function App() {
   const updateInfo = job.info;
   // 抓取任务在引擎侧后台跑：这里只订阅「有哪些在跑」，用于非抓取页的角标
   const grabJobs = useGrabJobs();
+
+  // 安卓返回键：按优先级关最上层，而不是直接退出应用。
+  // 顺序 = 从最「靠近用户」的层往外：对话框 → 多选 → 非下载页 → 分类/筛选。
+  useAndroidBack([
+    { active: showNew, close: closeNew },
+    { active: !!delTarget, close: () => setDelTarget(null) },
+    { active: batchDelOpen, close: () => setBatchDelOpen(false) },
+    { active: !!batchResult, close: () => setBatchResult(null) },
+    {
+      active: selectMode,
+      close: () => {
+        setSelectMode(false);
+        setSelected(new Set());
+      },
+    },
+    { active: view !== "downloads", close: () => setView("downloads") },
+    { active: category !== null, close: () => setCategory(null) },
+    { active: filter !== "all", close: () => setFilter("all") },
+  ]);
 
   // ── 移动端「更多」：窄屏下 header 的次要按钮被隐藏，收进这个菜单 ──
   const [moreOpen, setMoreOpen] = useState(false);

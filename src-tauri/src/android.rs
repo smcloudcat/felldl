@@ -6,7 +6,7 @@
 //! 并通过 JNI 在主线程上 `startActivity`。
 #![cfg(target_os = "android")]
 
-use crate::android_paths::{content_uri, document_uri, mime_of};
+use crate::android_paths::{content_uri, mime_of};
 use crate::apk_update::{self, ApkInfo, InstalledInfo};
 use jni::objects::{JObject, JValue};
 use jni::JNIEnv;
@@ -27,7 +27,18 @@ where
     let (tx, rx) = std::sync::mpsc::channel();
     win.with_webview(move |pw| {
         pw.jni_handle().exec(move |env, activity, _webview| {
-            let _ = tx.send(f(env, activity));
+            let mut out = f(env, activity);
+            // 关键：Java 侧抛出的异常（典型如 SecurityException）如果不在这里清除，
+            // 会带着 pending exception 穿过 JNI 边界，最终以「FATAL EXCEPTION: main」
+            // 杀掉整个进程（真机上「打开所在文件夹」就是这样崩的）。
+            // 统一清掉并转成普通错误，让上层走提示而不是崩溃。
+            if env.exception_check().unwrap_or(false) {
+                env.exception_clear().ok();
+                if out.is_ok() {
+                    out = Err("系统拒绝了该操作（缺少访问授权）".to_string());
+                }
+            }
+            let _ = tx.send(out);
         });
     })
     .map_err(|e| format!("无法访问窗口: {e}"))?;
@@ -161,7 +172,6 @@ pub fn open_file(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
 }
 
 pub fn reveal(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
-    let pkg = app.config().identifier.clone();
     let dir = if path.contains('.') {
         std::path::Path::new(path)
             .parent()
@@ -170,35 +180,24 @@ pub fn reveal(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
     } else {
         path.to_string()
     };
-    let dir_uri = content_uri(&pkg, &dir);
-    exec(app, move |env, activity| {
-        // 依次尝试：DocumentsUI 定位目录 → FileProvider 目录 + resource/folder → */*
-        let mut tries: Vec<(String, String)> = Vec::new();
-        if let Some(pair) = document_uri(&pkg, &dir) {
-            tries.push(pair);
-        }
-        if let Some(uri) = dir_uri.clone() {
-            tries.push((uri.clone(), "resource/folder".to_string()));
-            tries.push((uri, "*/*".to_string()));
-        }
-        for (uri, mime) in tries {
-            let intent = build_view_intent(env, &uri, &mime)?;
-            if ensure_resolvable(env, activity, &intent, "").is_err() {
-                continue;
-            }
-            env.call_method(
-                activity,
-                "startActivity",
-                "(Landroid/content/Intent;)V",
-                &[JValue::Object(&intent)],
-            )
-            .map_err(|e| format!("启动失败: {e}"))?;
-            if check_exception(env, "").is_ok() {
-                return Ok(());
-            }
-        }
-        Err(format!("手机上没有可用的文件管理器，请手动前往：{dir}"))
-    })
+    // 交给 Kotlin 侧做「先直接定位、失败再开选择器」的两级兜底：
+    // SAF 文档 URI 需要授权，用 JNI 直接 startActivity 会抛 SecurityException，
+    // 异常漏出 JNI 边界就是闪退（真机已复现）。Kotlin 里 try/catch 才不会崩。
+    let raw = call_helper(
+        app,
+        FOLDER_HELPER_CLASS,
+        "open",
+        "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+        vec![dir.clone()],
+    )?;
+    let raw = raw.trim_start();
+    if raw.starts_with("OK:") {
+        return Ok(());
+    }
+    Err(raw
+        .strip_prefix("ERR:")
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("打开文件夹失败，请手动前往：{dir}")))
 }
 
 /// 调任意 Kotlin 辅助类的静态方法（第一个参数固定 Context，其余为字符串）。
@@ -325,6 +324,7 @@ const APK_HELPER_CLASS: &str = "com/felldl/app/ApkInstaller";
 const STORAGE_HELPER_CLASS: &str = "com/felldl/app/StorageAccess";
 const SERVICE_HELPER_CLASS: &str = "com/felldl/app/DownloadService";
 const NET_HELPER_CLASS: &str = "com/felldl/app/NetworkState";
+const FOLDER_HELPER_CLASS: &str = "com/felldl/app/FolderOpener";
 
 /// 清掉 JNI 调用留下的 pending 异常。
 ///

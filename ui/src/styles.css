@@ -1150,7 +1150,14 @@ textarea:focus-visible {
 .task-card:focus-within .task-actions {
   opacity: 1;
 }
-@media (hover: none) {
+/*
+ * 触摸设备的操作按钮必须常显。
+ * 只用 (hover: none) 不够：安卓 WebView 在平板上会同时报
+ * hover: hover 和 pointer: coarse（触摸 + 外接/模拟鼠标能力），
+ * 结果按钮保持 opacity:0 —— 用户看不见，却仍然能点到（误删风险）。
+ * 因此再补一条 pointer: coarse。
+ */
+@media (hover: none), (pointer: coarse) {
   .task-actions {
     opacity: 1;
   }
@@ -1224,9 +1231,14 @@ textarea:focus-visible {
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(2, 6, 23, 0.42);
-  backdrop-filter: blur(7px);
-  -webkit-backdrop-filter: blur(7px);
+  /* 遮罩只用纯色：真机上出现过「对话框 DOM 已插入、样式也正常，但整层不绘制」，
+     此时 overlay 还会把后续点击全部吞掉（表现为「点了新建没反应」）。
+     全屏 backdrop-filter 是 Android WebView 上最容易触发合成异常的写法，
+     视觉上只差一层模糊，去掉换稳定。对话框自身的毛玻璃保留（区域小）。 */
+  background: rgba(2, 6, 23, 0.55);
+  /* 强制独立合成层：从后台恢复后首帧也能画出来 */
+  transform: translateZ(0);
+  will-change: opacity;
   display: flex;
   align-items: center;
   justify-content: center;
