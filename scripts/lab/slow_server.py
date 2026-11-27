@@ -7,6 +7,10 @@
     python slow_server.py 8800 400 512   # 400MB，每连接 512KB/s
     adb reverse tcp:8800 tcp:8800        # 设备侧 localhost:8800 → 本机
     python probe.py base3 12 60          # 每 60s 采一次，共 12 次
+
+测「真实网络切换」时不能用 adb reverse（它走 USB，关 Wi-Fi 也照样通），
+要让设备走局域网访问本机：
+    python slow_server.py 8800 400 256 0.0.0.0   # 第 4 个参数是监听地址
 """
 import sys
 import time
@@ -16,6 +20,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8800
 TOTAL = int(sys.argv[2]) * 1024 * 1024 if len(sys.argv) > 2 else 400 * 1024 * 1024
 PER_CONN = (int(sys.argv[3]) if len(sys.argv) > 3 else 512) * 1024  # 字节/秒
+
+# 默认只听回环；传 0.0.0.0 才会暴露到局域网（仅用于跨网络实验，注意本机防火墙）
+HOST = sys.argv[4] if len(sys.argv) > 4 else "127.0.0.1"
 CHUNK = 64 * 1024
 
 # 内容无所谓，用可预测的字节，便于以后核对哈希
@@ -84,4 +91,4 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"serving {TOTAL/1024/1024:.0f} MB on :{PORT}, {PER_CONN/1024:.0f} KB/s per connection", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()
+    ThreadingHTTPServer((HOST, PORT), H).serve_forever()
