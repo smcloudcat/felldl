@@ -210,8 +210,51 @@ export const mockEngine = {
   async invoke(cmd: string, args?: any): Promise<any> {
     await sleep(60);
     switch (cmd) {
-      case "list_tasks":
-        return tasks.map((t) => ({ ...t }));
+      case "list_tasks": {
+        // 与引擎一致的筛选语义：下载中含排队/探测，暂停含定时
+        const filter: string = args?.filter ?? "all";
+        const category: string | null = args?.category ?? null;
+        const offset: number = args?.offset ?? 0;
+        const limit: number = args?.limit ?? 80;
+        const matched = tasks
+          .filter((t) => (category ? t.category === category : true))
+          .filter((t) => {
+            switch (filter) {
+              case "downloading":
+                return t.state === "downloading" || t.state === "probing" || t.state === "queued";
+              case "completed":
+                return t.state === "completed";
+              case "paused":
+                return t.state === "paused" || t.state === "scheduled";
+              case "error":
+                return t.state === "error";
+              default:
+                return true;
+            }
+          })
+          .sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? 1 : -1));
+        return {
+          items: matched.slice(offset, offset + limit).map((t) => ({ ...t })),
+          total: matched.length,
+          has_more: offset + limit < matched.length,
+        };
+      }
+      case "task_stats": {
+        const counts = { all: tasks.length, downloading: 0, completed: 0, paused: 0, error: 0 };
+        let active = 0;
+        let total_speed = 0;
+        for (const t of tasks) {
+          if (t.state === "downloading" || t.state === "probing") {
+            counts.downloading += 1;
+            active += 1;
+            total_speed += t.speed || 0;
+          } else if (t.state === "queued") counts.downloading += 1;
+          else if (t.state === "completed") counts.completed += 1;
+          else if (t.state === "paused") counts.paused += 1;
+          else if (t.state === "error") counts.error += 1;
+        }
+        return { counts, active, total_speed };
+      }
       case "get_settings":
         return { ...settings };
       case "add_task": {

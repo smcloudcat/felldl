@@ -179,9 +179,33 @@ fn redact_event(ev: &EngineEvent) -> EngineEvent {
     }
 }
 
+/// 列表分页：默认 80 条一页。历史任务上万条时，一次传全量实测 7.2MB（去掉分片后），
+/// 启动和断流重同步都要为它买单；分页后首屏只传一页。
 #[tauri::command]
-async fn list_tasks(state: State<'_, AppState>) -> Result<Vec<Task>, String> {
-    Ok(redact_tasks(state.engine.snapshot()))
+async fn list_tasks(
+    state: State<'_, AppState>,
+    filter: Option<String>,
+    category: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<felldl_core::TaskPage, String> {
+    let page = state.engine.page(
+        filter.as_deref().unwrap_or("all"),
+        category.as_deref(),
+        offset.unwrap_or(0),
+        limit.unwrap_or(80),
+    );
+    Ok(felldl_core::TaskPage {
+        items: redact_tasks(page.items),
+        total: page.total,
+        has_more: page.has_more,
+    })
+}
+
+/// 侧边栏计数与总速度：分页后 UI 不能再遍历本地数组统计
+#[tauri::command]
+async fn task_stats(state: State<'_, AppState>) -> Result<felldl_core::TaskStats, String> {
+    Ok(state.engine.stats())
 }
 
 #[tauri::command]
@@ -2152,6 +2176,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_tasks,
+            task_stats,
             get_settings,
             add_task,
             add_tasks,

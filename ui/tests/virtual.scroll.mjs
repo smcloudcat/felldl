@@ -23,6 +23,8 @@ const browser = await chromium.launch({ executablePath: exe, headless: true });
 const page = await browser.newPage({ viewport: { width: 420, height: 900 } });
 await page.goto(`${base}/?tasks=1000`, { waitUntil: "networkidle" });
 await page.waitForSelector(".task-card");
+// 等第一帧 measure 把 viewport 写进状态（否则 end 还停在初始的 6）
+await page.waitForTimeout(700);
 
 const total = 1000 + 4; // mock 固定 4 条 + 1000 条历史
 const mounted = await page.locator(".task-card").count();
@@ -32,19 +34,23 @@ const info = await page.evaluate(() => {
   return { scrollHeight: sc.scrollHeight, clientHeight: sc.clientHeight };
 });
 
-// 滚到底
-await page.evaluate(() => {
-  const sc = document.querySelector(".content");
-  sc.scrollTop = sc.scrollHeight;
-});
-await page.waitForTimeout(400);
-await page.locator(".content").evaluate((el) => el.dispatchEvent(new Event("scroll")));
-await page.waitForTimeout(300);
-
-const mountedBottom = await page.locator(".task-card").count();
-const lastVisible = await page
-  .locator(".task-card", { hasText: "history-999.bin" })
-  .count();
+// 分页之后「到底」不是一次滚动就到：每滚到底会续拉一页，循环直到看见最后一条。
+// 1004 条 / 每页 80 ≈ 13 轮，上限给 40 轮，防止实现坏掉时死循环。
+let lastVisible = 0;
+let mountedBottom = 0;
+for (let round = 0; round < 40; round++) {
+  await page.evaluate(() => {
+    const sc = document.querySelector(".content");
+    sc.scrollTop = sc.scrollHeight;
+    sc.dispatchEvent(new Event("scroll"));
+  });
+  await page.waitForTimeout(350);
+  mountedBottom = await page.locator(".task-card").count();
+  lastVisible = await page
+    .locator(".task-card", { hasText: "history-999.bin" })
+    .count();
+  if (lastVisible > 0) break;
+}
 
 // 再滚回中间，确认没有越滚越多
 await page.evaluate(() => {
@@ -67,7 +73,6 @@ if (mounted > 80) problems.push(`首屏挂载过多：${mounted}`);
 if (mountedMid > 80) problems.push(`滚动中挂载过多：${mountedMid}`);
 if (mountedBottom > 80) problems.push(`底部挂载过多：${mountedBottom}`);
 if (lastVisible !== 1) problems.push("滚到底看不到最后一条");
-if (info.scrollHeight < 1000 * 50) problems.push("滚动高度没有覆盖全部记录");
 
 await browser.close();
 if (problems.length) {

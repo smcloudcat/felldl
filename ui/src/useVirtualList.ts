@@ -41,6 +41,8 @@ export function useVirtualList({
 
   /** 当前真正绑定过监听的那个元素（用来判断是否换了容器） */
   const bound = useRef<HTMLElement | null>(null);
+  /** 上次测量时的列表元素：列表可能比滚动容器晚一帧出现，变了要重新测 */
+  const boundList = useRef<HTMLElement | null>(null);
   const observer = useRef<ResizeObserver | null>(null);
 
   // 已滚过列表顶部的距离 = 滚动容器顶 - 列表顶（列表顶随滚动上移，差值为正）
@@ -57,11 +59,13 @@ export function useVirtualList({
   // 用「没有依赖数组」的 effect，跟着渲染一起发生；只有元素真的变了才重新绑定。
   useEffect(() => {
     const sc = scrollRef.current;
-    if (sc === bound.current) return;
+    const list = listRef.current;
+    if (sc === bound.current && list === boundList.current) return;
     const prev = bound.current;
     observer.current?.disconnect();
     if (prev) prev.removeEventListener("scroll", measure);
     bound.current = sc;
+    boundList.current = list;
     if (!sc) return;
     measure();
     sc.addEventListener("scroll", measure, { passive: true });
@@ -76,6 +80,7 @@ export function useVirtualList({
       observer.current?.disconnect();
       bound.current?.removeEventListener("scroll", measure);
       bound.current = null;
+      boundList.current = null;
     },
     [measure]
   );

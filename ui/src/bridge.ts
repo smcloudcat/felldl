@@ -5,7 +5,15 @@
  *   1. 开发时在没有 Tauri 环境（纯浏览器）下也能跑，用假数据预览界面
  *   2. 换实现时只改这一处
  */
-import type { AddTaskRequest, Settings, Task, UpdateInfo, PageAnalysis } from "./types";
+import type {
+  AddTaskRequest,
+  Settings,
+  Task,
+  TaskPage,
+  TaskStats,
+  UpdateInfo,
+  PageAnalysis,
+} from "./types";
 
 type UnlistenFn = () => void;
 
@@ -38,7 +46,14 @@ export const runningInTauri = isTauri;
 // ───────────────────────── 命令封装 ─────────────────────────
 
 export const api = {
-  listTasks: () => invoke("list_tasks") as Promise<Task[]>,
+  listTasks: (opts?: { filter?: string; category?: string | null; offset?: number; limit?: number }) =>
+    invoke("list_tasks", {
+      filter: opts?.filter ?? "all",
+      category: opts?.category ?? null,
+      offset: opts?.offset ?? 0,
+      limit: opts?.limit ?? 80,
+    }) as Promise<TaskPage>,
+  taskStats: () => invoke("task_stats") as Promise<TaskStats>,
   getSettings: () => invoke("get_settings") as Promise<Settings>,
 
   addTask: (req: AddTaskRequest) => invoke("add_task", { req }) as Promise<string>,

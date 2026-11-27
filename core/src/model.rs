@@ -694,6 +694,42 @@ pub enum EngineEvent {
     SystemAction(String),
 }
 
+/// 列表分页的一页任务。
+///
+/// 历史任务可能有上万条，启动时把全部任务塞进一条 IPC 响应，实测 10000 条也有
+/// 7.2MB（已去掉非活跃任务的分片）。这里改成按「当前筛选」分页：一页 80 条，
+/// `total` 是同一个筛选条件下的总数，UI 用 `has_more` 判断还要不要继续拉。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskPage {
+    pub items: Vec<Task>,
+    /// 当前筛选条件下的总条数（不是全库）
+    pub total: usize,
+    pub has_more: bool,
+}
+
+/// 侧边栏计数与顶部总速度。
+///
+/// 分页之后 UI 手里只有当前页，不能再靠遍历本地数组算这些数字；由引擎一次遍历
+/// 给出，载荷只有几十字节（不含任务本体）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskCounts {
+    pub all: usize,
+    /// 下载中 + 探测中 + 排队（与「下载中」筛选一致）
+    pub downloading: usize,
+    pub completed: usize,
+    pub paused: usize,
+    pub error: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskStats {
+    pub counts: TaskCounts,
+    /// 真正在传输（downloading / probing）的条数，不含排队
+    pub active: usize,
+    /// 活动任务速度之和（字节/秒）
+    pub total_speed: u64,
+}
+
 /// 下载进度增量。只携带会随 tick 变化的字段，
 /// UI 收到后按 id 合并进已有 Task，避免重复传输静态信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]

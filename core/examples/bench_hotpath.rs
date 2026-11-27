@@ -52,6 +52,10 @@ fn task_json(i: usize) -> serde_json::Value {
     })
 }
 
+fn redact(items: Vec<felldl_core::Task>) -> Vec<felldl_core::Task> {
+    items.into_iter().map(|t| t.for_ui()).collect()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let n: usize = std::env::args()
@@ -110,6 +114,12 @@ async fn main() -> anyhow::Result<()> {
     let ui_bytes = serde_json::to_vec(&ui_copy)?.len();
     let ui_ser = t_ui.elapsed();
 
+    // 分页首屏：UI 启动真正要传的那一页（80 条，脱敏 + 非活跃去分片）
+    let t_page = Instant::now();
+    let first = engine.page("all", None, 0, 80);
+    let page_took = t_page.elapsed();
+    let page_bytes = serde_json::to_vec(&redact(first.items))?.len();
+
     // 空闲时下一次 tick 的等待时长：没有活跃/到期任务时应接近 30s 上限
     let idle_wait = engine.next_tick_delay().as_secs_f64();
 
@@ -117,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
         "N={n} 任务文件={:.1}KB/条  种子={seed:?}  启动={boot:?}\n\
          snapshot 中位数={:.1}ms  序列化={:.1}ms  JSON={:.1}MB\n\
          for_ui 序列化={:.1}ms  IPC JSON={:.1}MB（省 {:.0}%）\n\
+         首屏一页(80条)={:.1}ms / {:.1}KB\n\
          载入条数={count}  空闲 tick 等待={idle_wait:.1}s",
         std::fs::metadata(root.join("tasks/bench-000000.json"))
             .map(|m| m.len() as f64 / 1024.0)
@@ -127,6 +138,8 @@ async fn main() -> anyhow::Result<()> {
         ui_ser.as_secs_f64() * 1000.0,
         ui_bytes as f64 / 1_048_576.0,
         (1.0 - ui_bytes as f64 / bytes as f64) * 100.0,
+        page_took.as_secs_f64() * 1000.0,
+        page_bytes as f64 / 1024.0,
     );
 
     // 停掉引擎后台 loop 再删目录，避免 writer 线程还在写

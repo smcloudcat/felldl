@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FilterKey, Settings, Task, UpdateInfo } from "./types";
+import type { FilterKey, Settings, Task, TaskStats, UpdateInfo } from "./types";
 import { api, subscribe, subscribeResync } from "./bridge";
 import { mergeSnapshot, revOf } from "./taskMerge";
 import { useVirtualList } from "./useVirtualList";
@@ -7,7 +7,7 @@ import { TaskCard } from "./TaskCard";
 import { NewTaskDialog } from "./NewTaskDialog";
 import { SettingsPage } from "./SettingsPage";
 import { GrabPage } from "./GrabPage";
-import { cx, formatSpeed, isActive } from "./format";
+import { cx, formatSpeed } from "./format";
 import { applyAppearance } from "./appearance";
 import { useI18n } from "./i18n";
 import {
@@ -26,6 +26,25 @@ import {
 } from "./icons";
 
 type View = "downloads" | "grab" | "settings";
+
+/// 与引擎 `Engine::matches_filter` 保持一致。
+/// 列表本身已由引擎按筛选分页返回，这里只用来挡住「切换筛选时在途事件」带进来的
+/// 不匹配行（否则在「已完成」里会突然冒出一条正在下载的任务）。
+function matchesView(t: Task, filter: FilterKey, category: string | null): boolean {
+  if (category && t.category !== category) return false;
+  switch (filter) {
+    case "downloading":
+      return t.state === "downloading" || t.state === "probing" || t.state === "queued";
+    case "completed":
+      return t.state === "completed";
+    case "paused":
+      return t.state === "paused" || t.state === "scheduled";
+    case "error":
+      return t.state === "error";
+    default:
+      return true;
+  }
+}
 
 export default function App() {
   const { t } = useI18n();
@@ -56,6 +75,20 @@ export default function App() {
   const [initError, setInitError] = useState<string | null>(null);
   const [slowHint, setSlowHint] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  // 分页：一页 80 条，滚到底自动续拉。历史任务上万条时，一次性传全量实测 7.2MB，
+  // 分页后首屏只传一页；侧边栏计数改由 task_stats 提供（本地只有当前页，算不出全量）。
+  const PAGE_SIZE = 80;
+  const [page, setPage] = useState<{ total: number; hasMore: boolean }>({
+    total: 0,
+    hasMore: false,
+  });
+  const [loadingMore, setLoadingMore] = useState(false);
+  const loadingRef = useRef(false);
+  const [stats, setStats] = useState<TaskStats>({
+    counts: { all: 0, downloading: 0, completed: 0, paused: 0, error: 0 },
+    active: 0,
+    total_speed: 0,
+  });
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const toastId = useRef(0);
@@ -83,20 +116,11 @@ export default function App() {
       if (alive) setSlowHint(true);
     }, 20000);
     (async () => {
-      // 只统计这一轮取快照期间发生的事件
-      touchedRef.current.clear();
-      removedRef.current.clear();
       try {
-        const [ts, s] = await Promise.all([api.listTasks(), api.getSettings()]);
+        // 任务列表走分页 effect（要先知道 settings 才能确定分类筛选的默认值）
+        const s = await api.getSettings();
         if (!alive) return;
         clearTimeout(timer);
-        // 不能直接 setTasks(ts)：这份快照可能比刚收到的事件更旧
-        setTasks((prev) =>
-          mergeSnapshot(prev, ts, {
-            touched: touchedRef.current,
-            removed: removedRef.current,
-          })
-        );
         setSettings(s);
         setInitError(null);
         setSlowHint(false);
@@ -114,6 +138,60 @@ export default function App() {
       clearTimeout(timer);
     };
   }, [toast, reloadKey, t]);
+
+  // ── 任务列表：按当前筛选分页加载 ──
+  // 筛选/分类/reloadKey 变化时回到第一页；切筛选必须重新向引擎要，因为本地只有上一页，
+  // 客户端过滤会漏掉还没加载的历史（比如「已完成」里第 300 条）。
+  useEffect(() => {
+    if (!settings) return;
+    let alive = true;
+    touchedRef.current.clear();
+    removedRef.current.clear();
+    (async () => {
+      try {
+        const [p, st] = await Promise.all([
+          api.listTasks({ filter, category, offset: 0, limit: PAGE_SIZE }),
+          api.taskStats(),
+        ]);
+        if (!alive) return;
+        // 取第一页期间收到的事件不能丢：mergeSnapshot 用 touched 判断谁更新；
+        // 合并后再按当前视图过一遍，挡住筛选切换期间在途事件带来的不匹配任务
+        setTasks((prev) =>
+          mergeSnapshot(prev, p.items, {
+            touched: touchedRef.current,
+            removed: removedRef.current,
+          }).filter((t) => matchesView(t, filter, category))
+        );
+        setPage({ total: p.total, hasMore: p.has_more });
+        setStats(st);
+      } catch (e) {
+        if (alive) console.error("加载任务失败", e);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [settings, filter, category, reloadKey]);
+
+  // 统计轮询：进度事件不携带「全库计数」，2s 拉一次只有几十字节
+  useEffect(() => {
+    if (!settings || view !== "downloads") return;
+    let alive = true;
+    const tick = () => {
+      api
+        .taskStats()
+        .then((s) => {
+          if (alive) setStats(s);
+        })
+        .catch(() => {});
+    };
+    const id = setInterval(tick, 2000);
+    tick();
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [settings, view]);
 
   // ── 启动后自动检查更新（静默：失败不打扰） ──
   useEffect(() => {
@@ -246,14 +324,27 @@ export default function App() {
       inflight = true;
       touchedRef.current.clear();
       try {
-        const ts = await api.listTasks();
+        // 分页之后「权威快照」只覆盖已加载的那一段：重新拉 0..已加载条数，
+        // 不能只拉第一页，否则窗口外的任务会被 mergeSnapshot 当成已删除。
+        const want = Math.max(tasks.length, PAGE_SIZE);
+        const items: Task[] = [];
+        let offset = 0;
+        let more = true;
+        while (more && offset < want) {
+          const limit = Math.min(PAGE_SIZE, want - offset);
+          const p = await api.listTasks({ filter, category, offset, limit });
+          items.push(...p.items);
+          offset += p.items.length;
+          more = p.has_more && p.items.length > 0;
+        }
         if (disposed) return;
         setTasks((prev) =>
-          mergeSnapshot(prev, ts, {
+          mergeSnapshot(prev, items, {
             touched: touchedRef.current,
             removed: removedRef.current,
-          })
+          }).filter((t) => matchesView(t, filter, category))
         );
+        setPage((prev) => ({ ...prev, total: Math.max(prev.total, items.length) }));
       } catch {
         /* 拉不到就等下一次信号；不要用 toast 打扰用户 */
       } finally {
@@ -270,7 +361,8 @@ export default function App() {
       disposed = true;
       un?.();
     };
-  }, []);
+    // filter/category 决定重拉哪一段；tasks.length 变化说明加载窗口变了
+  }, [filter, category, tasks.length]);
 
   // ── 主题 / 皮肤 / 按钮风格 ──
   useEffect(() => {
@@ -301,49 +393,9 @@ export default function App() {
     settings?.ui_glass,
   ]);
 
-  // ── 统计 ──
-  const stats = useMemo(() => {
-    const downloading = tasks.filter((t) => isActive(t.state));
-    const completed = tasks.filter((t) => t.state === "completed");
-    const paused = tasks.filter((t) => t.state === "paused");
-    const error = tasks.filter((t) => t.state === "error");
-    const totalSpeed = downloading.reduce((a, t) => a + (t.speed || 0), 0);
-    const scheduled = tasks.filter((t) => t.state === "scheduled");
-    return {
-      downloading,
-      completed,
-      paused,
-      error,
-      scheduled,
-      totalSpeed,
-      counts: {
-        all: tasks.length,
-        downloading: downloading.length + tasks.filter((t) => t.state === "queued").length,
-        completed: completed.length,
-        paused: paused.length,
-        error: error.length,
-      } as Record<FilterKey, number>,
-    };
-  }, [tasks]);
-
-  const visible = useMemo(() => {
-    let list = tasks;
-    if (category) list = list.filter((t) => t.category === category);
-    switch (filter) {
-      case "downloading":
-        return list.filter(
-          (t) => t.state === "downloading" || t.state === "probing" || t.state === "queued"
-        );
-      case "completed":
-        return list.filter((t) => t.state === "completed");
-      case "paused":
-        return list.filter((t) => t.state === "paused" || t.state === "scheduled");
-      case "error":
-        return list.filter((t) => t.state === "error");
-      default:
-        return list;
-    }
-  }, [tasks, filter, category]);
+  // 列表已由引擎按当前筛选分页返回，本地 `tasks` 就是「当前页 + 增量事件」，
+  // 不再二次过滤（否则会漏掉尚未加载的历史）。
+  const visible = tasks;
 
   // ── 列表渲染窗口 ──
   // 历史任务可能上千条，全量挂载 TaskCard 会让首屏和每次进度事件都变卡；
@@ -361,6 +413,29 @@ export default function App() {
     listRef,
   });
   const shownTasks = visible.slice(start, end);
+
+  // 滚到接近已加载尾部就续拉下一页（虚拟列表只会挂当前视口，但数据仍需分页取）
+  useEffect(() => {
+    if (view !== "downloads" || !page.hasMore || loadingRef.current) return;
+    if (end < tasks.length - 5) return;
+    loadingRef.current = true;
+    setLoadingMore(true);
+    api
+      .listTasks({ filter, category, offset: tasks.length, limit: PAGE_SIZE })
+      .then((p) => {
+        setTasks((prev) => {
+          const seen = new Set(prev.map((x) => x.id));
+          const add = p.items.filter((x) => !seen.has(x.id));
+          return add.length ? [...prev, ...add] : prev;
+        });
+        setPage({ total: p.total, hasMore: p.has_more });
+      })
+      .catch(() => {})
+      .finally(() => {
+        loadingRef.current = false;
+        setLoadingMore(false);
+      });
+  }, [end, tasks.length, page.hasMore, filter, category, view, PAGE_SIZE]);
 
   // ── 操作 ──
   const handlePause = useCallback(
@@ -444,8 +519,8 @@ export default function App() {
     }
   }, [toast, t]);
 
-  const hasActive = stats.downloading.length > 0;
-  const hasResumable = stats.paused.length + stats.error.length > 0;
+  const hasActive = stats.active > 0;
+  const hasResumable = stats.counts.paused + stats.counts.error > 0;
 
   // 键盘快捷键
   useEffect(() => {
@@ -590,12 +665,12 @@ export default function App() {
           <div className="speed-card">
             <div className="speed-card-label">{t("side.speed")}</div>
             <div className="speed-card-value">
-              {stats.totalSpeed > 0 ? formatSpeed(stats.totalSpeed) : t("side.idle")}
+              {stats.total_speed > 0 ? formatSpeed(stats.total_speed) : t("side.idle")}
             </div>
             <div className="speed-card-sub">
-              {stats.downloading.length > 0
-                ? t("side.activeTasks", { n: stats.downloading.length })
-                : t("side.doneTasks", { n: stats.completed.length })}
+              {stats.active > 0
+                ? t("side.activeTasks", { n: stats.active })
+                : t("side.doneTasks", { n: stats.counts.completed })}
             </div>
           </div>
         </div>
@@ -620,8 +695,8 @@ export default function App() {
                 : category
                   ? category
                   : FILTERS.find((f) => f.key === filter)?.label ?? t("filter.all")}
-            {view === "downloads" && visible.length > 0 && (
-              <span className="count-pill">{visible.length}</span>
+            {view === "downloads" && page.total > 0 && (
+              <span className="count-pill">{Math.max(page.total, visible.length)}</span>
             )}
           </div>
 
@@ -640,7 +715,7 @@ export default function App() {
                     <span className="desktop-label">{t("hdr.resumeAll")}</span>
                   </button>
                 )}
-                {stats.completed.length > 0 && (
+                {stats.counts.completed > 0 && (
                   <button
                     className="btn btn-ghost btn-sm"
                     onClick={clearCompleted}

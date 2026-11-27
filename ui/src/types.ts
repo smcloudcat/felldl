@@ -176,3 +176,27 @@ export interface UpdateInfo {
   /** 结果来自缓存或降级来源时的说明（正常联网查询时不返回） */
   note?: string;
 }
+
+// ── 分页与统计 ──
+// 历史任务可能上万条：list_tasks 只回当前筛选下的一页，侧边栏计数由 task_stats 给。
+export interface TaskPage {
+  items: Task[];
+  /** 当前筛选条件下的总条数（不是全库） */
+  total: number;
+  has_more: boolean;
+}
+
+export interface TaskCounts {
+  all: number;
+  downloading: number;
+  completed: number;
+  paused: number;
+  error: number;
+}
+
+export interface TaskStats {
+  counts: TaskCounts;
+  /** 真正在传输（downloading/probing）的条数，不含排队 */
+  active: number;
+  total_speed: number;
+}

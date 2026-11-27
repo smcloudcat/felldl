@@ -510,6 +510,91 @@ impl Engine {
         v
     }
 
+    /// 判断任务是否属于某个筛选视图。
+    ///
+    /// 语义必须与 UI 的筛选按钮一致（下载中含排队与探测、暂停含定时），
+    /// 否则分页之后「下载中」会漏掉排队任务——而它们确实会被调度起来。
+    fn matches_filter(t: &Task, filter: &str, category: Option<&str>) -> bool {
+        if let Some(c) = category {
+            if t.category.as_deref() != Some(c) {
+                return false;
+            }
+        }
+        match filter {
+            "downloading" => matches!(
+                t.state,
+                TaskState::Downloading | TaskState::Probing | TaskState::Queued
+            ),
+            "completed" => t.state == TaskState::Completed,
+            "paused" => matches!(t.state, TaskState::Paused | TaskState::Scheduled),
+            "error" => t.state == TaskState::Error,
+            _ => true,
+        }
+    }
+
+    /// 按当前筛选取一页任务（created_at 倒序，同毫秒按 id 倒序保证稳定）。
+    ///
+    /// 只克隆这一页的 Task，不克隆整张表：10000 条历史时整表 snapshot 的克隆+序列化
+    /// 才是启动的大头（见 `core/examples/bench_hotpath.rs`）。
+    pub fn page(
+        &self,
+        filter: &str,
+        category: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> TaskPage {
+        let limit = limit.clamp(1, 500);
+        let map = self.tasks.lock();
+        // 先只收「键 + 引用」，排序后再从命中的那几条取完整快照
+        let mut matched: Vec<(i64, TaskId, Arc<Runtime>)> = Vec::new();
+        for rt in map.values() {
+            let t = rt.task.lock();
+            if Self::matches_filter(&t, filter, category) {
+                matched.push((t.created_at, t.id.clone(), rt.clone()));
+            }
+        }
+        matched.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        let total = matched.len();
+        let items = matched
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(_, _, rt)| {
+                let mut t = rt.task.lock().clone();
+                t.downloaded = rt.downloaded.load(Ordering::Relaxed);
+                t
+            })
+            .collect();
+        TaskPage {
+            items,
+            total,
+            has_more: offset.saturating_add(limit) < total,
+        }
+    }
+
+    /// 侧边栏计数与总速度：分页后 UI 手里只有当前页，这些数不能靠本地数组算。
+    pub fn stats(&self) -> TaskStats {
+        let map = self.tasks.lock();
+        let mut st = TaskStats::default();
+        for rt in map.values() {
+            let t = rt.task.lock();
+            st.counts.all += 1;
+            match t.state {
+                TaskState::Downloading | TaskState::Probing => {
+                    st.counts.downloading += 1;
+                    st.active += 1;
+                    st.total_speed += t.speed;
+                }
+                TaskState::Queued => st.counts.downloading += 1,
+                TaskState::Completed => st.counts.completed += 1,
+                TaskState::Paused => st.counts.paused += 1,
+                TaskState::Error => st.counts.error += 1,
+                TaskState::Scheduled => {}
+            }
+        }
+        st
+    }
+
     /// 平台层上报网络是否可用。
     ///
     /// 安卓侧每 2s 从 ConnectivityManager 读一次（桌面端不需要，默认恒为 true）。
@@ -3120,6 +3205,60 @@ mod tests {
         assert!(wrote, "当前代应能正常写状态");
         assert_eq!(rt.task.lock().state, TaskState::Paused);
         assert!(engine.store.is_dead("t1") == false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 分页：筛选语义与 UI 按钮一致（下载中含排队、暂停含定时），
+    /// 同毫秒要有稳定顺序，总数与 has_more 不能把「当前页」当成全部。
+    #[tokio::test]
+    async fn page_filters_and_reports_totals() {
+        use TaskState::*;
+        let (engine, dir) = engine_in_temp("page");
+        let rows: [(TaskState, Option<&str>); 7] = [
+            (Downloading, None),
+            (Queued, None),
+            (Completed, Some("video")),
+            (Completed, None),
+            (Paused, None),
+            (Error, None),
+            (Scheduled, None),
+        ];
+        for (i, (state, cat)) in rows.iter().enumerate() {
+            let mut t = test_task(&format!("t{i}"), *state);
+            t.created_at = 1_000 + i as i64;
+            t.category = cat.map(|c| c.to_string());
+            engine.index_task(Runtime::new(t));
+        }
+
+        let p = engine.page("all", None, 0, 3);
+        assert_eq!(p.total, 7);
+        assert_eq!(p.items.len(), 3);
+        assert!(p.has_more, "还有 4 条没取");
+        assert_eq!(p.items[0].id, "t6", "created_at 倒序，最新在前");
+
+        let tail = engine.page("all", None, 6, 3);
+        assert_eq!(tail.items.len(), 1);
+        assert!(!tail.has_more);
+
+        assert_eq!(
+            engine.page("downloading", None, 0, 50).total,
+            2,
+            "排队的也算下载中"
+        );
+        assert_eq!(
+            engine.page("paused", None, 0, 50).total,
+            2,
+            "定时任务显示在暂停里"
+        );
+        assert_eq!(engine.page("completed", None, 0, 50).total, 2);
+        assert_eq!(engine.page("all", Some("video"), 0, 50).total, 1);
+
+        let st = engine.stats();
+        assert_eq!(st.counts.all, 7);
+        assert_eq!(st.counts.downloading, 2);
+        assert_eq!(st.counts.completed, 2);
+        assert_eq!(st.counts.paused, 1, "计数沿用原 UI 语义：不含定时");
+        assert_eq!(st.counts.error, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
