@@ -368,6 +368,12 @@ fn writer_loop(root: PathBuf, q: Arc<Queue>, dead: Arc<Mutex<std::collections::H
                         let _ = fs::remove_file(&path);
                         continue;
                     }
+                    // 凭据单独加密存 `creds.enc`（见 creds.rs），任务 JSON 一律不写。
+                    // 这里是唯一的任务落盘入口，所以只要在这里剥掉就不会有漏网路径；
+                    // 内存里的 Task 仍带凭据，运行时照常使用。
+                    let mut task = task;
+                    task.cookie = None;
+                    task.password = None;
                     match serde_json::to_vec_pretty(&task) {
                         Ok(data) => {
                             if let Err(e) = write_atomic(&path, &data, &seq) {

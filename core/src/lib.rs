@@ -8,6 +8,7 @@
 
 pub mod api;
 pub mod bt;
+pub mod creds;
 pub mod crypto;
 pub mod dns;
 pub mod engine;

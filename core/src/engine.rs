@@ -215,6 +215,8 @@ pub struct Engine {
     /// 所以断网且有任务在等重试时，引擎自己按 30s 节流去连一次目标主机端口，
     /// 通了就把标志翻回可用。只连端口、不动任务状态，界面上不会出现「闪一下下载中」。
     net_probe: Mutex<Option<std::time::Instant>>,
+    /// 加密凭据库：cookie/password 不随任务 JSON 落盘（见 creds.rs）
+    creds: crate::creds::CredStore,
     /// 定时任务的到期堆：`(到期毫秒, id)` 的**最小堆**（用 `Reverse` 包一层）。
     ///
     /// 为什么不用每轮扫活跃集合：1000 个定时任务就是每 500ms 拿 1000 次任务锁，
@@ -387,7 +389,9 @@ impl Engine {
         // 默认 provider 时会 panic（release = panic=abort，等于应用直接退出）。
         // 这里显式安装一次 ring 作为进程默认，重复调用只会返回 Err，可安全忽略。
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let store = Store::new(store_root.into()).context("初始化数据目录失败")?;
+        let root: std::path::PathBuf = store_root.into();
+        let store = Store::new(root.clone()).context("初始化数据目录失败")?;
+        let creds = crate::creds::CredStore::open(&root).context("初始化凭据库失败")?;
         let mut settings = store.load_settings();
         if settings.api_token.trim().is_empty() {
             settings.api_token = uuid::Uuid::new_v4().simple().to_string();
@@ -405,6 +409,7 @@ impl Engine {
             retries: Mutex::new(crate::retry::RetryBook::default()),
             network_available: std::sync::atomic::AtomicBool::new(true),
             net_probe: Mutex::new(None),
+            creds,
             sched_due: Mutex::new(std::collections::BinaryHeap::new()),
             wake: tokio::sync::Notify::new(),
             bt_ids: Mutex::new(std::collections::HashSet::new()),
@@ -419,7 +424,25 @@ impl Engine {
 
         // 载入历史任务（进行中的已回落为 Paused）
         let loaded = engine.store.load_tasks();
-        for t in loaded {
+        for mut t in loaded {
+            // 旧版本的任务 JSON 里可能有明文凭据：迁入加密库，并立即重写该任务文件
+            // （写入时会剥掉 cookie/password），保证明文不会继续躺在磁盘上。
+            let migrated = t.cookie.is_some() || t.password.is_some();
+            if migrated {
+                let c = crate::creds::TaskCreds {
+                    cookie: t.cookie.clone(),
+                    password: t.password.clone(),
+                };
+                if let Err(e) = engine.creds.set(&t.id, &c) {
+                    eprintln!("[creds] 迁移任务 {} 的凭据失败：{e:#}", t.id);
+                }
+            } else if let Some(c) = engine.creds.get(&t.id) {
+                t.cookie = c.cookie;
+                t.password = c.password;
+            }
+            if migrated {
+                let _ = engine.store.save_task(&t);
+            }
             engine.index_task(Runtime::new(t));
         }
         // 后台循环负责：速度统计、进度广播、定时触发、并发泵
@@ -1111,6 +1134,15 @@ impl Engine {
     }
 
     fn insert_task(&self, t: Task) {
+        let c = crate::creds::TaskCreds {
+            cookie: t.cookie.clone(),
+            password: t.password.clone(),
+        };
+        if !c.is_empty() {
+            if let Err(e) = self.creds.set(&t.id, &c) {
+                eprintln!("[creds] 保存任务 {} 的凭据失败：{e:#}", t.id);
+            }
+        }
         self.index_task(Runtime::new(t.clone()));
         let _ = self.store.save_task(&t);
         self.emit(EngineEvent::TaskUpdated(t));
@@ -1573,6 +1605,10 @@ impl Engine {
         if let Err(e) = self.store.delete_task(id) {
             // 删不掉就明说：否则重启后这个任务会重新出现，用户只会觉得「删了又回来」
             self.emit(EngineEvent::Notice(format!("任务记录未能删除：{e}")));
+        }
+        // 凭据一起删，避免库文件随历史任务无限增长
+        if let Err(e) = self.creds.remove(id) {
+            eprintln!("[creds] 删除任务 {id} 的凭据失败：{e:#}");
         }
         if delete_file && !is_bt {
             remove_downloaded(&path).await;
@@ -3205,6 +3241,73 @@ mod tests {
         assert!(wrote, "当前代应能正常写状态");
         assert_eq!(rt.task.lock().state, TaskState::Paused);
         assert!(engine.store.is_dead("t1") == false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 凭据只在内存与加密库：任务 JSON 不能出现明文，重开引擎要能回填。
+    #[tokio::test]
+    async fn task_json_never_contains_credentials() {
+        let (engine, dir) = engine_in_temp("creds-json");
+        let mut t = test_task("c1", TaskState::Paused);
+        t.cookie = Some("SESSION-XYZ".into());
+        t.password = Some("PW-XYZ".into());
+        engine.insert_task(t);
+        engine.store.flush().expect("落盘应成功");
+
+        let raw =
+            std::fs::read_to_string(dir.join("tasks").join("c1.json")).expect("任务文件应存在");
+        assert!(
+            !raw.contains("SESSION-XYZ"),
+            "任务 JSON 里不能有 cookie 明文"
+        );
+        assert!(!raw.contains("PW-XYZ"), "任务 JSON 里不能有密码明文");
+
+        let c = engine.creds.get("c1").expect("凭据应在加密库里");
+        assert_eq!(c.cookie.as_deref(), Some("SESSION-XYZ"));
+        assert_eq!(c.password.as_deref(), Some("PW-XYZ"));
+
+        engine.creds.remove("c1").unwrap();
+        assert!(engine.creds.get("c1").is_none(), "删除任务要顺手清凭据");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 旧版本把凭据写在任务 JSON 里：启动时要迁入加密库，并立刻重写文件去掉明文。
+    #[tokio::test]
+    async fn legacy_plaintext_credentials_are_migrated() {
+        let dir = std::env::temp_dir().join(format!(
+            "felldl-creds-migrate-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tasks")).unwrap();
+        let legacy = serde_json::json!({
+            "id": "old1",
+            "url": "https://example.com/f.bin",
+            "file_name": "f.bin",
+            "save_dir": "/tmp",
+            "save_path": "/tmp/f.bin",
+            "state": "paused",
+            "cookie": "LEGACY-COOKIE",
+            "password": "LEGACY-PW",
+        });
+        std::fs::write(
+            dir.join("tasks").join("old1.json"),
+            serde_json::to_vec_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let engine = Engine::new(&dir).expect("引擎应能启动");
+        let c = engine.creds.get("old1").expect("明文凭据应已迁入加密库");
+        assert_eq!(c.cookie.as_deref(), Some("LEGACY-COOKIE"));
+        assert_eq!(c.password.as_deref(), Some("LEGACY-PW"));
+        // 引擎内任务仍能正常用凭据
+        let t = engine.get("old1").expect("任务应已载入");
+        assert_eq!(t.cookie.as_deref(), Some("LEGACY-COOKIE"));
+
+        engine.store.flush().unwrap();
+        let raw = std::fs::read_to_string(dir.join("tasks").join("old1.json")).unwrap();
+        assert!(!raw.contains("LEGACY-COOKIE"), "迁移后旧文件要去掉明文");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
