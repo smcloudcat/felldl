@@ -158,9 +158,27 @@ fn remove_files_in(dir: &std::path::Path) -> u64 {
 
 // ───────────────────────── 命令 ─────────────────────────
 
+/// IPC 出口统一脱敏。
+///
+/// `Task` 里的 `cookie` / `password` 是下载器自己用的凭据。webview 只需要知道
+/// 「有没有填」，不需要明文：明文一旦进了前端，就会出现在 devtools、错误上报、
+/// 截图和任何 `JSON.stringify(task)` 里。真正的读取方是引擎和本地 HTTP API，
+/// 两者各自动手从引擎拿（HTTP API 也走 `redacted()`）。
+fn redact_tasks(tasks: Vec<Task>) -> Vec<Task> {
+    tasks.into_iter().map(|t| t.redacted()).collect()
+}
+
+/// 事件推送同样要脱敏：`TaskUpdated` 带完整 Task，`TaskProgress` 不带凭据。
+fn redact_event(ev: &EngineEvent) -> EngineEvent {
+    match ev {
+        EngineEvent::TaskUpdated(t) => EngineEvent::TaskUpdated(t.redacted()),
+        other => other.clone(),
+    }
+}
+
 #[tauri::command]
 async fn list_tasks(state: State<'_, AppState>) -> Result<Vec<Task>, String> {
-    Ok(state.engine.snapshot())
+    Ok(redact_tasks(state.engine.snapshot()))
 }
 
 #[tauri::command]
@@ -2023,7 +2041,9 @@ pub fn run() {
                 loop {
                     match rx.recv().await {
                         Ok(ev) => {
-                            let _ = app_handle.emit("engine://event", &ev);
+                            // 推给 webview 的是脱敏副本；通知/系统动作用原始事件
+                            let wire = redact_event(&ev);
+                            let _ = app_handle.emit("engine://event", &wire);
                             // 完成时发系统通知
                             if let EngineEvent::TaskUpdated(ref t) = ev {
                                 if t.state == felldl_core::TaskState::Completed {
@@ -2404,5 +2424,59 @@ mod open_path_tests {
         let err = check_path_ready(&missing.to_string_lossy(), "定位").unwrap_err();
         assert!(err.contains("路径不可用"), "路径不存在要直说，实际：{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// IPC 出口脱敏：webview 不该看到任务凭据的明文。
+#[cfg(test)]
+mod ipc_redaction_tests {
+    use super::{redact_event, redact_tasks};
+    use felldl_core::{EngineEvent, Task};
+
+    fn task_with_secrets() -> Task {
+        serde_json::from_value(serde_json::json!({
+            "id": "ipc-redact-1",
+            "url": "https://example.com/private.bin",
+            "file_name": "private.bin",
+            "save_dir": "/tmp",
+            "save_path": "/tmp/private.bin",
+            "state": "downloading",
+            "cookie": "session=secret",
+            "username": "alice",
+            "password": "hunter2"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn snapshot_masks_cookie_and_password() {
+        let out = redact_tasks(vec![task_with_secrets()]);
+        assert_eq!(out[0].cookie.as_deref(), Some("***"));
+        assert_eq!(out[0].password.as_deref(), Some("***"));
+        // 用户名不是秘密（界面上要显示是谁在下载），必须保留
+        assert_eq!(out[0].username.as_deref(), Some("alice"));
+        assert_eq!(out[0].url, "https://example.com/private.bin");
+    }
+
+    #[test]
+    fn task_updated_event_is_masked() {
+        let ev = redact_event(&EngineEvent::TaskUpdated(task_with_secrets()));
+        match ev {
+            EngineEvent::TaskUpdated(t) => {
+                assert_eq!(t.cookie.as_deref(), Some("***"));
+                assert_eq!(t.password.as_deref(), Some("***"));
+            }
+            other => panic!("事件类型不该变：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_secrets_stays_absent() {
+        let mut t = task_with_secrets();
+        t.cookie = None;
+        t.password = None;
+        let out = redact_tasks(vec![t]);
+        assert_eq!(out[0].cookie, None, "没填凭据就不要凭空变成 ***");
+        assert_eq!(out[0].password, None);
     }
 }
