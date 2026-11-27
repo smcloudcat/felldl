@@ -42,6 +42,21 @@ class DownloadService : Service() {
         }
     }
 
+    /**
+     * Android 15（API 35）起，`dataSync` 类型的前台服务 24 小时内只有 6 小时配额。
+     * 用尽时系统回调这里；**必须立刻退出前台**，否则系统会直接杀掉进程并抛
+     * `RemoteServiceException`（用户看到的是「应用已停止」）。
+     *
+     * 退出前台只意味着失去优先级保护，引擎里的下载仍在跑、断点仍有效；
+     * 用户下次打开应用会自动恢复前台状态（前提是配额已经回血）。
+     * 真正的长期方案是改用 `JobScheduler` 的用户发起数据传输任务，见计划文档 A03 未做项。
+     */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        // 不调用 super：基类在低版本上不存在这个重载，且默认实现不可依赖
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+        stopSelf()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         // stopForeground 在 stopSelf 流程里也会被调用，重复调用无害
