@@ -17,6 +17,7 @@ pub mod metalink;
 pub mod mirror;
 pub mod model;
 pub mod remote;
+pub mod retry;
 pub mod store;
 pub mod update;
 pub mod util;

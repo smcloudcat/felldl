@@ -112,6 +112,55 @@ const FALLBACK_UA: &str = "felldl/0.1 (+https://github.com/felldl)";
 /// reqwest::Client 内部是 Arc，clone 只是引用计数，共享同一个连接池。
 const CLIENT_CACHE_CAP: usize = 8;
 
+/// 分片读取的「空闲超时」：连续这么久没有收到任何新字节，就认定这条连接死了。
+///
+/// 为什么不能只靠 reqwest 的 `timeout`：那是**整个请求**的上限，400MB 在慢速源上本来就要
+/// 跑几十分钟，只能设成小时级，于是「服务器静默挂掉」会表现为任务永远停在“下载中”。
+/// 真机实测（A03 批次 C）：杀掉限速服务器后 2 分半钟仍无任何错误、进度一动不动，
+/// 引擎根本没有机会进入自动重试。分片下载是持续数据流，60 秒零字节只可能是死连接。
+const READ_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 等响应头的上限。
+///
+/// **这个洞比读超时更隐蔽**：连接池会复用空闲连接，服务器挂掉后那根“连接”在本地看起来
+/// 还是好的，请求写进内核缓冲区就算成功，然后永远等不到响应头——此时既没有 body 可读，
+/// 也就轮不到读超时/空闲看门狗。真机实测：杀掉限速服务器后任务停在“下载中”超过 5 分钟，
+/// 引擎完全没有机会报错重试。30 秒足够慢速源把响应头吐完，也足够快地判定死连接。
+const RESPONSE_HEADER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 平台报告断网时，引擎自己探测目标主机可达性的间隔
+const SELF_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// 端口连得上就算「网络回来了」。
+///
+/// 只做 TCP 握手，不发 HTTP 请求：目的是判断「有没有路」，不是「这个 URL 能不能下」。
+/// 服务器本身挂掉时这里会连不上，但那属于正常重试该处理的事，不是网络问题。
+async fn tcp_reachable(host: &str, port: u16) -> bool {
+    matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::net::TcpStream::connect((host, port))
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
+/// 发请求并限时等响应头；超时按「可重试的网络错误」处理
+async fn send_with_header_timeout(
+    req: reqwest::RequestBuilder,
+    ctx: &'static str,
+) -> Result<reqwest::Response, anyhow::Error> {
+    match tokio::time::timeout(RESPONSE_HEADER_TIMEOUT, req.send()).await {
+        Ok(r) => r.map_err(|e| anyhow::Error::new(e).context(ctx)),
+        Err(_) => Err(crate::error::FellError::new(
+            crate::error::ErrorKind::Timeout,
+            format!("{}：服务器 {} 秒没有返回响应头", ctx, RESPONSE_HEADER_TIMEOUT.as_secs()),
+        )
+        .into()),
+    }
+}
+
 #[derive(Default)]
 struct ClientCache {
     map: HashMap<String, Client>,
@@ -147,6 +196,19 @@ pub struct Engine {
     /// 以前每轮都要遍历全表并逐个加任务锁，历史越多 CPU 越白烧；
     /// 现在 tick 的开销只与「活跃任务数」相关，与历史总量无关。
     live: Mutex<std::collections::HashSet<TaskId>>,
+    /// 可重试失败的自动重试排期（见 `crate::retry`）。
+    /// 与 `live` 分开：出错的任务不在活跃索引里，但仍然要能被「等会儿再试」。
+    retries: Mutex<crate::retry::RetryBook>,
+    /// 平台层报告的「当前有没有网络」。桌面端恒为 true；
+    /// 安卓由 ConnectivityManager 每 2s 喂一次。断网时**不烧重试次数**，只挂着等。
+    network_available: std::sync::atomic::AtomicBool,
+    /// 上次「自己探一次网络」的时间（节流用）。
+    ///
+    /// 平台上报的在线状态是外部输入，可能因为一次查询异常 / 权限变更 / ROM 差异
+    /// 长期停在「没有」。只信它，任务就会永久停在错误态、界面上却写着「稍后重试」。
+    /// 所以断网且有任务在等重试时，引擎自己按 30s 节流去连一次目标主机端口，
+    /// 通了就把标志翻回可用。只连端口、不动任务状态，界面上不会出现「闪一下下载中」。
+    net_probe: Mutex<Option<std::time::Instant>>,
     /// BT 任务索引（含已完成但仍在做种的）：rqbit 状态轮询只遍历这里，
     /// 不再为了找出几个种子而锁住全表每一个任务。
     pub(crate) bt_ids: Mutex<std::collections::HashSet<TaskId>>,
@@ -317,6 +379,9 @@ impl Engine {
             settings: RwLock::new(settings),
             tasks: Mutex::new(HashMap::new()),
             live: Mutex::new(std::collections::HashSet::new()),
+            retries: Mutex::new(crate::retry::RetryBook::default()),
+            network_available: std::sync::atomic::AtomicBool::new(true),
+            net_probe: Mutex::new(None),
             bt_ids: Mutex::new(std::collections::HashSet::new()),
             events: tx,
             global_limiter: limiter,
@@ -420,6 +485,55 @@ impl Engine {
         v
     }
 
+    /// 平台层上报网络是否可用。
+    ///
+    /// 安卓侧每 2s 从 ConnectivityManager 读一次（桌面端不需要，默认恒为 true）。
+    /// 用途只有一个：**断网期间不要烧掉自动重试次数**，而是把排期挂着；
+    /// 恢复的那一刻把所有等待中的任务提前到现在，用户不用等退避走完。
+    pub fn set_network_available(&self, up: bool) {
+        let was = self.network_available.swap(up, Ordering::SeqCst);
+        if up && !was {
+            let now = std::time::Instant::now();
+            // 一次加锁拿到列表再改：同一把 std::Mutex 不能嵌套 lock（不可重入）
+            let mut book = self.retries.lock();
+            let waiting = book.waiting();
+            for id in waiting {
+                book.hurry(&id, now);
+            }
+        }
+    }
+
+    pub fn network_available(&self) -> bool {
+        self.network_available.load(Ordering::SeqCst)
+    }
+
+    /// 到了「该自己探一次网络」的时候吗（30s 节流，顺带把时间戳推后）
+    fn should_self_probe(&self) -> bool {
+        let mut last = self.net_probe.lock();
+        match *last {
+            Some(t) if t.elapsed() < SELF_PROBE_INTERVAL => false,
+            _ => {
+                *last = Some(std::time::Instant::now());
+                true
+            }
+        }
+    }
+
+    /// 任务的目标主机端口（用于「平台说没网时自己探一次」）
+    fn task_endpoint(&self, id: &str) -> Option<(String, u16)> {
+        let rt = self.tasks.lock().get(id).cloned()?;
+        let url = rt.task.lock().url.clone();
+        let u = reqwest::Url::parse(&url).ok()?;
+        let host = u.host_str()?.to_string();
+        let port = u.port_or_known_default()?;
+        Some((host, port))
+    }
+
+    /// 有没有任务在等自动重试（给平台层/UI 用）
+    pub fn retry_waiting(&self) -> usize {
+        self.retries.lock().len()
+    }
+
     /// 真正在传输的任务 id（`Probing` / `Downloading`）。
     ///
     /// 给平台层判断「要不要挂前台服务 / 保持唤醒」用：这类判断每几秒问一次，
@@ -519,6 +633,8 @@ impl Engine {
         let mut b = Client::builder()
             .user_agent(ua)
             .connect_timeout(std::time::Duration::from_secs(20))
+            // 总超时只是兜底：大文件本来就要跑几小时，它拦不住「连接还活着但永远不吐字节」。
+            // 那种死连接由读取处的空闲看门狗负责（见 READ_IDLE_TIMEOUT）。
             .timeout(std::time::Duration::from_secs(3600))
             .pool_max_idle_per_host(idle_cap)
             // 不少下载站 / 镜像站的证书链不完整，这里保留校验但允许常见兼容
@@ -1007,7 +1123,7 @@ impl Engine {
         }
         // 跨 origin（镜像/跨域跳转）不附加任何认证信息
         let req = creds.apply(req, url);
-        let resp = req.send().await.context("连接服务器失败")?;
+        let resp = send_with_header_timeout(req, "连接服务器失败").await?;
         let status = resp.status();
         let h = resp.headers();
 
@@ -1079,6 +1195,8 @@ impl Engine {
         let Some(rt) = self.tasks.lock().get(id).cloned() else {
             bail!("任务不存在");
         };
+        // 用户按了暂停，就不再自动把它拉起来——否则「暂停」在退避期满后被自己推翻
+        self.retries.lock().clear(id);
         // BT 任务走 rqbit 会话暂停
         if rt.task.lock().kind == TaskKind::Bt {
             self.bt_pause(&rt).await;
@@ -1107,6 +1225,12 @@ impl Engine {
     }
 
     pub async fn resume(self: &Arc<Self>, id: &str) -> Result<()> {
+        // 用户手动「继续/重试」= 重新给满自动重试预算（他明确表达了「再试试」）
+        self.retries.lock().clear(id);
+        self.resume_impl(id).await
+    }
+
+    async fn resume_impl(self: &Arc<Self>, id: &str) -> Result<()> {
         let Some(rt) = self.tasks.lock().get(id).cloned() else {
             bail!("任务不存在");
         };
@@ -1205,6 +1329,8 @@ impl Engine {
             t.save_path.clone()
         };
         self.unindex_task(id);
+        // 任务已经不存在了，排期必须一起清：否则 tick 会对着一个死 id 反复「重试」
+        self.retries.lock().clear(id);
         if let Err(e) = self.store.delete_task(id) {
             // 删不掉就明说：否则重启后这个任务会重新出现，用户只会觉得「删了又回来」
             self.emit(EngineEvent::Notice(format!("任务记录未能删除：{e}")));
@@ -1308,10 +1434,41 @@ impl Engine {
         };
         let generation = generation.unwrap_or_else(|| rt.current_generation());
         let dl = rt.downloaded.load(Ordering::Relaxed);
+
+        // 先决定要不要排自动重试，再写状态：重试信息要跟错误文案一起落到同一份快照里，
+        // 否则界面会先闪一个「没有下文的错误」，下一轮才变成「2 秒后重试」。
+        // 删除中的任务不排（用户已经不要它了），不可重试的错误也不排（404 再试也没用）。
+        let attempt = if rt.deleting.load(Ordering::SeqCst) {
+            None
+        } else {
+            let info = crate::error::classify(err);
+            if info.retryable {
+                // 断网时排期照挂，但不计入重试预算（on_failure 内部区分）
+                self.retries
+                    .lock()
+                    .on_failure(id, std::time::Instant::now(), self.network_available())
+            } else {
+                self.retries.lock().clear(id);
+                None
+            }
+        };
+
         self.commit_state(&rt, generation, TaskState::Error, |t| {
             t.set_error(err);
             t.speed = 0;
             t.downloaded = dl;
+            if let Some(n) = attempt {
+                // 把「会不会自己好」写进人话：用户看到这句就不会急着去点重试
+                let wait = crate::retry::backoff_secs(n);
+                let tail = if self.network_available() {
+                    format!("（第 {n}/{} 次自动重试将在 {wait} 秒后）", crate::retry::MAX_ATTEMPTS)
+                } else {
+                    format!("（第 {n}/{} 次将在网络恢复后重试）", crate::retry::MAX_ATTEMPTS)
+                };
+                if let Some(msg) = t.error.take() {
+                    t.error = Some(format!("{msg}{tail}"));
+                }
+            }
         });
         if rt.is_current(generation) {
             *rt.running.lock() = false;
@@ -1809,7 +1966,7 @@ impl Engine {
         // 重定向终址可能已跨域：凭据只在原始 origin 才发送
         let creds = Creds::from_task(&task_snapshot);
         let req = creds.apply(req, &url);
-        let resp = req.send().await.context("请求失败")?;
+        let resp = send_with_header_timeout(req, "请求失败").await?;
         let status = resp.status();
         // 请求了 Range 但服务器回 200（不支持续传）：必须从头写，否则文件会错位
         let resumed_by_server = status == StatusCode::PARTIAL_CONTENT;
@@ -1855,7 +2012,21 @@ impl Engine {
                     self.save_paused(rt, generation);
                     return Ok(false);
                 }
-                chunk = stream.next() => {
+                // 与分片路径同一套空闲看门狗：单流任务同样会遇到「连接还在但不吐数据」
+                idle = tokio::time::timeout(READ_IDLE_TIMEOUT, stream.next()) => {
+                    let chunk = match idle {
+                        Ok(c) => c,
+                        Err(_) => {
+                            return Err(FellError::new(
+                                crate::error::ErrorKind::Network,
+                                format!(
+                                    "连接 {} 秒没有收到任何数据（判定为死连接）",
+                                    READ_IDLE_TIMEOUT.as_secs()
+                                ),
+                            )
+                            .into());
+                        }
+                    };
                     match chunk {
                         Some(Ok(bytes)) => {
                             let n = bytes.len() as u64;
@@ -1921,6 +2092,9 @@ impl Engine {
             }
         }
         let dl = rt.downloaded.load(Ordering::Relaxed);
+        // 任务已经成功，任何待重试排期都作废（否则表会随着成功任务慢慢漏）
+        let tid = rt.task.lock().id.clone();
+        self.retries.lock().clear(&tid);
         let mut reschedule = false;
         let completed = self.commit_state(rt, generation, TaskState::Completed, |t| {
             let total = t.size.unwrap_or(dl);
@@ -2054,6 +2228,56 @@ impl Engine {
                 // 定时任务触发
                 for id in targets.due {
                     let _ = me.resume(&id).await;
+                }
+
+                // 平台说没网，但有任务在等重试：别全信它，自己连一次目标端口。
+                // 这里只连 TCP、不碰任务状态——直接重试会在界面留下「Error ↔ 下载中」
+                // 的闪烁（断网时每轮探测都闪一次），用户会以为程序在乱动。
+                if !me.network_available() && me.retry_waiting() > 0 && me.should_self_probe() {
+                    // 先把 id 列表拷出来再 await：循环里直接持有 MutexGuard 会跨 await 死锁
+                    let waiting = me.retries.lock().waiting();
+                    for id in waiting {
+                        let Some((host, port)) = me.task_endpoint(&id) else {
+                            continue;
+                        };
+                        if tcp_reachable(&host, port).await {
+                            eprintln!("[net] 自检可达 {host}:{port}，判定网络已恢复");
+                            me.set_network_available(true);
+                            break;
+                        }
+                    }
+                }
+
+                // 自动重试：只处理「错误态 + 到点」的任务。
+                //
+                // 断网期间不触发（否则退避几轮就把 5 次预算全烧光，用户把网络打开时
+                // 早已放弃）；网络恢复的瞬间 set_network_available(true) 会把排期提前到现在。
+                // 上面那段自检保证「平台一直说没网但其实有网」也能自己走出来。
+                if me.network_available() {
+                    let now = std::time::Instant::now();
+                    let due = me.retries.lock().due(now);
+                    for id in due {
+                        // 排期可能与真实状态脱钩（用户暂停/删了、或者别的路径重开过），
+                        // 只有仍处于错误态才继续，否则把这条排期清掉
+                        let state = me.get(&id).map(|t| t.state);
+                        if state == Some(TaskState::Error) {
+                            me.retries.lock().fired(&id);
+                            // 注意走 resume_impl 而不是 resume：
+                            // 后者会清空重试预算，自动重试就永远不会到上限
+                            let _ = me.resume_impl(&id).await;
+                            // 兜底：resume_impl 可能早退（并发泵已经拉起 / 文件被占用），
+                            // 既没开始传输也没走到 fail_task。此时排期停在 due=None，
+                            // 谁都不会再触发它，任务就会「承诺稍后重试」却永远不动。
+                            if me.get(&id).map(|t| t.state) == Some(TaskState::Error) {
+                                let rearmed = me.retries.lock().rearm(&id, now);
+                                if rearmed {
+                                    eprintln!("[retry] {id} 未能重启，{}s 后再试", crate::retry::REARM_SECS);
+                                }
+                            }
+                        } else {
+                            me.retries.lock().clear(&id);
+                        }
+                    }
                 }
 
                 // 并发泵：把排队任务提起来
@@ -2436,7 +2660,7 @@ async fn fetch_segment(
         job.basic.as_ref().map(|(u, p)| (u.as_str(), p.as_str())),
     );
     let req = creds.apply(req, url);
-    let resp = req.send().await.map_err(FellError::from)?;
+    let resp = send_with_header_timeout(req, "分片请求失败").await?;
     let status = resp.status();
 
     if status == StatusCode::OK {
@@ -2457,7 +2681,22 @@ async fn fetch_segment(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
-            chunk = stream.next() => {
+            // 空闲看门狗：`select!` 的这支每轮重新计时的前提是「有数据就一直有 future 完成」，
+            // 所以这里套一层 timeout 而不是包整个循环——只要还在收数据就永远不会触发。
+            idle = tokio::time::timeout(READ_IDLE_TIMEOUT, stream.next()) => {
+                let chunk = match idle {
+                    Ok(c) => c,
+                    Err(_) => {
+                        return Err(FellError::new(
+                            crate::error::ErrorKind::Network,
+                            format!(
+                                "连接 {} 秒没有收到任何数据（判定为死连接）",
+                                READ_IDLE_TIMEOUT.as_secs()
+                            ),
+                        )
+                        .into());
+                    }
+                };
                 match chunk {
                     Some(Ok(bytes)) => {
                         // 服务器可能多给数据，按分片边界截断
@@ -2802,6 +3041,101 @@ mod tests {
         engine.unindex_task("t1");
         assert!(!engine.tasks.lock().contains_key("t1"));
         assert!(!engine.live.lock().contains("t1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 可重试的网络错误要自己安排一次重试，并把「会不会自己好」写进人话。
+    #[tokio::test]
+    async fn retryable_failure_schedules_retry() {
+        let (engine, dir) = engine_in_temp("retry-net");
+        let rt = Runtime::new(test_task("t1", TaskState::Downloading));
+        engine.index_task(rt.clone());
+        engine.tasks.lock().insert("t1".to_string(), rt.clone());
+
+        let err = anyhow::Error::new(crate::error::FellError::new(
+            crate::error::ErrorKind::Network,
+            "网络错误：connection reset",
+        ));
+        engine.fail_task("t1", None, &err);
+
+        let t = engine.get("t1").expect("任务还在");
+        assert_eq!(t.state, TaskState::Error);
+        assert_eq!(t.retryable, Some(true), "网络错误必须标成可重试");
+        let msg = t.error.unwrap_or_default();
+        assert!(msg.contains("自动重试将在 2 秒后"), "要告诉用户会自己重试：{msg}");
+        assert_eq!(engine.retry_waiting(), 1, "应已排上一次重试");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 404 这类重试没意义的错误不许排重试：否则「立刻知道结果」被拖成「三分钟后还是失败」。
+    #[tokio::test]
+    async fn non_retryable_failure_does_not_schedule_retry() {
+        let (engine, dir) = engine_in_temp("retry-404");
+        let rt = Runtime::new(test_task("t1", TaskState::Downloading));
+        engine.index_task(rt.clone());
+        engine.tasks.lock().insert("t1".to_string(), rt.clone());
+
+        let err = anyhow::Error::new(crate::error::FellError::http(404, "文件不存在"));
+        engine.fail_task("t1", None, &err);
+
+        let t = engine.get("t1").expect("任务还在");
+        assert_eq!(t.state, TaskState::Error);
+        assert_eq!(t.retryable, Some(false));
+        assert!(
+            !t.error.unwrap_or_default().contains("自动重试"),
+            "不可重试的错误不该出现「稍后会重试」的承诺"
+        );
+        assert_eq!(engine.retry_waiting(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 断网时排期要挂起并改文案：不能一边没网一边把 5 次预算烧光。
+    #[tokio::test]
+    async fn offline_failure_says_it_waits_for_network() {
+        let (engine, dir) = engine_in_temp("retry-offline");
+        let rt = Runtime::new(test_task("t1", TaskState::Downloading));
+        engine.index_task(rt.clone());
+        engine.tasks.lock().insert("t1".to_string(), rt.clone());
+
+        engine.set_network_available(false);
+        let err = anyhow::Error::new(crate::error::FellError::new(
+            crate::error::ErrorKind::Network,
+            "网络错误：unreachable",
+        ));
+        engine.fail_task("t1", None, &err);
+
+        let msg = engine.get("t1").and_then(|t| t.error).unwrap_or_default();
+        assert!(msg.contains("网络恢复后重试"), "断网文案要不同：{msg}");
+        assert_eq!(engine.retry_waiting(), 1, "排期仍在，只是等着网络");
+        engine.set_network_available(true);
+        assert!(engine.network_available());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 用户按了暂停，自动重试必须让位——不能过几秒把任务自己拉起来。
+    #[tokio::test]
+    async fn pause_cancels_pending_retry() {
+        let (engine, dir) = engine_in_temp("retry-pause");
+        let rt = Runtime::new(test_task("t1", TaskState::Downloading));
+        engine.index_task(rt.clone());
+        engine.tasks.lock().insert("t1".to_string(), rt.clone());
+
+        let err = anyhow::Error::new(crate::error::FellError::new(
+            crate::error::ErrorKind::Timeout,
+            "连接超时",
+        ));
+        engine.fail_task("t1", None, &err);
+        assert_eq!(engine.retry_waiting(), 1);
+
+        engine.pause("t1").await.expect("暂停调用应成功");
+        assert_eq!(
+            engine.retry_waiting(),
+            0,
+            "暂停后不得再留排期，否则用户的选择会被自动重试推翻"
+        );
+        // 错误态本来就没有「暂停」这个动作（状态机不把它改成 Paused），
+        // 这里只关心排期被清掉：用户表达「别动它」之后不许再自己重试
+        assert_eq!(engine.get("t1").unwrap().state, TaskState::Error);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

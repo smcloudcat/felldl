@@ -215,6 +215,18 @@ pub(crate) fn call_helper(
     })
 }
 
+/// 当前有没有可用网络（`ConnectivityManager`）。
+///
+/// 只给「断网时别烧自动重试次数」用；查询失败一律返回 `Err`，由调用方决定忽略
+/// （忽略 = 保持上一次的判断，而不是把任务当成断网永久挂起）。
+pub fn network_online(app: &tauri::AppHandle) -> Result<bool, String> {
+    let raw = call_helper(app, NET_HELPER_CLASS, "isOnline", "(Landroid/content/Context;)Ljava/lang/String;", Vec::new())?;
+    let v = raw
+        .strip_prefix("OK:")
+        .ok_or_else(|| raw.trim_start_matches("ERR:").to_string())?;
+    Ok(v.trim() == "1")
+}
+
 /// 启动/更新下载前台服务（`text` 是通知副标题）
 pub fn start_download_service(app: &tauri::AppHandle, text: &str, active: usize) -> Result<(), String> {
     // 闭包要 'static（JNI 调用可能在别的线程上跑），参数得自己持有
@@ -300,6 +312,7 @@ pub fn request_all_files_access(
 const APK_HELPER_CLASS: &str = "com/felldl/app/ApkInstaller";
 const STORAGE_HELPER_CLASS: &str = "com/felldl/app/StorageAccess";
 const SERVICE_HELPER_CLASS: &str = "com/felldl/app/DownloadService";
+const NET_HELPER_CLASS: &str = "com/felldl/app/NetworkState";
 
 /// 清掉 JNI 调用留下的 pending 异常。
 ///

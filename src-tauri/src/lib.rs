@@ -2061,7 +2061,22 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        foreground::sync(&fgs_app, fgs_engine.transferring_count());
+                        // 网络状态：断网期间引擎不烧自动重试次数，恢复的那一刻立刻重试
+                        // （查询失败就保持上一次的判断，不能因为一次异常把重试永久挂起）
+                        let net = android::network_online(&fgs_app);
+                        let active = fgs_engine.transferring_count();
+                        if let Ok(up) = net {
+                            // 只在翻转时打一行：真机排查「为什么不续传」时这行最关键
+                            if up != fgs_engine.network_available() {
+                                eprintln!(
+                                    "[net] 网络{}（在等重试 {} 个）",
+                                    if up { "恢复" } else { "断开" },
+                                    fgs_engine.retry_waiting()
+                                );
+                            }
+                            fgs_engine.set_network_available(up);
+                        }
+                        foreground::sync(&fgs_app, active);
                     }
                 });
             }
