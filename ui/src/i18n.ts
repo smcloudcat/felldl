@@ -33,6 +33,7 @@ const zh: Record<string, string> = {
   "upd.current": "当前",
   "upd.go": "去更新",
   "upd.openFail": "打开链接失败",
+  "upd.inProgress": "更新正在后台下载，点击查看进度",
   // 启动
   "boot.failed": "引擎启动失败",
   "boot.starting": "正在启动引擎…",
@@ -352,6 +353,7 @@ const en: Record<string, string> = {
   "upd.current": "current",
   "upd.go": "Update",
   "upd.openFail": "Failed to open link",
+  "upd.inProgress": "Update is downloading in background; click to view progress",
   "boot.failed": "Engine failed to start",
   "boot.starting": "Starting engine…",
   "boot.slow": "Startup is slow, still waiting for backend…",

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import type { Settings, UpdateInfo } from "./types";
-import { api, subscribeUpdateProgress, type AllFilesAccess } from "./bridge";
+import type { Settings } from "./types";
+import { api, type AllFilesAccess } from "./bridge";
 import { toIpcError, type IpcError } from "./ipcError";
+import { useUpdateJob, wireUpdateJob } from "./useUpdateJob";
 import { useI18n, setLang } from "./i18n";
 import {
   IconCopy,
@@ -102,10 +103,9 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   const [apiInfo, setApiInfo] = useState<{ port: number; token: string; running: boolean } | null>(
     null
   );
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   // 结构化错误：code 决定动作（是否去授权页）、message 只负责展示、retryable 决定要不要给重试按钮
-  const [updateErr, setUpdateErr] = useState<IpcError | null>(null);
-  const [checking, setChecking] = useState(false);
+  // 下载/安装失败统一由全局 job 持有；这里只额外保留「安装暂存包」的错误
+  const [stagedErr, setStagedErr] = useState<IpcError | null>(null);
   const [ifaces, setIfaces] = useState<string[]>([]);
   const [dnsTesting, setDnsTesting] = useState(false);
   const [dnsResult, setDnsResult] = useState<string | null>(null);
@@ -121,33 +121,25 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   const [dirOk, setDirOk] = useState<boolean | null>(null);
   const isAndroid = document.documentElement.dataset.platform === "android";
 
-  // ── 应用内直接更新 ──
-  const [phase, setPhase] = useState<"idle" | "download" | "apply">("idle");
-  const updating = phase !== "idle";
-  const [percent, setPercent] = useState(0);
-  const [sizeHint, setSizeHint] = useState("");
+  // 更新状态放在模块级全局 job 里：离开设置页下载不中断，回来进度还在，
+  // 也不会因为组件重挂而重复下载同一个包。
+  const job = useUpdateJob();
+  const updateInfo = job.info;
+  const updating = job.phase !== "idle";
+  const phase = job.phase;
+  const percent = job.percent;
   // 有些 CDN 不给 Content-Length：此时不显示百分比，改走「不确定进度」样式
-  const [hasTotal, setHasTotal] = useState(false);
+  const hasTotal = job.total > 0;
+  const sizeHint =
+    job.total > 0
+      ? `${(job.downloaded / 1024 / 1024).toFixed(1)} / ${(job.total / 1024 / 1024).toFixed(1)} MB`
+      : "";
+  const updateErr = job.error ?? stagedErr ?? job.checkError;
   // 协议弹窗：null / privacy / terms
   const [legal, setLegal] = useState<"privacy" | "terms" | null>(null);
 
   useEffect(() => {
-    let un: (() => void) | undefined;
-    let dead = false;
-    subscribeUpdateProgress((p) => {
-      setPercent(p.percent || 0);
-      setHasTotal(p.total > 0);
-      if (p.total > 0) {
-        const mb = (n: number) => (n / 1024 / 1024).toFixed(1);
-        setSizeHint(`${mb(p.downloaded)} / ${mb(p.total)} MB`);
-      }
-    })
-      .then((f) => (dead ? f() : (un = f)))
-      .catch(() => {});
-    return () => {
-      dead = true;
-      un?.();
-    };
+    wireUpdateJob();
   }, []);
 
   // 调试能力探测：只有 debug 安卓构建会返回 staged_install=true，
@@ -171,53 +163,38 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
     if (!updateInfo) return;
     // 不再在前端按文件名猜「有没有适配包」：平台/ABI 由后端按签名清单里的
     // platform + arch 权威选择，前端猜错会直接拦掉一次本来能成功的更新。
-    setPhase("download");
-    setPercent(0);
-    setSizeHint("");
-    setHasTotal(false);
-    // 上一轮的错误已经过期，重试期间不该继续显示
-    setUpdateErr(null);
-    try {
-      const token = await api.downloadUpdate();
-      setPhase("apply");
-      const mode = await api.applyUpdate(token);
+    setStagedErr(null);
+    const r = await job.start();
+    if (r.kind === "busy") {
+      // 另一个入口已经在下载：不重复下载，也不打扰用户
+      return;
+    }
+    if (r.kind === "done") {
       // Windows 走「退出→覆盖→重启」，这一步之后进程就没了；
       // 安卓返回 installing（已拉起系统安装器），其它平台返回 opened / manual
-      if (mode === "restarting") return;
-      setPhase("idle");
-      toast(t(mode === "installing" ? "set.installing" : "set.manualInstall"));
-    } catch (e) {
-      setPhase("idle");
-      setPercent(0);
-      const err = toIpcError(e, "update.failed");
-      setUpdateErr(err);
-      // 安卓首次更新需要允许「安装未知应用」：直接把人带到设置页，
-      // 回来点「重试」即可（token 没被消费，不必重新下载）
-      if (err.code === "install.need_permission") {
-        toast(t("set.needInstallPermission"), "error");
-        try {
-          await api.openInstallPermissionSettings();
-        } catch {
-          /* 打开失败就只剩提示，用户可以自己去系统设置里开 */
-        }
-      } else if (!err.retryable) {
-        // 重试也没用的错误：卡片里已经写明原因，这里只做一次显眼提示
-        toast(err.message, "error");
-      }
+      if (r.mode === "restarting") return;
+      toast(t(r.mode === "installing" ? "set.installing" : "set.manualInstall"));
+      return;
+    }
+    // 失败：job 已经把结构化错误放进全局状态，这里只负责一次性提示与授权跳转
+    const err = r.error;
+    if (err.code === "install.need_permission") {
+      toast(t("set.needInstallPermission"), "error");
+    } else if (!err.retryable) {
+      toast(err.message, "error");
     }
   }
 
   // 真机验证用：把暂存在 data_dir/debug-updates 的 APK 交给后端安装。
   /// 走的是和真实更新完全相同的分支（权限检查 → 包名/签名/版本校验 → content:// 安装器）。
   async function installStagedApk() {
-    setUpdateErr(null);
+    setStagedErr(null);
     try {
       await api.debugInstallStagedUpdate();
-      setPhase("idle");
       toast(t("set.installing"));
     } catch (e) {
       const err = toIpcError(e, "install.failed");
-      setUpdateErr(err);
+      setStagedErr(err);
       if (err.code === "install.need_permission") {
         toast(t("set.needInstallPermission"), "error");
         try {
@@ -370,21 +347,12 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   }, [isAndroid, draft.download_dir]);
 
   useEffect(() => {
-    let alive = true;
-    api
-      .checkUpdate()
-      .then((info) => {
-        if (!alive) return;
-        setUpdateInfo(info);
-        setUpdateErr(null);
-      })
-      .catch((e) => {
-        if (alive) setUpdateErr(toIpcError(e, "update.check"));
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
+    // 组件重挂不重复请求：job 已经检查过就直接用（后端本身也有 10 分钟缓存）
+    if (job.info || job.checking) return;
+    job.check(false).catch(() => {
+      /* 启动时的静默检查：失败不打扰，错误留在 job.checkError 供设置页展示 */
+    });
+  }, [job]);
 
   useEffect(() => setDraft(settings), [settings]);
 
@@ -445,13 +413,10 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
   }
 
   async function checkUpdate() {
-    setChecking(true);
-    setUpdateErr(null);
     try {
       // force=true：用户主动点击时不用 10 分钟的本地缓存；
       // 底层带 ETag，内容没变时 GitHub 返回 304，不消耗调用配额
-      const info = await api.checkUpdate(true);
-      setUpdateInfo(info);
+      const info = await job.check(true);
       if (info?.note) {
         toast(info.note);
       } else if (info?.has_update) {
@@ -461,10 +426,7 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
       }
     } catch (e) {
       const err = toIpcError(e, "update.check");
-      setUpdateErr(err);
       toast(err.message || t("set.checkFail"), "error");
-    } finally {
-      setChecking(false);
     }
   }
 
@@ -1345,8 +1307,8 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
           <div className="card-sub">{t("set.aboutSub", { v: appVer || updateInfo?.current_version || "…" })}</div>
 
           <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
-            <button className="btn btn-soft" onClick={checkUpdate} disabled={checking || updating} type="button">
-              {checking ? t("set.checking") : t("set.checkUpdate")}
+            <button className="btn btn-soft" onClick={checkUpdate} disabled={job.checking || updating} type="button">
+              {job.checking ? t("set.checking") : t("set.checkUpdate")}
             </button>
             {updateInfo && (
               <span style={{ fontSize: 12, color: "var(--text-mute)" }}>

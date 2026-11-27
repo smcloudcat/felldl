@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FilterKey, Settings, Task, TaskStats, UpdateInfo } from "./types";
+import type { FilterKey, Settings, Task, TaskStats } from "./types";
 import { api, subscribe, subscribeResync } from "./bridge";
 import { mergeSnapshot, revOf } from "./taskMerge";
 import { useVirtualList } from "./useVirtualList";
@@ -10,6 +10,7 @@ import { GrabPage } from "./GrabPage";
 import { cx, formatSpeed } from "./format";
 import { applyAppearance } from "./appearance";
 import { useI18n } from "./i18n";
+import { updateJob, useUpdateJob, wireUpdateJob } from "./useUpdateJob";
 import {
   IconBolt,
   IconCheck,
@@ -89,8 +90,10 @@ export default function App() {
     active: 0,
     total_speed: 0,
   });
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  // 更新状态是全局 job：这里和设置页看的是同一份，切页面不重置
+  const job = useUpdateJob();
+  const updateInfo = job.info;
   const toastId = useRef(0);
   // 取快照（list_tasks）期间收到的事件：用来判断「谁是更新的那一份」，
   // 避免旧快照把已经推进到新状态的任务盖回去（见 taskMerge.ts）
@@ -196,16 +199,13 @@ export default function App() {
   // ── 启动后自动检查更新（静默：失败不打扰） ──
   useEffect(() => {
     if (!settings) return;
-    let alive = true;
-    api
-      .checkUpdate()
-      .then((info) => {
-        if (alive && info?.has_update) setUpdateInfo(info);
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
+    wireUpdateJob();
+    // job 里已有结果（例如刚在设置页检查过）就不再重复请求；
+    // 后端本身也有 10 分钟缓存与 ETag
+    if (updateJob.getState().info) return;
+    updateJob.check(false).catch(() => {
+      /* 离线/源站不可用时静默；用户主动检查时才提示 */
+    });
   }, [settings, reloadKey]);
 
   // ── 订阅引擎事件 ──
@@ -701,6 +701,19 @@ export default function App() {
           </div>
 
           <div className="header-actions">
+            {/* 更新在后台下载时，切到别的页面也能看到并一键回到设置页 */}
+            {job.phase !== "idle" && view !== "settings" && (
+              <button
+                className="btn btn-soft btn-sm"
+                onClick={() => setView("settings")}
+                title={t("upd.inProgress")}
+              >
+                <IconBolt size={13} />
+                {job.phase === "apply"
+                  ? t("set.restarting")
+                  : `${Math.round(job.percent)}%`}
+              </button>
+            )}
             {view === "downloads" && (
               <>
                 {hasActive && (

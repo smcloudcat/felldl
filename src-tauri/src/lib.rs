@@ -37,6 +37,9 @@ pub mod update_helper;
 struct AppState {
     engine: Arc<Engine>,
     api_port: parking_lot_stub::PortCell,
+    /// 更新包下载单飞：两个窗口/连点同时触发时，后一个立刻返回 `update.busy`，
+    /// 而不是两个请求写同一个 `.part` 互相截断。
+    update_busy: std::sync::atomic::AtomicBool,
 }
 
 /// 已通过「清单验签 + 摘要校验」、等待安装的更新包。
@@ -1439,6 +1442,15 @@ struct UpdateProgress {
     percent: f64,
 }
 
+/// 离开作用域就复位下载单飞标记（成功、报错、提前 return 都覆盖）
+struct UpdateBusyGuard<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for UpdateBusyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// 只取文件名部分并过滤危险字符，防止路径穿越
 fn safe_file_name(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
@@ -1519,8 +1531,19 @@ async fn fetch_signed_manifest(
 #[tauri::command]
 async fn download_update(
     app: tauri::AppHandle,
+    state: State<'_, AppState>,
     verified: State<'_, VerifiedUpdates>,
 ) -> Result<String, IpcError> {
+    // 单飞：同一时刻只允许一个更新下载。并发写同一个 .part 会互相截断，
+    // 最后即便验签通过不了，也已经白费了流量。
+    if state
+        .update_busy
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return Err(IpcError::new("update.busy", "已有更新正在下载，请稍候").retryable());
+    }
+    let _busy = UpdateBusyGuard(&state.update_busy);
+
     let current = env!("CARGO_PKG_VERSION");
     let (platform, arch) = (current_platform(), current_arch());
 
@@ -2080,6 +2103,7 @@ pub fn run() {
             app.manage(AppState {
                 engine: engine.clone(),
                 api_port: parking_lot_stub::PortCell::new(bound_port),
+                update_busy: std::sync::atomic::AtomicBool::new(false),
             });
             // 待安装的已校验更新包（token → VerifiedUpdate）
             app.manage(VerifiedUpdates::default());
