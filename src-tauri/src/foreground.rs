@@ -74,7 +74,7 @@ pub(crate) fn sync(app: &tauri::AppHandle, active: usize) {
         if active == 0 {
             crate::android::stop_download_service(app)
         } else {
-            crate::android::start_download_service(app, &format!("正在下载 {active} 个任务"))
+            crate::android::start_download_service(app, &format!("正在下载 {active} 个任务"), active)
         }
     };
     #[cfg(not(target_os = "android"))]

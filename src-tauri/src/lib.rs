@@ -29,6 +29,8 @@ mod apk_update;
 mod storage_access;
 // 安卓前台服务的启停（非安卓空操作，状态判断可单测）
 mod foreground;
+// 通知栏按钮 → 引擎的命令投递目录（解析/清空逻辑可单测）
+mod native_cmd;
 // 更新落地 helper（同一 exe 的隐藏子命令，main 里在 Tauri 初始化前分流）
 pub mod update_helper;
 
@@ -2054,6 +2056,8 @@ pub fn run() {
             {
                 let fgs_app = handle.clone();
                 let fgs_engine = engine.clone();
+                // 通知栏按钮：投递目录每秒扫一次，执行「暂停」这类命令
+                native_cmd::spawn(handle.clone(), engine.clone());
                 tauri::async_runtime::spawn(async move {
                     loop {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;

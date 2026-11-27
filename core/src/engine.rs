@@ -420,23 +420,23 @@ impl Engine {
         v
     }
 
-    /// 真正在传输的任务数（`Probing` / `Downloading`）。
+    /// 真正在传输的任务 id（`Probing` / `Downloading`）。
     ///
     /// 给平台层判断「要不要挂前台服务 / 保持唤醒」用：这类判断每几秒问一次，
-    /// 走 `snapshot()` 得克隆全部任务再数，历史任务一多就白付 O(历史) 代价；
+    /// 走 `snapshot()` 得克隆全部任务再筛，历史任务一多就白付 O(历史) 代价；
     /// 这里只遍历活跃索引，代价与活跃数相关。
     ///
-    /// **不能用 `live` 的长度代替**：暂停、排队、定时任务都留在活跃索引里
-    /// （tick 靠它们补发快照），拿长度判断会让「任务早停了、通知还挂着」，
+    /// **不能用 `live` 的全体代替**：暂停、排队、定时任务都留在活跃索引里
+    /// （tick 靠它们补发快照），拿全量判断会让「任务早停了、通知还挂着」，
     /// 反而变成用户眼里的假进度。
-    pub fn transferring_count(&self) -> usize {
+    pub fn transferring_ids(&self) -> Vec<TaskId> {
         // 先把 id 拷出来再逐个查表：避免持有 live 锁的同时去锁 tasks
         // （unindex_task 的加锁顺序是 tasks → live，混着用会埋死锁）
         let ids: Vec<TaskId> = {
             let live = self.live.lock();
             live.iter().cloned().collect()
         };
-        let mut n = 0;
+        let mut out = Vec::new();
         for id in ids {
             let rt = {
                 let map = self.tasks.lock();
@@ -444,8 +444,39 @@ impl Engine {
             };
             if let Some(rt) = rt {
                 if rt.task.lock().state.is_active() {
-                    n += 1;
+                    out.push(id);
                 }
+            }
+        }
+        out
+    }
+
+    /// 真正在传输的任务数
+    pub fn transferring_count(&self) -> usize {
+        self.transferring_ids().len()
+    }
+
+    /// 暂停所有「正在传或即将传」的任务，返回真正被暂停的条数。
+    ///
+    /// 通知栏上的「暂停」按钮走这里。刻意**不动** `Scheduled`：那是用户设的定时，
+    /// 暂停会把它变成普通 `Paused`，等于悄悄丢掉定时信息。
+    /// 也刻意包含 `Queued`：只暂停正在跑的那一条，空出的并发槽会立刻把排队任务拉起来，
+    /// 用户看到的就是「按了暂停，通知又冒出来」。
+    pub async fn pause_all_live(&self) -> usize {
+        let targets: Vec<String> = {
+            let map = self.tasks.lock();
+            map.iter()
+                .filter_map(|(id, rt)| {
+                    let st = rt.task.lock().state;
+                    let hit = st.is_active() || st == TaskState::Queued;
+                    hit.then(|| id.clone())
+                })
+                .collect()
+        };
+        let mut n = 0;
+        for id in targets {
+            if self.pause(&id).await.is_ok() {
+                n += 1;
             }
         }
         n
@@ -2771,6 +2802,39 @@ mod tests {
         engine.unindex_task("t1");
         assert!(!engine.tasks.lock().contains_key("t1"));
         assert!(!engine.live.lock().contains("t1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 通知栏「暂停」= 暂停所有「在跑或排队」的，但别碰用户设的定时与终态。
+    #[tokio::test]
+    async fn pause_all_live_covers_running_and_queued_only() {
+        let (engine, dir) = engine_in_temp("pauseall");
+        // 直接放进表与索引：pause 只读状态、不需要真的跑网络
+        for (id, st) in [
+            ("run", TaskState::Downloading),
+            ("queued", TaskState::Queued),
+            ("scheduled", TaskState::Scheduled),
+            ("paused", TaskState::Paused),
+            ("done", TaskState::Completed),
+        ] {
+            let rt = Runtime::new(test_task(id, st));
+            engine.index_task(rt.clone());
+            engine.tasks.lock().insert(id.to_string(), rt);
+        }
+
+        let n = engine.pause_all_live().await;
+        assert_eq!(n, 2, "只该暂停「在跑」和「排队」两条");
+        assert_eq!(engine.get("run").unwrap().state, TaskState::Paused);
+        assert_eq!(engine.get("queued").unwrap().state, TaskState::Paused);
+        assert_eq!(
+            engine.get("scheduled").unwrap().state,
+            TaskState::Scheduled,
+            "定时任务是用户的显式安排，不能被一次「暂停」悄悄改成普通暂停"
+        );
+        assert_eq!(engine.get("paused").unwrap().state, TaskState::Paused);
+        assert_eq!(engine.get("done").unwrap().state, TaskState::Completed);
+        assert_eq!(engine.transferring_count(), 0, "暂停后不该再挂前台服务");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

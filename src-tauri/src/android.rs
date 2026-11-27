@@ -216,15 +216,22 @@ pub(crate) fn call_helper(
 }
 
 /// 启动/更新下载前台服务（`text` 是通知副标题）
-pub fn start_download_service(app: &tauri::AppHandle, text: &str) -> Result<(), String> {
-    let raw = call_helper(
-        app,
-        SERVICE_HELPER_CLASS,
-        "start",
-        "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
-        vec![text.to_string()],
-    )?;
-    expect_ok(&raw)
+pub fn start_download_service(app: &tauri::AppHandle, text: &str, active: usize) -> Result<(), String> {
+    // 闭包要 'static（JNI 调用可能在别的线程上跑），参数得自己持有
+    let text = text.to_string();
+    // active 只用于按钮文案（单任务「暂停」/ 多任务「全部暂停」）
+    let active = active.min(i32::MAX as usize) as i32;
+    exec_ret(app, move |env, activity| {
+        let raw = helper_call(
+            env,
+            activity,
+            SERVICE_HELPER_CLASS,
+            "start",
+            "(Landroid/content/Context;Ljava/lang/String;I)Ljava/lang/String;",
+            &[HelperArg::Str(&text), HelperArg::Int(active)],
+        )?;
+        expect_ok(&raw)
+    })
 }
 
 /// 结束前台服务
@@ -343,6 +350,12 @@ fn helper_class<'a>(
 }
 
 /// 调 Kotlin 辅助对象的静态方法：第一个参数固定是 Activity/Context，其余为字符串
+/// 调 Kotlin 辅助类时的一个实参：第一个参数固定是 Context/Activity，其余按需装箱
+enum HelperArg<'a> {
+    Str(&'a str),
+    Int(i32),
+}
+
 fn helper_string(
     env: &mut JNIEnv,
     activity: &JObject,
@@ -351,16 +364,41 @@ fn helper_string(
     sig: &str,
     args: &[&str],
 ) -> Result<String, String> {
+    let owned: Vec<HelperArg> = args.iter().map(|s| HelperArg::Str(s)).collect();
+    helper_call(env, activity, class, method, sig, &owned)
+}
+
+/// 通用形式：允许混用字符串与整数实参（前台服务要传活跃任务数）
+fn helper_call(
+    env: &mut JNIEnv,
+    activity: &JObject,
+    class: &str,
+    method: &str,
+    sig: &str,
+    args: &[HelperArg],
+) -> Result<String, String> {
     let cls = helper_class(env, activity, class)?;
-    let jargs: Vec<jni::objects::JString> = args
+    // 字符串要单独持有：JValue 里的 Object 借用这些局部变量
+    let strings: Vec<jni::objects::JString> = args
         .iter()
+        .filter_map(|a| match a {
+            HelperArg::Str(s) => Some(*s),
+            HelperArg::Int(_) => None,
+        })
         .map(|a| env.new_string(a))
         .collect::<Result<_, _>>()
         .map_err(|e| format!("构造参数失败: {e}"))?;
-    let mut values: Vec<JValue> = Vec::with_capacity(jargs.len() + 1);
+    let mut values: Vec<JValue> = Vec::with_capacity(args.len() + 1);
     values.push(JValue::Object(activity));
-    for s in &jargs {
-        values.push(JValue::Object(s));
+    let mut next = 0;
+    for a in args {
+        match a {
+            HelperArg::Str(_) => {
+                values.push(JValue::Object(&strings[next]));
+                next += 1;
+            }
+            HelperArg::Int(n) => values.push(JValue::Int(*n)),
+        }
     }
     let out = env
         .call_static_method(cls, method, sig, &values)

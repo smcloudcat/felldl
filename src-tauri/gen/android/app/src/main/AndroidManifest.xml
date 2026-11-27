@@ -48,6 +48,12 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- 通知栏「暂停」按钮的接收端：只往投递目录里写一条命令，由引擎执行。
+             exported=false 表示只有本应用（含自己的 PendingIntent）能触发。 -->
+        <receiver
+            android:name=".CommandReceiver"
+            android:exported="false" />
+
         <provider
           android:name="androidx.core.content.FileProvider"
           android:authorities="${applicationId}.fileprovider"
