@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import type {
   BatchReport,
   FilterKey,
@@ -22,6 +29,8 @@ import { useI18n } from "./i18n";
 import { updateJob, useUpdateJob, wireUpdateJob } from "./useUpdateJob";
 import { grabStore } from "./grabStore";
 import { useGrabJobs } from "./useGrabJobs";
+import { settingsDraft } from "./settingsDraft";
+import { useDialogA11y } from "./useDialogA11y";
 import {
   filterEligible,
   keepFailed,
@@ -38,6 +47,7 @@ import {
   IconFolder,
   IconGlobe,
   IconMenu,
+  IconMore,
   IconPause,
   IconPlay,
   IconPlus,
@@ -139,6 +149,36 @@ export default function App() {
   const updateInfo = job.info;
   // 抓取任务在引擎侧后台跑：这里只订阅「有哪些在跑」，用于非抓取页的角标
   const grabJobs = useGrabJobs();
+
+  // ── 移动端「更多」：窄屏下 header 的次要按钮被隐藏，收进这个菜单 ──
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!moreOpen) return;
+    // 点外部 / Esc 关闭：菜单不能只靠再点一次按钮才能关
+    const onDown = (e: MouseEvent) => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
+        setMoreOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMoreOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [moreOpen]);
+  // 切换视图/进入多选时菜单没有意义了，顺手关掉
+  useEffect(() => setMoreOpen(false), [view, selectMode]);
+  // 设置草稿未保存时在侧栏留个记号：切走不丢草稿，但用户得知道它还在
+  const draftState = useSyncExternalStore(
+    settingsDraft.subscribe,
+    settingsDraft.getState,
+    settingsDraft.getState,
+  );
   const toastId = useRef(0);
   // 取快照（list_tasks）期间收到的事件：用来判断「谁是更新的那一份」，
   // 避免旧快照把已经推进到新状态的任务盖回去（见 taskMerge.ts）
@@ -782,6 +822,13 @@ export default function App() {
           >
             <IconSettings />
             {t("nav.settings")}
+            {draftState.dirty && (
+              <span
+                className="nav-dot"
+                title={t("set.unsavedDot")}
+                aria-label={t("set.unsavedDot")}
+              />
+            )}
           </button>
         </nav>
 
@@ -929,6 +976,63 @@ export default function App() {
                   <IconPlus />
                   <span>{t("hdr.newTask")}</span>
                 </button>
+                {(hasActive || hasResumable || stats.counts.completed > 0) && (
+                  <div className="header-more" ref={moreRef}>
+                    <button
+                      className="icon-btn"
+                      onClick={() => setMoreOpen((v) => !v)}
+                      aria-haspopup="menu"
+                      aria-expanded={moreOpen}
+                      aria-label={t("hdr.more")}
+                      title={t("hdr.more")}
+                    >
+                      <IconMore />
+                    </button>
+                    {moreOpen && (
+                      <div className="more-menu" role="menu">
+                        {hasActive && (
+                          <button
+                            className="more-item"
+                            role="menuitem"
+                            onClick={() => {
+                              setMoreOpen(false);
+                              pauseAll();
+                            }}
+                          >
+                            <IconPause size={14} />
+                            {t("hdr.pauseAll")}
+                          </button>
+                        )}
+                        {!hasActive && hasResumable && (
+                          <button
+                            className="more-item"
+                            role="menuitem"
+                            onClick={() => {
+                              setMoreOpen(false);
+                              resumeAll();
+                            }}
+                          >
+                            <IconPlay size={14} />
+                            {t("hdr.resumeAll")}
+                          </button>
+                        )}
+                        {stats.counts.completed > 0 && (
+                          <button
+                            className="more-item"
+                            role="menuitem"
+                            onClick={() => {
+                              setMoreOpen(false);
+                              clearCompleted();
+                            }}
+                          >
+                            <IconTrash size={14} />
+                            {t("hdr.clearDone")}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -1135,13 +1239,20 @@ function DeleteDialog({
   onRemove: (deleteFile: boolean) => void;
 }) {
   const { t } = useI18n();
+  const dlgRef = useDialogA11y(onCancel);
   const done = task.state === "completed";
   return (
     <div
       className="overlay"
       onMouseDown={(e) => e.target === e.currentTarget && onCancel()}
     >
-      <div className="dialog del-dialog" role="dialog" aria-modal="true">
+      <div
+        className="dialog del-dialog"
+        role="dialog"
+        aria-modal="true"
+        tabIndex={-1}
+        ref={dlgRef}
+      >
         <div className="dialog-head">
           <div className="del-icon">
             <IconTrash size={17} />
@@ -1242,12 +1353,19 @@ function BatchDeleteDialog({
   onRemove: (deleteFile: boolean) => void;
 }) {
   const { t } = useI18n();
+  const dlgRef = useDialogA11y(onCancel);
   return (
     <div
       className="overlay"
       onMouseDown={(e) => e.target === e.currentTarget && onCancel()}
     >
-      <div className="dialog del-dialog" role="dialog" aria-modal="true">
+      <div
+        className="dialog del-dialog"
+        role="dialog"
+        aria-modal="true"
+        tabIndex={-1}
+        ref={dlgRef}
+      >
         <div className="dialog-head">
           <div className="del-icon">
             <IconTrash size={17} />
@@ -1301,13 +1419,20 @@ function BatchResultDialog({
   onRetry: (ids: string[]) => void;
 }) {
   const { t } = useI18n();
+  const dlgRef = useDialogA11y(onClose);
   const retryable = report.failed.filter((f) => f.retryable).map((f) => f.id);
   return (
     <div
       className="overlay"
       onMouseDown={(e) => e.target === e.currentTarget && onClose()}
     >
-      <div className="dialog batch-result" role="dialog" aria-modal="true">
+      <div
+        className="dialog batch-result"
+        role="dialog"
+        aria-modal="true"
+        tabIndex={-1}
+        ref={dlgRef}
+      >
         <div className="dialog-head">
           <div style={{ flex: 1 }}>
             <div className="dialog-title">{t("batch.resultTitle")}</div>

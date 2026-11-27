@@ -1,9 +1,17 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { AddTaskRequest, Settings } from "./types";
 import { api } from "./bridge";
-import { IconClock, IconFolder, IconLayers, IconLink, IconX, IconZap } from "./icons";
+import {
+  IconClock,
+  IconFolder,
+  IconLayers,
+  IconLink,
+  IconX,
+  IconZap,
+} from "./icons";
 import { cx } from "./format";
 import { useI18n } from "./i18n";
+import { useDialogA11y } from "./useDialogA11y";
 
 interface Props {
   settings: Settings;
@@ -53,34 +61,37 @@ function NewTaskDialogInner({ settings, initialUrls, onClose, onDone }: Props) {
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
 
-  // 自动聚焦只在弹窗首次打开时执行一次
-  useEffect(() => {
-    textRef.current?.focus();
-  }, []);
+  // Esc / 焦点陷阱 / 关闭后归还焦点：统一走 useDialogA11y。
+  // 提交中（busy）不允许 Esc 关掉，否则请求还在飞、用户以为已经取消了。
+  const dlgRef = useDialogA11y(() => {
+    if (!busyRef.current) onCloseRef.current();
+  });
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) onCloseRef.current();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [busy]);
-
-  const limitLabel = (v: number) => (v === 0 ? t("dlg.unlimited") : `${v} KB/s`);
+  const limitLabel = (v: number) =>
+    v === 0 ? t("dlg.unlimited") : `${v} KB/s`;
 
   const urls = useMemo(
     () =>
       text
         .split(/[\n\s]+/)
         .map((s) => s.trim())
-        .filter((s) => s.length > 0 && (s.startsWith("http://") || s.startsWith("https://") || s.startsWith("magnet:"))),
-    [text]
+        .filter(
+          (s) =>
+            s.length > 0 &&
+            (s.startsWith("http://") ||
+              s.startsWith("https://") ||
+              s.startsWith("magnet:")),
+        ),
+    [text],
   );
 
   const hasMagnet = urls.some((u) => u.startsWith("magnet:"));
 
   const invalidCount = useMemo(() => {
-    const all = text.split(/[\n\s]+/).map((s) => s.trim()).filter(Boolean);
+    const all = text
+      .split(/[\n\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
     return all.length - urls.length;
   }, [text, urls.length]);
 
@@ -90,7 +101,7 @@ function NewTaskDialogInner({ settings, initialUrls, onClose, onDone }: Props) {
         .split(/[\n\s]+/)
         .map((s) => s.trim())
         .filter((s) => s.startsWith("http://") || s.startsWith("https://")),
-    [mirrorsText]
+    [mirrorsText],
   );
 
   async function pickDir() {
@@ -113,7 +124,9 @@ function NewTaskDialogInner({ settings, initialUrls, onClose, onDone }: Props) {
     setErr(null);
     try {
       const scheduledAt =
-        schedule === "later" && scheduleAt ? new Date(scheduleAt).getTime() : null;
+        schedule === "later" && scheduleAt
+          ? new Date(scheduleAt).getTime()
+          : null;
       if (schedule === "later" && (!scheduledAt || scheduledAt <= Date.now())) {
         setErr(t("dlg.errSchedule"));
         busyRef.current = false;
@@ -145,26 +158,39 @@ function NewTaskDialogInner({ settings, initialUrls, onClose, onDone }: Props) {
           ? schedule === "later"
             ? t("dlg.queuedScheduled")
             : t("dlg.started")
-          : t("dlg.addedN", { n: urls.length })
+          : t("dlg.addedN", { n: urls.length }),
       );
       onClose();
     } catch (e: any) {
-      setErr(typeof e === "string" ? e : e?.message ?? t("dlg.addFail"));
+      setErr(typeof e === "string" ? e : (e?.message ?? t("dlg.addFail")));
       busyRef.current = false;
       setBusy(false);
     }
   }
 
-
   return (
-    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
-      <div className="dialog wide" role="dialog" aria-modal="true">
+    <div
+      className="overlay"
+      onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}
+    >
+      <div
+        className="dialog wide"
+        role="dialog"
+        aria-modal="true"
+        tabIndex={-1}
+        ref={dlgRef}
+      >
         <div className="dialog-head">
           <div style={{ flex: 1 }}>
             <div className="dialog-title">{t("dlg.title")}</div>
             <div className="dialog-desc">{t("dlg.desc")}</div>
           </div>
-          <button className="icon-btn" onClick={onClose} disabled={busy} aria-label={t("dlg.close")}>
+          <button
+            className="icon-btn"
+            onClick={onClose}
+            disabled={busy}
+            aria-label={t("dlg.close")}
+          >
             <IconX />
           </button>
         </div>
@@ -200,7 +226,10 @@ function NewTaskDialogInner({ settings, initialUrls, onClose, onDone }: Props) {
               </div>
             )}
             {invalidCount > 0 && (
-              <div className="field-hint" style={{ color: "var(--accent-warn)" }}>
+              <div
+                className="field-hint"
+                style={{ color: "var(--accent-warn)" }}
+              >
                 {t("dlg.ignored", { n: invalidCount })}
               </div>
             )}
@@ -224,7 +253,9 @@ function NewTaskDialogInner({ settings, initialUrls, onClose, onDone }: Props) {
             </div>
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div
+            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}
+          >
             <div className="field">
               <label className="field-label">
                 <IconLayers size={14} />
@@ -335,7 +366,9 @@ function NewTaskDialogInner({ settings, initialUrls, onClose, onDone }: Props) {
                 <textarea
                   className="textarea"
                   style={{ minHeight: 56 }}
-                  placeholder={"https://mirror1.example.com/file.zip\nhttps://mirror2.example.org/file.zip"}
+                  placeholder={
+                    "https://mirror1.example.com/file.zip\nhttps://mirror2.example.org/file.zip"
+                  }
                   value={mirrorsText}
                   onChange={(e) => setMirrorsText(e.target.value)}
                   spellCheck={false}
@@ -344,7 +377,13 @@ function NewTaskDialogInner({ settings, initialUrls, onClose, onDone }: Props) {
               </div>
               <div className="field">
                 <label className="field-label">🔑 {t("dlg.auth")}</label>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: 8,
+                  }}
+                >
                   <input
                     className="input"
                     placeholder={t("dlg.username")}
@@ -402,7 +441,9 @@ function NewTaskDialogInner({ settings, initialUrls, onClose, onDone }: Props) {
         <div className="dialog-foot">
           <span style={{ fontSize: 11.6, color: "var(--text-mute)" }}>
             {t("dlg.threadsSummary", { n: conns })} ·{" "}
-            {limit > 0 ? t("dlg.limitSummary", { n: limit }) : t("dlg.unlimited")}
+            {limit > 0
+              ? t("dlg.limitSummary", { n: limit })
+              : t("dlg.unlimited")}
           </span>
           <div className="spacer" />
           <button className="btn btn-ghost" onClick={onClose} disabled={busy}>
@@ -413,7 +454,11 @@ function NewTaskDialogInner({ settings, initialUrls, onClose, onDone }: Props) {
             onClick={submit}
             disabled={busy || urls.length === 0}
           >
-            {busy ? t("dlg.processing") : schedule === "later" ? t("dlg.submitScheduled") : t("dlg.submit")}
+            {busy
+              ? t("dlg.processing")
+              : schedule === "later"
+                ? t("dlg.submitScheduled")
+                : t("dlg.submit")}
           </button>
         </div>
       </div>

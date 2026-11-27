@@ -13,6 +13,7 @@ const zh: Record<string, string> = {
   "nav.tools": "工具",
   "nav.grab": "网页抓取",
   "nav.settings": "设置",
+  "set.unsavedDot": "设置有未保存的修改",
   "filter.all": "全部任务",
   "filter.downloading": "进行中",
   "filter.completed": "已完成",
@@ -24,6 +25,7 @@ const zh: Record<string, string> = {
   "side.doneTasks": "{n} 个已完成",
   // 头部
   "hdr.menu": "菜单",
+  "hdr.more": "更多操作",
   "hdr.pauseAll": "全部暂停",
   "hdr.resumeAll": "全部开始",
   "hdr.clearDone": "清空完成",
@@ -41,7 +43,8 @@ const zh: Record<string, string> = {
   "boot.retry": "重试",
   // 空态
   "empty.all.title": "还没有下载任务",
-  "empty.all.desc": "粘贴一个链接开始吧，Felldl 会用多线程分段加速帮你抢满带宽。",
+  "empty.all.desc":
+    "粘贴一个链接开始吧，Felldl 会用多线程分段加速帮你抢满带宽。",
   "empty.downloading.title": "暂无进行中的任务",
   "empty.downloading.desc": "当前没有任务在下载。",
   "empty.completed.title": "还没有完成的任务",
@@ -114,7 +117,8 @@ const zh: Record<string, string> = {
   "dlg.close": "关闭",
   "dlg.url": "下载链接",
   "dlg.urlHint": "支持 http/https 链接与 magnet: 磁力",
-  "dlg.urlPlaceholder": "https://example.com/file.zip\n每行一个链接，支持批量添加\nmagnet:?xt=urn:btih:…",
+  "dlg.urlPlaceholder":
+    "https://example.com/file.zip\n每行一个链接，支持批量添加\nmagnet:?xt=urn:btih:…",
   "dlg.recognized": "已识别 {n} 个",
   "dlg.ignored": "已忽略 {n} 个非 http(s) 内容",
   "dlg.saveDir": "保存位置",
@@ -130,9 +134,11 @@ const zh: Record<string, string> = {
   "dlg.referer": "Referer（防盗链站点需要）",
   "dlg.refererHint": "部分网站会校验来源页。留空则由服务器自行判断。",
   "dlg.cookie": "Cookie / 令牌（可选）",
-  "dlg.cookieHint": "粘贴浏览器 Cookie 即可下载需登录的文件；填 \"Bearer xxx\" 或 \"Authorization: Bearer xxx\" 则作为令牌发送",
+  "dlg.cookieHint":
+    '粘贴浏览器 Cookie 即可下载需登录的文件；填 "Bearer xxx" 或 "Authorization: Bearer xxx" 则作为令牌发送',
   "dlg.mirrors": "镜像地址（可选，每行一个）",
-  "dlg.mirrorsHint": "同一文件的其它镜像站 URL，Felldl 会把不同分片分发到多个源同时下载，失效自动切换。",
+  "dlg.mirrorsHint":
+    "同一文件的其它镜像站 URL，Felldl 会把不同分片分发到多个源同时下载，失效自动切换。",
   "dlg.cancel": "取消",
   "dlg.processing": "处理中…",
   "dlg.submit": "开始下载",
@@ -201,19 +207,24 @@ const zh: Record<string, string> = {
   "set.dirPictures": "图片",
   "set.dirDocs": "文档",
   "set.grantStorage": "授权",
-  "set.needStorage": "还没拿到「所有文件访问」权限，写入公共目录会失败。点「授权」后在系统设置里允许。",
+  "set.needStorage":
+    "还没拿到「所有文件访问」权限，写入公共目录会失败。点「授权」后在系统设置里允许。",
   "set.dirNotWritable": "当前目录写不进去，换一个目录或授予文件访问权限。",
-  "set.androidDirHint": "安卓不允许随意选目录，请用下面的常用目录，或直接输入路径。",
+  "set.androidDirHint":
+    "安卓不允许随意选目录，请用下面的常用目录，或直接输入路径。",
   "set.storageSettingsHint": "已打开系统设置，请允许「所有文件访问」后返回",
-  "set.storageNaHint": "当前系统版本没有「所有文件访问」这个开关，只看下载目录能不能写即可",
+  "set.storageNaHint":
+    "当前系统版本没有「所有文件访问」这个开关，只看下载目录能不能写即可",
   "set.storageOk": "可写入当前目录",
   "set.mirrorTitle": "镜像加速",
-  "set.mirrorSub": "给 GitHub / HuggingFace 的下载套一层国内镜像，默认关闭；主地址始终保留，镜像失败会自动回退",
+  "set.mirrorSub":
+    "给 GitHub / HuggingFace 的下载套一层国内镜像，默认关闭；主地址始终保留，镜像失败会自动回退",
   "set.mirrorLine": "线路",
   "set.mirrorAuto": "自动（多线路轮换）",
   "set.mirrorHf": "hf-mirror.com（HuggingFace）",
   "set.mirrorCustom": "自定义前缀",
-  "set.mirrorHint": "只改下载地址，不改任何系统设置。镜像可用性取决于第三方服务，慢或失败时关掉即可。",
+  "set.mirrorHint":
+    "只改下载地址，不改任何系统设置。镜像可用性取决于第三方服务，慢或失败时关掉即可。",
   "set.defaultConns": "默认连接数",
   "set.threadsN": "{n} 线程",
   "set.maxTasks": "同时下载任务数",
@@ -246,7 +257,8 @@ const zh: Record<string, string> = {
   "set.appearance": "外观",
   "set.appearanceSub": "主题会立即生效",
   "set.bgTitle": "背景图片",
-  "set.bgSub": "选一张本地图片作全局背景，配合下面的磨砂参数使用；不会改动原文件",
+  "set.bgSub":
+    "选一张本地图片作全局背景，配合下面的磨砂参数使用；不会改动原文件",
   "set.bgPick": "选择图片",
   "set.bgChange": "更换图片",
   "set.bgRemove": "移除",
@@ -273,13 +285,15 @@ const zh: Record<string, string> = {
   "set.retryUpdate": "重试",
   "set.instantUpdate": "立即更新",
   "set.instantHint": "下载新版本后自动替换当前程序并重启",
-  "set.updateHint": "更新会重启应用；进行中的任务会自动续传（安卓会调起系统安装器）",
+  "set.updateHint":
+    "更新会重启应用；进行中的任务会自动续传（安卓会调起系统安装器）",
   "set.updating": "正在更新…",
   "set.restarting": "正在重启…",
   "set.updateNoAsset": "找不到适配当前系统的更新包，请前往发布页下载",
   "set.manualInstall": "更新包已下载并通过校验，请在系统安装器中确认安装",
   "set.installing": "已调起系统安装器，请在弹窗中确认安装",
-  "set.needInstallPermission": "需要允许「安装未知应用」才能更新，已为你打开设置",
+  "set.needInstallPermission":
+    "需要允许「安装未知应用」才能更新，已为你打开设置",
   "set.blog": "博客",
   "set.privacy": "隐私条款",
   "set.terms": "用户协议",
@@ -294,7 +308,8 @@ const zh: Record<string, string> = {
   "set.savedBtn": "已保存",
   // 分类管理
   "set.categories": "下载分类",
-  "set.categoriesSub": "按扩展名或站点自动归类任务，命中的分类可指定独立保存目录",
+  "set.categoriesSub":
+    "按扩展名或站点自动归类任务，命中的分类可指定独立保存目录",
   "set.catName": "分类名",
   "set.catExt": "扩展名（逗号分隔）",
   "set.catSite": "站点匹配（可选）",
@@ -308,7 +323,8 @@ const zh: Record<string, string> = {
   "set.afterNone": "无动作",
   "set.afterShutdown": "关闭计算机",
   "set.afterSleep": "进入睡眠",
-  "set.afterShutdownHint": "Windows 将执行 shutdown /t 60，可用 shutdown /a 取消",
+  "set.afterShutdownHint":
+    "Windows 将执行 shutdown /t 60，可用 shutdown /a 取消",
   // 网络接口
   "set.net": "网络",
   "set.netSub": "绑定指定网络接口（IPv4 / IPv6）",
@@ -320,7 +336,8 @@ const zh: Record<string, string> = {
   "set.dnsCustom": "自定义服务器",
   "set.dnsTest": "测试",
   "set.dnsTesting": "解析中…",
-  "set.dnsHint": "多个服务器用逗号分隔，如 1.1.1.1, 223.5.5.5；支持 tcp:// 前缀",
+  "set.dnsHint":
+    "多个服务器用逗号分隔，如 1.1.1.1, 223.5.5.5；支持 tcp:// 前缀",
   // 界面自定义
   "set.customize": "界面自定义",
   "set.customizeSub": "皮肤、按钮风格与任务卡信息项",
@@ -345,12 +362,14 @@ const zh: Record<string, string> = {
   "set.panelNotify": "气泡通知",
   "set.panelMinimize": "最小化到托盘",
   "set.panelNone": "无提示",
-  "set.extHint": "扩展位于安装目录 extension/ 文件夹，在 Chrome 扩展页开启「开发者模式 → 加载已解压的扩展程序」即可使用",
+  "set.extHint":
+    "扩展位于安装目录 extension/ 文件夹，在 Chrome 扩展页开启「开发者模式 → 加载已解压的扩展程序」即可使用",
   // 对话框：认证与周期
   "dlg.auth": "认证（可选）",
   "dlg.username": "用户名",
   "dlg.password": "密码",
-  "dlg.authHint": "支持 HTTP Basic / FTP / SFTP；URL 里的 user:pass@host 会自动识别",
+  "dlg.authHint":
+    "支持 HTTP Basic / FTP / SFTP；URL 里的 user:pass@host 会自动识别",
   "dlg.interval": "周期同步",
   "dlg.intervalOff": "关闭",
   "dlg.intervalHint": "完成后每隔设定时间自动重新下载，让文件保持最新",
@@ -361,6 +380,7 @@ const en: Record<string, string> = {
   "nav.tools": "Tools",
   "nav.grab": "Web Grabber",
   "nav.settings": "Settings",
+  "set.unsavedDot": "Unsaved setting changes",
   "filter.all": "All",
   "filter.downloading": "Active",
   "filter.completed": "Completed",
@@ -371,6 +391,7 @@ const en: Record<string, string> = {
   "side.activeTasks": "{n} downloading",
   "side.doneTasks": "{n} completed",
   "hdr.menu": "Menu",
+  "hdr.more": "More actions",
   "hdr.pauseAll": "Pause all",
   "hdr.resumeAll": "Resume all",
   "hdr.clearDone": "Clear done",
@@ -379,13 +400,15 @@ const en: Record<string, string> = {
   "upd.current": "current",
   "upd.go": "Update",
   "upd.openFail": "Failed to open link",
-  "upd.inProgress": "Update is downloading in background; click to view progress",
+  "upd.inProgress":
+    "Update is downloading in background; click to view progress",
   "boot.failed": "Engine failed to start",
   "boot.starting": "Starting engine…",
   "boot.slow": "Startup is slow, still waiting for backend…",
   "boot.retry": "Retry",
   "empty.all.title": "No downloads yet",
-  "empty.all.desc": "Paste a link to get started. Felldl accelerates downloads with multi-threaded segmentation.",
+  "empty.all.desc":
+    "Paste a link to get started. Felldl accelerates downloads with multi-threaded segmentation.",
   "empty.downloading.title": "Nothing in progress",
   "empty.downloading.desc": "No active downloads right now.",
   "empty.completed.title": "No completed downloads",
@@ -399,7 +422,8 @@ const en: Record<string, string> = {
   "del.title": "Remove task",
   "del.descDone": "Also delete the downloaded file?",
   "del.descPartial": "This task is unfinished — a partial file exists on disk",
-  "del.partialHint": "\"Delete with file\" removes the partial data; resume won't be possible",
+  "del.partialHint":
+    '"Delete with file" removes the partial data; resume won\'t be possible',
   "del.keepFile": "Keep file",
   "del.withFile": "Delete with file",
   "act.openFail": "Failed to open",
@@ -418,9 +442,12 @@ const en: Record<string, string> = {
   "batch.resumed": "Resumed {n} tasks",
   "batch.removed": "Deleted {n} tasks",
   "batch.delTitle": "Delete {n} tasks",
-  "batch.delDescDone": "Some selected tasks are finished. Delete the local files too?",
-  "batch.delDescPartial": "Some selected tasks are unfinished; partial files stay on disk",
-  "batch.delHint": "\"Remove task\" keeps files on disk; deleting files cannot be undone",
+  "batch.delDescDone":
+    "Some selected tasks are finished. Delete the local files too?",
+  "batch.delDescPartial":
+    "Some selected tasks are unfinished; partial files stay on disk",
+  "batch.delHint":
+    '"Remove task" keeps files on disk; deleting files cannot be undone',
   "batch.resultTitle": "Batch finished",
   "batch.resultSummary": "{ok} succeeded, {fail} failed",
   "batch.retryFailed": "Retry failed ({n})",
@@ -453,7 +480,8 @@ const en: Record<string, string> = {
   "dlg.close": "Close",
   "dlg.url": "Download links",
   "dlg.urlHint": "http/https links and magnet: URIs are supported",
-  "dlg.urlPlaceholder": "https://example.com/file.zip\nOne link per line, batch supported\nmagnet:?xt=urn:btih:…",
+  "dlg.urlPlaceholder":
+    "https://example.com/file.zip\nOne link per line, batch supported\nmagnet:?xt=urn:btih:…",
   "dlg.recognized": "{n} recognized",
   "dlg.ignored": "Ignored {n} non-http(s) item(s)",
   "dlg.saveDir": "Save to",
@@ -467,11 +495,14 @@ const en: Record<string, string> = {
   "dlg.advanced": "Advanced",
   "dlg.advancedHide": "Hide advanced",
   "dlg.referer": "Referer (for anti-hotlink sites)",
-  "dlg.refererHint": "Some sites validate the referrer. Leave empty to let the server decide.",
+  "dlg.refererHint":
+    "Some sites validate the referrer. Leave empty to let the server decide.",
   "dlg.cookie": "Cookie / Token (optional)",
-  "dlg.cookieHint": "Paste browser cookies to download login-protected files; \"Bearer xxx\" or \"Authorization: Bearer xxx\" is sent as an auth token",
+  "dlg.cookieHint":
+    'Paste browser cookies to download login-protected files; "Bearer xxx" or "Authorization: Bearer xxx" is sent as an auth token',
   "dlg.mirrors": "Mirror URLs (optional, one per line)",
-  "dlg.mirrorsHint": "Additional mirror URLs of the same file. Segments are spread across sources in parallel; dead mirrors are skipped automatically.",
+  "dlg.mirrorsHint":
+    "Additional mirror URLs of the same file. Segments are spread across sources in parallel; dead mirrors are skipped automatically.",
   "dlg.cancel": "Cancel",
   "dlg.processing": "Working…",
   "dlg.submit": "Start",
@@ -486,7 +517,8 @@ const en: Record<string, string> = {
   "dlg.addFail": "Failed to add",
   "dlg.btHint": "Magnet link detected — the BitTorrent engine will be used",
   "grab.title": "Web Grabber",
-  "grab.desc": "Sniff page resources, save whole pages or sites, fetch direct video links and HLS streams",
+  "grab.desc":
+    "Sniff page resources, save whole pages or sites, fetch direct video links and HLS streams",
   "grab.url": "Page URL",
   "grab.urlPlaceholder": "https://example.com/page.html",
   "grab.analyze": "Analyze",
@@ -496,7 +528,8 @@ const en: Record<string, string> = {
   "grab.tab.media": "Video / Audio",
   "grab.tab.links": "Site links",
   "grab.none": "No downloadable resources found on this page",
-  "grab.noMedia": "No direct video/audio links found (dynamically loaded media may be invisible)",
+  "grab.noMedia":
+    "No direct video/audio links found (dynamically loaded media may be invisible)",
   "grab.noLinks": "No site links found",
   "grab.downloadSel": "Download selected ({n})",
   "grab.dlHls": "Download HLS stream",
@@ -507,7 +540,8 @@ const en: Record<string, string> = {
   "grab.maxPages": "Max pages",
   "grab.maxPagesN": "{n} page(s)",
   "grab.includeAssets": "Also download page assets (images/styles/scripts)",
-  "grab.selectHint": "Grab current page only; higher depth follows site links automatically",
+  "grab.selectHint":
+    "Grab current page only; higher depth follows site links automatically",
   "grab.grabbing": "Site grab started — progress is shown above",
   "grab.grabFail": "Grab failed",
   "grab.jobs": "Grabbing",
@@ -538,19 +572,26 @@ const en: Record<string, string> = {
   "set.dirPictures": "Pictures",
   "set.dirDocs": "Documents",
   "set.grantStorage": "Grant",
-  "set.needStorage": "\"All files access\" is not granted, writing to public folders will fail. Tap Grant and allow it in system settings.",
-  "set.dirNotWritable": "This folder isn't writable — pick another one or grant storage access.",
-  "set.androidDirHint": "Android doesn't allow picking arbitrary folders; use a preset below or type a path.",
-  "set.storageSettingsHint": "System settings opened — allow \"All files access\" and come back",
-  "set.storageNaHint": "This Android version has no \"All files access\" switch — only the download folder needs to be writable",
+  "set.needStorage":
+    '"All files access" is not granted, writing to public folders will fail. Tap Grant and allow it in system settings.',
+  "set.dirNotWritable":
+    "This folder isn't writable — pick another one or grant storage access.",
+  "set.androidDirHint":
+    "Android doesn't allow picking arbitrary folders; use a preset below or type a path.",
+  "set.storageSettingsHint":
+    'System settings opened — allow "All files access" and come back',
+  "set.storageNaHint":
+    'This Android version has no "All files access" switch — only the download folder needs to be writable',
   "set.storageOk": "This folder is writable",
   "set.mirrorTitle": "Mirror acceleration",
-  "set.mirrorSub": "Route GitHub / HuggingFace downloads through a China-friendly mirror. Off by default; the direct URL stays first and mirrors fall back automatically.",
+  "set.mirrorSub":
+    "Route GitHub / HuggingFace downloads through a China-friendly mirror. Off by default; the direct URL stays first and mirrors fall back automatically.",
   "set.mirrorLine": "Line",
   "set.mirrorAuto": "Auto (rotate lines)",
   "set.mirrorHf": "hf-mirror.com (HuggingFace)",
   "set.mirrorCustom": "Custom prefix",
-  "set.mirrorHint": "Only rewrites download URLs, no system changes. Third-party mirrors may be slow or down — just turn it off.",
+  "set.mirrorHint":
+    "Only rewrites download URLs, no system changes. Third-party mirrors may be slow or down — just turn it off.",
   "set.defaultConns": "Default connections",
   "set.threadsN": "{n} threads",
   "set.maxTasks": "Simultaneous downloads",
@@ -560,7 +601,8 @@ const en: Record<string, string> = {
   "set.notify": "Notify on completion",
   "set.notifyDesc": "Send a system notification when a download finishes",
   "set.globalLimit": "Global speed limit",
-  "set.globalLimitSub": "Total bandwidth for all tasks, 0 = unlimited. Current:",
+  "set.globalLimitSub":
+    "Total bandwidth for all tasks, 0 = unlimited. Current:",
   "set.unlimited": "Unlimited",
   "set.noLimit": "Off",
   "set.proxy": "Proxy server",
@@ -570,7 +612,8 @@ const en: Record<string, string> = {
   "set.proxyUser": "Username (optional)",
   "set.proxyPass": "Password (optional)",
   "set.browser": "Browser integration",
-  "set.browserSub": "Enable the local API so a browser extension can hand downloads to Felldl",
+  "set.browserSub":
+    "Enable the local API so a browser extension can hand downloads to Felldl",
   "set.apiEnable": "Enable local API",
   "set.apiEnableDesc": "Listens on 127.0.0.1 only, token protected",
   "set.addr": "Address",
@@ -583,7 +626,8 @@ const en: Record<string, string> = {
   "set.appearance": "Appearance",
   "set.appearanceSub": "Theme applies immediately",
   "set.bgTitle": "Background image",
-  "set.bgSub": "Pick a local image as the global background; your original file is untouched",
+  "set.bgSub":
+    "Pick a local image as the global background; your original file is untouched",
   "set.bgPick": "Choose image",
   "set.bgChange": "Change image",
   "set.bgRemove": "Remove",
@@ -610,13 +654,17 @@ const en: Record<string, string> = {
   "set.retryUpdate": "Retry",
   "set.instantUpdate": "Update now",
   "set.instantHint": "Downloads the new build, replaces this app and restarts",
-  "set.updateHint": "Updating restarts the app; running tasks resume automatically (Android opens the system installer)",
+  "set.updateHint":
+    "Updating restarts the app; running tasks resume automatically (Android opens the system installer)",
   "set.updating": "Updating…",
   "set.restarting": "Restarting…",
-  "set.updateNoAsset": "No package for this platform — please use the release page",
-  "set.manualInstall": "Update downloaded and verified, please confirm installation",
+  "set.updateNoAsset":
+    "No package for this platform — please use the release page",
+  "set.manualInstall":
+    "Update downloaded and verified, please confirm installation",
   "set.installing": "System installer opened — please confirm the installation",
-  "set.needInstallPermission": "Allow \"Install unknown apps\" to update; opening settings for you",
+  "set.needInstallPermission":
+    'Allow "Install unknown apps" to update; opening settings for you',
   "set.blog": "Blog",
   "set.privacy": "Privacy",
   "set.terms": "Terms",
@@ -630,7 +678,8 @@ const en: Record<string, string> = {
   "set.discard": "Discard",
   "set.savedBtn": "Saved",
   "set.categories": "Download categories",
-  "set.categoriesSub": "Auto-classify tasks by extension or site; matched categories may use their own directory",
+  "set.categoriesSub":
+    "Auto-classify tasks by extension or site; matched categories may use their own directory",
   "set.catName": "Name",
   "set.catExt": "Extensions (comma separated)",
   "set.catSite": "Site match (optional)",
@@ -643,7 +692,8 @@ const en: Record<string, string> = {
   "set.afterNone": "Do nothing",
   "set.afterShutdown": "Shut down computer",
   "set.afterSleep": "Sleep",
-  "set.afterShutdownHint": "Runs `shutdown /t 60` on Windows; cancel with `shutdown /a`",
+  "set.afterShutdownHint":
+    "Runs `shutdown /t 60` on Windows; cancel with `shutdown /a`",
   "set.net": "Network",
   "set.netSub": "Bind to a specific network interface (IPv4 / IPv6)",
   "set.bindIp": "Interface",
@@ -654,7 +704,8 @@ const en: Record<string, string> = {
   "set.dnsCustom": "Custom servers",
   "set.dnsTest": "Test",
   "set.dnsTesting": "Resolving…",
-  "set.dnsHint": "Separate servers with commas, e.g. 1.1.1.1, 8.8.8.8; tcp:// prefix supported",
+  "set.dnsHint":
+    "Separate servers with commas, e.g. 1.1.1.1, 8.8.8.8; tcp:// prefix supported",
   "set.customize": "Interface customization",
   "set.customizeSub": "Skin, button style and task card info items",
   "set.skin": "Skin (accent color)",
@@ -677,14 +728,17 @@ const en: Record<string, string> = {
   "set.panelNotify": "Bubble notification",
   "set.panelMinimize": "Minimize to tray",
   "set.panelNone": "No hint",
-  "set.extHint": "The extension lives in the extension/ folder next to the app. In Chrome, enable Developer mode → Load unpacked to use it",
+  "set.extHint":
+    "The extension lives in the extension/ folder next to the app. In Chrome, enable Developer mode → Load unpacked to use it",
   "dlg.auth": "Authentication (optional)",
   "dlg.username": "Username",
   "dlg.password": "Password",
-  "dlg.authHint": "HTTP Basic / FTP / SFTP supported; user:pass@host in URLs is detected automatically",
+  "dlg.authHint":
+    "HTTP Basic / FTP / SFTP supported; user:pass@host in URLs is detected automatically",
   "dlg.interval": "Periodic sync",
   "dlg.intervalOff": "Off",
-  "dlg.intervalHint": "Re-download automatically after completion to keep the file fresh",
+  "dlg.intervalHint":
+    "Re-download automatically after completion to keep the file fresh",
 };
 
 const LANGS: Record<Lang, Record<string, string>> = { zh, en };
@@ -720,11 +774,14 @@ export function setLang(l: Lang) {
 }
 
 /** 取词条，支持 {n} 占位符 */
-export function translate(key: string, vars?: Record<string, string | number>): string {
+export function translate(
+  key: string,
+  vars?: Record<string, string | number>,
+): string {
   const raw = LANGS[current][key] ?? LANGS.zh[key] ?? key;
   if (!vars) return raw;
   return raw.replace(/\{(\w+)\}/g, (_, name) =>
-    vars[name] !== undefined ? String(vars[name]) : `{${name}}`
+    vars[name] !== undefined ? String(vars[name]) : `{${name}}`,
   );
 }
 

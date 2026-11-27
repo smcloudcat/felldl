@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "node --experimental-strip-types --test tests/taskMerge.test.ts tests/ipcError.test.ts tests/virtual.test.ts tests/updateJob.test.ts tests/taskStore.test.ts tests/selection.test.ts tests/grabStore.test.ts",
+    "test": "node --experimental-strip-types --test tests/taskMerge.test.ts tests/ipcError.test.ts tests/virtual.test.ts tests/updateJob.test.ts tests/taskStore.test.ts tests/selection.test.ts tests/grabStore.test.ts tests/settingsDraft.test.ts",
     "test:scroll": "node tests/virtual.scroll.mjs",
     "preview": "vite preview"
   },

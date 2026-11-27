@@ -9,7 +9,11 @@
   --brand-2: #06b6d4;
   --brand-3: #14b8a6;
   --brand-grad: linear-gradient(135deg, #0ea5e9 0%, #06b6d4 55%, #14b8a6 100%);
-  --brand-grad-soft: linear-gradient(135deg, rgba(14, 165, 233, 0.14), rgba(20, 184, 166, 0.1));
+  --brand-grad-soft: linear-gradient(
+    135deg,
+    rgba(14, 165, 233, 0.14),
+    rgba(20, 184, 166, 0.1)
+  );
 
   --accent-danger: #ef4444;
   --accent-warn: #f59e0b;
@@ -38,7 +42,11 @@
 
   /* 面板底色：在所在一层的 bg-elev 上做半透明，图片 / 氛围光透上来 */
   --panel: color-mix(in srgb, var(--bg-elev) var(--panel-a), transparent);
-  --panel-sunken: color-mix(in srgb, var(--bg-sunken) var(--panel-a), transparent);
+  --panel-sunken: color-mix(
+    in srgb,
+    var(--bg-sunken) var(--panel-a),
+    transparent
+  );
   /* 输入框底色比卡片再实一点，保证长文本可读 */
   --panel-field: color-mix(in srgb, var(--bg-sunken) 92%, transparent);
 
@@ -74,9 +82,13 @@
   --border: rgba(15, 23, 42, 0.085);
   --border-strong: rgba(15, 23, 42, 0.15);
 
-  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 3px rgba(15, 23, 42, 0.04);
-  --shadow-md: 0 4px 16px -4px rgba(15, 23, 42, 0.1), 0 2px 6px -2px rgba(15, 23, 42, 0.05);
-  --shadow-lg: 0 24px 48px -12px rgba(15, 23, 42, 0.18), 0 8px 20px -8px rgba(15, 23, 42, 0.08);
+  --shadow-sm:
+    0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 3px rgba(15, 23, 42, 0.04);
+  --shadow-md:
+    0 4px 16px -4px rgba(15, 23, 42, 0.1), 0 2px 6px -2px rgba(15, 23, 42, 0.05);
+  --shadow-lg:
+    0 24px 48px -12px rgba(15, 23, 42, 0.18),
+    0 8px 20px -8px rgba(15, 23, 42, 0.08);
   --shadow-brand: 0 8px 24px -6px rgba(14, 165, 233, 0.4);
 
   --track: rgba(15, 23, 42, 0.07);
@@ -132,8 +144,15 @@ body,
 }
 
 body {
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
-    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC",
+  font-family:
+    "Inter",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Microsoft YaHei",
+    "Noto Sans SC",
     sans-serif;
   background: var(--bg);
   color: var(--text);
@@ -141,7 +160,9 @@ body {
   line-height: 1.55;
   overflow: hidden;
   -webkit-tap-highlight-color: transparent;
-  transition: background 0.35s var(--ease), color 0.35s var(--ease);
+  transition:
+    background 0.35s var(--ease),
+    color 0.35s var(--ease);
 }
 
 /* ── 背景层一：自定义图片（可选）──
@@ -160,7 +181,9 @@ body::before {
   filter: blur(var(--glass-blur)) saturate(118%);
   transform: scale(var(--bg-scale));
   opacity: 0;
-  transition: opacity 0.4s var(--ease), filter 0.28s var(--ease);
+  transition:
+    opacity 0.4s var(--ease),
+    filter 0.28s var(--ease);
 }
 html.has-bg-image body::before {
   opacity: 1;
@@ -179,8 +202,16 @@ body::after {
       rgba(var(--bg-dim-rgb), var(--bg-dim-a)),
       rgba(var(--bg-dim-rgb), var(--bg-dim-a))
     ),
-    radial-gradient(1000px 600px at 88% -12%, rgba(14, 165, 233, 0.14), transparent 62%),
-    radial-gradient(760px 520px at 4% 104%, rgba(20, 184, 166, 0.11), transparent 58%);
+    radial-gradient(
+      1000px 600px at 88% -12%,
+      rgba(14, 165, 233, 0.14),
+      transparent 62%
+    ),
+    radial-gradient(
+      760px 520px at 4% 104%,
+      rgba(20, 184, 166, 0.11),
+      transparent 58%
+    );
 }
 
 [data-theme="dark"] body::after {
@@ -189,8 +220,16 @@ body::after {
       rgba(var(--bg-dim-rgb), var(--bg-dim-a)),
       rgba(var(--bg-dim-rgb), var(--bg-dim-a))
     ),
-    radial-gradient(1000px 600px at 88% -12%, rgba(14, 165, 233, 0.16), transparent 62%),
-    radial-gradient(760px 520px at 4% 104%, rgba(20, 184, 166, 0.1), transparent 58%);
+    radial-gradient(
+      1000px 600px at 88% -12%,
+      rgba(14, 165, 233, 0.16),
+      transparent 62%
+    ),
+    radial-gradient(
+      760px 520px at 4% 104%,
+      rgba(20, 184, 166, 0.1),
+      transparent 58%
+    );
 }
 
 ::-webkit-scrollbar {
@@ -234,6 +273,29 @@ textarea {
   outline: none;
 }
 
+/*
+ * 键盘导航的焦点环：:focus-visible 只在「键盘/读屏」触发时出现，
+ * 鼠标点击不会多出一圈蓝框。输入框自己的 :focus 边框仍然生效，
+ * 这里补的是 outline-offset 让它和边框区分得开。
+ */
+:where(
+  button,
+  a,
+  [role="menuitem"],
+  [role="switch"],
+  [role="dialog"]
+):focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--brand-1, #0ea5e9);
+  outline-offset: 2px;
+}
+/* 对话框容器是靠 JS 聚焦的落点，不该画一圈环 */
+[role="dialog"]:focus-visible {
+  outline: none;
+}
+
 /* ═══════════ 布局 ═══════════ */
 
 .app {
@@ -256,7 +318,9 @@ textarea {
   backdrop-filter: blur(var(--glass-blur)) saturate(150%);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(150%);
   border-right: 1px solid var(--border);
-  transition: width 0.3s var(--ease), padding 0.3s var(--ease);
+  transition:
+    width 0.3s var(--ease),
+    padding 0.3s var(--ease);
 }
 
 .brand {
@@ -320,7 +384,9 @@ textarea {
   font-size: 13.5px;
   width: 100%;
   text-align: left;
-  transition: background 0.16s, color 0.16s;
+  transition:
+    background 0.16s,
+    color 0.16s;
   position: relative;
 }
 .nav-item svg {
@@ -461,11 +527,64 @@ textarea {
   border-radius: var(--r-full);
   letter-spacing: 0;
 }
+/* 侧栏「设置」上的未保存圆点：只是提示，不拦着用户去别的页面 */
+.nav-item {
+  position: relative;
+}
+.nav-dot {
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--brand-1, #0ea5e9);
+  flex: none;
+}
+
 .header-actions {
   margin-left: auto;
   display: flex;
   align-items: center;
   gap: 7px;
+}
+
+/* 移动端「更多」：桌面有地方直接摆按钮，这个入口只在窄屏出现 */
+.header-more {
+  display: none;
+  position: relative;
+}
+.more-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 90;
+  min-width: 178px;
+  padding: 6px;
+  border-radius: var(--r-md, 12px);
+  border: 1px solid var(--border);
+  background: var(--panel, #fff);
+  box-shadow: var(--shadow-lg, 0 16px 40px rgba(0, 0, 0, 0.22));
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.more-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 11px;
+  border-radius: 9px;
+  font-size: 13.4px;
+  font-weight: 550;
+  color: var(--text);
+  text-align: left;
+  white-space: nowrap;
+}
+.more-item:hover {
+  background: var(--bg-hover);
+}
+.more-item svg {
+  flex: none;
+  opacity: 0.8;
 }
 
 .content {
@@ -580,7 +699,6 @@ textarea {
   gap: 9px;
 }
 
-
 .task-card {
   background: var(--bg-elev);
   background: var(--panel);
@@ -588,7 +706,10 @@ textarea {
   border-radius: var(--r-md);
   padding: 13px 15px;
   box-shadow: var(--shadow-sm);
-  transition: box-shadow 0.22s var(--ease), border-color 0.22s, transform 0.22s var(--ease);
+  transition:
+    box-shadow 0.22s var(--ease),
+    border-color 0.22s,
+    transform 0.22s var(--ease);
   position: relative;
   overflow: hidden;
   animation: cardIn 0.34s var(--ease-out);
@@ -636,11 +757,15 @@ textarea {
 }
 .task-card.selected {
   border-color: var(--brand-1);
-  box-shadow: 0 0 0 1px var(--brand-1) inset, var(--shadow-sm);
+  box-shadow:
+    0 0 0 1px var(--brand-1) inset,
+    var(--shadow-sm);
 }
 [data-theme="dark"] .task-card.selected {
   border-color: #4cc9f0;
-  box-shadow: 0 0 0 1px rgba(76, 201, 240, 0.7) inset, var(--shadow-sm);
+  box-shadow:
+    0 0 0 1px rgba(76, 201, 240, 0.7) inset,
+    var(--shadow-sm);
 }
 /* 复选框：未选中是空心圆角方框，选中后填品牌色。
    放在 file-badge 之前，因此卡片左侧多出 28px，行高不变。 */
@@ -654,7 +779,9 @@ textarea {
   display: grid;
   place-items: center;
   color: #fff;
-  transition: background 0.15s var(--ease), border-color 0.15s;
+  transition:
+    background 0.15s var(--ease),
+    border-color 0.15s;
 }
 .pick.on {
   background: var(--brand-grad);
@@ -771,27 +898,51 @@ textarea {
   height: 18px;
 }
 .file-badge.video {
-  background: linear-gradient(135deg, rgba(168, 85, 247, 0.15), rgba(236, 72, 153, 0.12));
+  background: linear-gradient(
+    135deg,
+    rgba(168, 85, 247, 0.15),
+    rgba(236, 72, 153, 0.12)
+  );
   color: #a855f7;
 }
 .file-badge.audio {
-  background: linear-gradient(135deg, rgba(249, 115, 22, 0.15), rgba(245, 158, 11, 0.12));
+  background: linear-gradient(
+    135deg,
+    rgba(249, 115, 22, 0.15),
+    rgba(245, 158, 11, 0.12)
+  );
   color: #f97316;
 }
 .file-badge.image {
-  background: linear-gradient(135deg, rgba(34, 197, 94, 0.15), rgba(20, 184, 166, 0.12));
+  background: linear-gradient(
+    135deg,
+    rgba(34, 197, 94, 0.15),
+    rgba(20, 184, 166, 0.12)
+  );
   color: #16a34a;
 }
 .file-badge.archive {
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.16), rgba(217, 119, 6, 0.12));
+  background: linear-gradient(
+    135deg,
+    rgba(245, 158, 11, 0.16),
+    rgba(217, 119, 6, 0.12)
+  );
   color: #d97706;
 }
 .file-badge.doc {
-  background: linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(99, 102, 241, 0.12));
+  background: linear-gradient(
+    135deg,
+    rgba(59, 130, 246, 0.15),
+    rgba(99, 102, 241, 0.12)
+  );
   color: #3b82f6;
 }
 .file-badge.app {
-  background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(244, 63, 94, 0.12));
+  background: linear-gradient(
+    135deg,
+    rgba(239, 68, 68, 0.15),
+    rgba(244, 63, 94, 0.12)
+  );
   color: #ef4444;
 }
 
@@ -844,8 +995,15 @@ textarea {
   animation: pulse 1.4s ease-in-out infinite;
 }
 @keyframes pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.35; transform: scale(0.82); }
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.82);
+  }
 }
 .state-completed {
   background: rgba(34, 197, 94, 0.13);
@@ -928,7 +1086,12 @@ textarea {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.42), transparent);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.42),
+    transparent
+  );
   animation: shimmer 1.9s linear infinite;
 }
 .progress-fill.paused::after,
@@ -936,8 +1099,12 @@ textarea {
   display: none;
 }
 @keyframes shimmer {
-  from { transform: translateX(-100%); }
-  to { transform: translateX(200%); }
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(200%);
+  }
 }
 .progress-pct {
   font-size: 11.5px;
@@ -1030,7 +1197,9 @@ textarea {
   animation: spinSlow 22s linear infinite;
 }
 @keyframes spinSlow {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 .empty-title {
   font-size: 15.5px;
@@ -1065,8 +1234,12 @@ textarea {
   animation: fadeIn 0.2s var(--ease-out);
 }
 @keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .dialog {
@@ -1168,7 +1341,10 @@ textarea {
   background: var(--panel-field);
   color: var(--text);
   font-size: 13px;
-  transition: border-color 0.16s, box-shadow 0.16s, background 0.16s;
+  transition:
+    border-color 0.16s,
+    box-shadow 0.16s,
+    background 0.16s;
 }
 .input::placeholder,
 .textarea::placeholder {
@@ -1346,7 +1522,11 @@ textarea {
   font-size: 12.2px;
   font-weight: 600;
   white-space: nowrap;
-  transition: background 0.16s, color 0.16s, border-color 0.16s, transform 0.16s;
+  transition:
+    background 0.16s,
+    color 0.16s,
+    border-color 0.16s,
+    transform 0.16s;
 }
 .settings-nav-chip svg {
   width: 13px;
@@ -1429,7 +1609,9 @@ textarea {
 /* 分类编辑行：宽屏一行排开，窄屏自动堆叠，避免输入框被挤成一条 */
 .cat-row {
   display: grid;
-  grid-template-columns: 92px minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1.1fr) 32px;
+  grid-template-columns:
+    92px minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1.1fr)
+    32px;
   gap: 6px;
   align-items: center;
 }
@@ -1597,6 +1779,10 @@ textarea {
   /* 移动端隐藏 header 里的次要按钮，让标题和主操作有空间 */
   .header-actions .btn-ghost {
     display: none;
+  }
+  /* 被隐藏的次要操作收进「更多」 */
+  .header-more {
+    display: block;
   }
   /* 多选入口只留图标：395px 宽度下「批量选择 + 新建下载」两个文字按钮会挤掉标题 */
   .select-entry .desktop-label {
@@ -1946,28 +2132,44 @@ textarea {
   --brand-2: #06b6d4;
   --brand-3: #14b8a6;
   --brand-grad: linear-gradient(135deg, #0ea5e9 0%, #06b6d4 55%, #14b8a6 100%);
-  --brand-grad-soft: linear-gradient(135deg, rgba(14, 165, 233, 0.14), rgba(20, 184, 166, 0.1));
+  --brand-grad-soft: linear-gradient(
+    135deg,
+    rgba(14, 165, 233, 0.14),
+    rgba(20, 184, 166, 0.1)
+  );
 }
 :root[data-skin="purple"] {
   --brand-1: #8b5cf6;
   --brand-2: #a855f7;
   --brand-3: #d946ef;
   --brand-grad: linear-gradient(135deg, #8b5cf6 0%, #a855f7 55%, #d946ef 100%);
-  --brand-grad-soft: linear-gradient(135deg, rgba(139, 92, 246, 0.14), rgba(217, 70, 239, 0.1));
+  --brand-grad-soft: linear-gradient(
+    135deg,
+    rgba(139, 92, 246, 0.14),
+    rgba(217, 70, 239, 0.1)
+  );
 }
 :root[data-skin="green"] {
   --brand-1: #10b981;
   --brand-2: #059669;
   --brand-3: #34d399;
   --brand-grad: linear-gradient(135deg, #10b981 0%, #059669 55%, #34d399 100%);
-  --brand-grad-soft: linear-gradient(135deg, rgba(16, 185, 129, 0.14), rgba(52, 211, 153, 0.1));
+  --brand-grad-soft: linear-gradient(
+    135deg,
+    rgba(16, 185, 129, 0.14),
+    rgba(52, 211, 153, 0.1)
+  );
 }
 :root[data-skin="orange"] {
   --brand-1: #f59e0b;
   --brand-2: #f97316;
   --brand-3: #fb923c;
   --brand-grad: linear-gradient(135deg, #f59e0b 0%, #f97316 55%, #fb923c 100%);
-  --brand-grad-soft: linear-gradient(135deg, rgba(245, 158, 11, 0.14), rgba(251, 146, 60, 0.1));
+  --brand-grad-soft: linear-gradient(
+    135deg,
+    rgba(245, 158, 11, 0.14),
+    rgba(251, 146, 60, 0.1)
+  );
 }
 
 /* ───────────── 按钮风格 ───────────── */
@@ -2046,8 +2248,8 @@ textarea {
     padding-right: max(14px, env(safe-area-inset-right));
   }
   .content {
-    padding: 16px max(20px, env(safe-area-inset-right)) calc(28px + var(--safe-bottom))
-      max(20px, env(safe-area-inset-left));
+    padding: 16px max(20px, env(safe-area-inset-right))
+      calc(28px + var(--safe-bottom)) max(20px, env(safe-area-inset-left));
   }
   .task-list {
     display: grid;
@@ -2158,12 +2360,16 @@ html.has-bg-image .card,
 html.has-bg-image .task-card,
 html.has-bg-image .dialog,
 html.has-bg-image .settings-nav-chip {
-  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  box-shadow:
+    var(--shadow-md),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 html.has-bg-image[data-theme="light"] .card,
 html.has-bg-image[data-theme="light"] .task-card,
 html.has-bg-image[data-theme="light"] .dialog {
-  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  box-shadow:
+    var(--shadow-md),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 /* 图片层在动效/缩放时不必每帧重绘 */
 html.has-bg-image body::before {
@@ -2263,7 +2469,10 @@ html.has-bg-image body::before {
   color: var(--text-soft);
   font-size: 12.2px;
   font-weight: 600;
-  transition: color 0.16s, border-color 0.16s, transform 0.16s;
+  transition:
+    color 0.16s,
+    border-color 0.16s,
+    transform 0.16s;
 }
 .about-link:hover {
   color: var(--brand-1);
@@ -2324,7 +2533,11 @@ html.has-bg-image body::before {
   place-items: center;
   flex-shrink: 0;
   color: var(--accent-danger, #e5484d);
-  background: color-mix(in srgb, var(--accent-danger, #e5484d) 14%, transparent);
+  background: color-mix(
+    in srgb,
+    var(--accent-danger, #e5484d) 14%,
+    transparent
+  );
 }
 .del-file {
   min-width: 0;
@@ -2363,7 +2576,10 @@ html.has-bg-image body::before {
   color: var(--text-soft);
   font-size: 11.8px;
   font-weight: 600;
-  transition: color 0.16s, border-color 0.16s, background 0.16s;
+  transition:
+    color 0.16s,
+    border-color 0.16s,
+    background 0.16s;
 }
 .dir-chip:hover {
   color: var(--brand-1);
