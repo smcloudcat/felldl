@@ -2160,8 +2160,11 @@ impl Engine {
                 };
                 (t.referer.clone(), origin, t.cookie.clone(), basic)
             };
-            // ETag 也用任务当前值：verify_remote 可能刚换过实体
-            let etag = { rt.task.lock().etag.clone() };
+            // ETag / Last-Modified 也用任务当前值：verify_remote 可能刚换过实体
+            let (etag, last_modified) = {
+                let t = rt.task.lock();
+                (t.etag.clone(), t.last_modified.clone())
+            };
             let cancel2 = cancel.clone();
             let seg_ua = task_ua.clone();
             set.spawn(async move {
@@ -2179,6 +2182,7 @@ impl Engine {
                         global,
                         tx,
                         etag,
+                        last_modified,
                         referer,
                         cred_origin,
                         cookie,
@@ -2304,6 +2308,18 @@ impl Engine {
         let mut req = client.get(&url);
         if start > 0 {
             req = req.header(RANGE, format!("bytes={start}-"));
+            // 续传时把验证器一起发：服务器实体变了应回 200（整下），
+            // 而不是按旧偏移给 206 —— 后者只能靠 check_partial_content 事后拦
+            let validator = {
+                let t = rt.task.lock();
+                t.etag
+                    .clone()
+                    .map(|e| format!("\"{e}\""))
+                    .or_else(|| t.last_modified.clone().filter(|s| !s.is_empty()))
+            };
+            if let Some(v) = validator {
+                req = req.header(reqwest::header::IF_RANGE, v);
+            }
         }
         if let Some(r) = referer {
             req = req.header(REFERER, r);
@@ -2318,11 +2334,18 @@ impl Engine {
         if resumed_by_server {
             // 206 必须正是请求的那个起点，且总长度与探测结果一致，
             // 否则说明服务器给了别的区间，按旧偏移落盘会写出错位数据
-            let (expected_total, expected_etag) = {
+            let (expected_total, expected_etag, expected_lm) = {
                 let t = rt.task.lock();
-                (t.size, t.etag.clone())
+                (t.size, t.etag.clone(), t.last_modified.clone())
             };
-            check_partial_content(&resp, start, None, expected_total, expected_etag.as_deref())?;
+            check_partial_content(
+                &resp,
+                start,
+                None,
+                expected_total,
+                expected_etag.as_deref(),
+                expected_lm.as_deref(),
+            )?;
         } else if !status.is_success() {
             bail!("服务器返回 {}", status.as_u16());
         }
@@ -2775,6 +2798,8 @@ struct SegmentJob {
     global: Arc<RateLimiter>,
     tx: tokio::sync::mpsc::Sender<(usize, u64)>,
     etag: Option<String>,
+    /// 服务器没给 ETag 时的续传验证器（If-Range 与 206 比对都用它）
+    last_modified: Option<String>,
     referer: Option<String>,
     /// 认证归属 origin：镜像地址与它不一致时不发送 cookie / basic
     cred_origin: String,
@@ -2857,6 +2882,45 @@ async fn remove_downloaded(path: &str) {
     eprintln!("[delete] 文件删除失败（已重试）: {path}");
 }
 
+/// 比对「续传前记录的验证器」与「本次 206 响应带的验证器」。
+///
+/// 规则（保守优先）：
+/// * 有强 ETag 时以 ETag 为准，原样字符串比较（弱 ETag `W/"x"` 不等于 `"x"`：
+///   RFC 7233 规定 If-Range 只能用强验证器，把弱标签当成相同可能拼出新旧字节）；
+/// * 没有 ETag 但有 Last-Modified 时，用 Last-Modified 兜底；
+/// * 响应里两个都没给：无法判断，放行（很多 CDN 不回 ETag，直接拒绝会误伤）；
+/// * 期望值为空：等价于「没有可比的验证器」，放行。
+fn check_validators(
+    expected_etag: Option<&str>,
+    expected_lm: Option<&str>,
+    got_etag: Option<&str>,
+    got_lm: Option<&str>,
+) -> Result<()> {
+    let want_etag = expected_etag.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(want) = want_etag {
+        let got = got_etag.map(|v| v.trim().trim_matches('"')).unwrap_or("");
+        if !got.is_empty() && got != want.trim_matches('"') {
+            return Err(FellError::new(
+                crate::error::ErrorKind::Integrity,
+                format!("远端文件已变化（ETag 期望 {want:?}，实际 {got:?}），不能续传"),
+            )
+            .into());
+        }
+        return Ok(());
+    }
+    let want_lm = expected_lm.map(str::trim).filter(|s| !s.is_empty());
+    if let (Some(want), Some(got)) = (want_lm, got_lm.map(str::trim).filter(|s| !s.is_empty())) {
+        if got != want {
+            return Err(FellError::new(
+                crate::error::ErrorKind::Integrity,
+                format!("远端文件已变化（Last-Modified 期望 {want}，实际 {got}），不能续传"),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 /// 校验 206 响应的 `Content-Range` 是否与本次请求严格对应。
 ///
 /// 只信状态码是危险的：起点被换成 0、区间被截短、总长度变了都仍可能返回 206，
@@ -2868,25 +2932,19 @@ fn check_partial_content(
     expected_end: Option<u64>,
     expected_total: Option<u64>,
     expected_etag: Option<&str>,
+    expected_last_modified: Option<&str>,
 ) -> Result<()> {
     // 有的服务器会忽略 If-Range 照旧回 206：区间看着对，实体却已经换了。
-    // 这种情况只有比对响应 ETag 才能发现，否则会把新旧字节拼在一起。
-    if let Some(want) = expected_etag.filter(|s| !s.is_empty()) {
-        if let Some(got) = resp
-            .headers()
-            .get(ETAG)
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.trim_matches('"'))
-        {
-            if !got.is_empty() && got != want {
-                return Err(FellError::new(
-                    crate::error::ErrorKind::Integrity,
-                    format!("远端文件已变化（ETag 期望 \"{want}\"，实际 \"{got}\"），不能续传"),
-                )
-                .into());
-            }
-        }
-    }
+    // 这种情况只有比对验证器才能发现，否则会把新旧字节拼在一起。
+    // 服务器只给 Last-Modified 时用时间戳兜底（没有 ETag 可比的常见情形）。
+    check_validators(
+        expected_etag,
+        expected_last_modified,
+        resp.headers().get(ETAG).and_then(|v| v.to_str().ok()),
+        resp.headers()
+            .get(LAST_MODIFIED)
+            .and_then(|v| v.to_str().ok()),
+    )?;
     let Some(cr) = resp
         .headers()
         .get(CONTENT_RANGE)
@@ -2999,8 +3057,13 @@ async fn fetch_segment(
                 .clone()
                 .unwrap_or_else(|| user_agent_hdr().to_string()),
         );
+    // If-Range 只接受强验证器：有 ETag 用 ETag，没有就用 Last-Modified 原值
     if let Some(etag) = &job.etag {
         req = req.header(reqwest::header::IF_RANGE, format!("\"{etag}\""));
+    } else if let Some(lm) = &job.last_modified {
+        if !lm.is_empty() {
+            req = req.header(reqwest::header::IF_RANGE, lm.as_str());
+        }
     }
     if let Some(r) = &job.referer {
         req = req.header(REFERER, r);
@@ -3037,6 +3100,7 @@ async fn fetch_segment(
         Some(job.end),
         job.total,
         job.etag.as_deref(),
+        job.last_modified.as_deref(),
     )?;
 
     let mut stream = resp.bytes_stream();
@@ -3839,5 +3903,35 @@ mod tests {
         engine.unindex_task("bt1");
         assert!(!engine.bt_ids.lock().contains("bt1"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 续传验证器比对：强 ETag 优先，没有 ETag 时用 Last-Modified 兜底。
+    #[test]
+    fn validators_prefer_etag_then_last_modified() {
+        // 强 ETag 相同 → 放行
+        assert!(check_validators(Some("\"v1\""), None, Some("\"v1\""), None).is_ok());
+        // 强 ETag 不同 → 拒绝（服务器忽略 If-Range 仍回 206 的情形）
+        let e = check_validators(Some("v1"), None, Some("v2"), None).unwrap_err();
+        assert_eq!(crate::error::classify(&e).code, "integrity");
+
+        // 没有 ETag，Last-Modified 变了 → 拒绝
+        let lm = "Wed, 21 Oct 2015 07:28:00 GMT";
+        let newer = "Thu, 22 Oct 2015 07:28:00 GMT";
+        assert!(check_validators(None, Some(lm), None, Some(lm)).is_ok());
+        let e = check_validators(None, Some(lm), None, Some(newer)).unwrap_err();
+        assert_eq!(crate::error::classify(&e).code, "integrity");
+
+        // 响应两个验证器都没给：无法判断，不能误伤
+        assert!(check_validators(None, Some(lm), None, None).is_ok());
+        // 期望值为空：等同没有可比的验证器
+        assert!(check_validators(Some(""), Some(""), None, Some(newer)).is_ok());
+    }
+
+    /// 弱 ETag 不能当成强 ETag 的等价物：RFC 7233 规定 If-Range 只接受强验证器，
+    /// 拼错字节的代价远大于多下一次。
+    #[test]
+    fn weak_etag_is_not_equal_to_strong() {
+        let e = check_validators(Some("\"v1\""), None, Some("W/\"v1\""), None).unwrap_err();
+        assert_eq!(crate::error::classify(&e).code, "integrity");
     }
 }

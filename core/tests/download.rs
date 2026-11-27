@@ -1371,3 +1371,148 @@ async fn batch_ops_report_per_id_and_keep_download_intact() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 只发 Last-Modified、不发 ETag 的服务器：模拟常见 CDN / 对象存储。
+///
+/// `flip_after_probe = true` 时，探测请求（bytes=0-1）返回 v1，其余请求返回 v2，
+/// 用于验证「服务器忽略 If-Range 照旧回 206」时 Last-Modified 兜底能拦住错位数据。
+struct LmServer {
+    addr: SocketAddr,
+    /// (内容, Last-Modified)：保留可变句柄，便于将来加「改回旧值恢复续传」的用例
+    #[allow(dead_code)]
+    entity: Arc<std::sync::RwLock<(Vec<u8>, String)>>,
+}
+
+async fn spawn_lm_server(body: Vec<u8>, lm: &str, flip_after_probe: bool) -> LmServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let entity = Arc::new(std::sync::RwLock::new((body, lm.to_string())));
+    let ent = entity.clone();
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let ent = ent.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let (body, cur_lm) = {
+                    let g = ent.read().unwrap();
+                    (g.0.clone(), g.1.clone())
+                };
+                let total = body.len() as u64;
+                let mut range: Option<(u64, u64)> = None;
+                for line in req.lines() {
+                    let ll = line.to_lowercase();
+                    if ll.starts_with("range:") {
+                        let v = line.split(':').nth(1).unwrap_or("").trim().to_string();
+                        if let Some(spec) = v.strip_prefix("bytes=") {
+                            if let Some((a, b)) = spec.trim().split_once('-') {
+                                let start = a.trim().parse::<u64>().unwrap_or(0);
+                                let end = if b.trim().is_empty() {
+                                    total - 1
+                                } else {
+                                    b.trim().parse::<u64>().unwrap_or(total - 1)
+                                };
+                                range = Some((start, end.min(total - 1)));
+                            }
+                        }
+                    }
+                }
+                // 故意不发 ETag：客户端只能拿 Last-Modified 做续传校验
+                let Some((s, e)) = range else {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nLast-Modified: {cur_lm}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(&body).await;
+                    return;
+                };
+                let is_probe = s == 0 && e == 1;
+                let reply_lm = if flip_after_probe && !is_probe {
+                    "Thu, 22 Oct 2015 07:28:00 GMT".to_string()
+                } else {
+                    cur_lm
+                };
+                let slice = &body[s as usize..=(e as usize)];
+                let head = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nLast-Modified: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                    slice.len(), s, e, total, reply_lm
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(slice).await;
+                let _ = sock.flush().await;
+            });
+        }
+    });
+
+    LmServer { addr, entity }
+}
+
+/// 没有 ETag 时用 Last-Modified 兜底：服务器忽略 If-Range 照旧回 206 但实体已变，
+/// 若只比区间就会把新旧字节拼进同一个文件，这里必须报 integrity 且不可重试。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejects_segment_when_last_modified_changed_mid_download() {
+    let payload = make_payload(2 * 1024 * 1024);
+    let lm = "Wed, 21 Oct 2015 07:28:00 GMT";
+    let srv = spawn_lm_server(payload, lm, true).await;
+    let root = temp_root("lmflip");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    let id = engine
+        .add(AddTaskRequest {
+            url: format!("http://{}/lm.bin", srv.addr),
+            save_dir: Some(out.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // 探测阶段拿到 v1，任务上必须留下 Last-Modified（否则续传没有可比对象）
+    let mut waited = 0;
+    loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        waited += 1;
+        let t = engine.get(&id).unwrap();
+        if t.last_modified.is_some() || t.state == TaskState::Error {
+            break;
+        }
+        assert!(waited < 100, "任务既没记录 Last-Modified 也没结束");
+    }
+    let t = engine.get(&id).unwrap();
+    assert_eq!(
+        t.last_modified.as_deref(),
+        Some(lm),
+        "探测应记录 Last-Modified"
+    );
+
+    // 等它撞上翻转过的时间戳
+    let mut waited = 0;
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        waited += 1;
+        let t = engine.get(&id).unwrap();
+        if t.state == TaskState::Error {
+            break;
+        }
+        assert!(waited < 150, "实体变了却还在继续写，状态 {:?}", t.state);
+    }
+    let t = engine.get(&id).unwrap();
+    assert_eq!(
+        t.error_code.as_deref(),
+        Some("integrity"),
+        "错误: {:?}",
+        t.error
+    );
+    assert_eq!(t.retryable, Some(false), "内容变化重试也没用");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
