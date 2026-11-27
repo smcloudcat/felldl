@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 引擎：这是唯一跨平台可完整跑测的 crate（不依赖 Tauri / 系统 WebView）
+  core:
+    name: core tests (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      # --locked：Cargo.lock 必须与清单一致，避免 CI 悄悄升级依赖
+      - name: Unit tests
+        run: cargo test --locked -p felldl-core --lib
+      # 集成测试里的超时用例默认 #[ignore]（要等真实 30s/60s），其余都要跑
+      - name: Integration tests
+        run: |
+          cargo test --locked -p felldl-core --test download
+          cargo test --locked -p felldl-core --test api_redaction
+          cargo test --locked -p felldl-core --test timeout_watchdog
+      - name: Clippy (informational)
+        run: cargo clippy --locked -p felldl-core --all-targets
+
+  # 桌面端：tauri 在 Linux 需要 webkit2gtk 等系统库，直接跟开发环境一致用 Windows
+  desktop:
+    name: desktop lib tests (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Unit tests
+        run: cargo test --locked -p felldl --lib
+
+  ui:
+    name: ui tests + build (ubuntu)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+      # 纯函数单测（taskMerge / ipcError / virtual）
+      - run: npm test
+      # tsc -b + vite build：类型错误与产物大小在这里拦
+      - run: npm run build
