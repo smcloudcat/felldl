@@ -659,6 +659,23 @@ impl Task {
         t
     }
 
+    /// 推给桌面 IPC（webview）的副本：脱敏 + 去掉用不到的分片明细。
+    ///
+    /// 分片只在「下载中 / 探测中」用于画并行刻度线（`TaskCard` 的 `segment-ticks`），
+    /// 已完成 / 暂停 / 错误 / 排队 / 定时任务，UI 一律不读 `segments`。
+    /// 但每条任务带 16 个分片时，10000 条历史的一次 `list_tasks` 会多出约 8MB JSON，
+    /// 启动和事件断流后的重同步都要为这份纯载荷买单。
+    ///
+    /// 恢复下载时引擎会先发一条 `Downloading` 的完整事件，分片随之回到 UI，
+    /// 所以清空不会让进度刻度线缺失。
+    pub fn for_ui(&self) -> Task {
+        let mut t = self.redacted();
+        if !matches!(self.state, TaskState::Downloading | TaskState::Probing) {
+            t.segments.clear();
+        }
+        t
+    }
+
     /// 生成进度增量快照（不含静态字段）
     pub fn progress_snapshot(&self) -> TaskProgress {
         TaskProgress {

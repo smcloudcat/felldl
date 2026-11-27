@@ -163,15 +163,16 @@ fn remove_files_in(dir: &std::path::Path) -> u64 {
 /// `Task` 里的 `cookie` / `password` 是下载器自己用的凭据。webview 只需要知道
 /// 「有没有填」，不需要明文：明文一旦进了前端，就会出现在 devtools、错误上报、
 /// 截图和任何 `JSON.stringify(task)` 里。真正的读取方是引擎和本地 HTTP API，
-/// 两者各自动手从引擎拿（HTTP API 也走 `redacted()`）。
+/// 两者各自动手从引擎拿（HTTP API 走 `redacted()`，这里走 `for_ui()`：
+/// 额外去掉非活跃任务的分片明细，见 `Task::for_ui`）。
 fn redact_tasks(tasks: Vec<Task>) -> Vec<Task> {
-    tasks.into_iter().map(|t| t.redacted()).collect()
+    tasks.into_iter().map(|t| t.for_ui()).collect()
 }
 
 /// 事件推送同样要脱敏：`TaskUpdated` 带完整 Task，`TaskProgress` 不带凭据。
 fn redact_event(ev: &EngineEvent) -> EngineEvent {
     match ev {
-        EngineEvent::TaskUpdated(t) => EngineEvent::TaskUpdated(t.redacted()),
+        EngineEvent::TaskUpdated(t) => EngineEvent::TaskUpdated(t.for_ui()),
         other => other.clone(),
     }
 }
@@ -2441,6 +2442,10 @@ mod ipc_redaction_tests {
             "save_dir": "/tmp",
             "save_path": "/tmp/private.bin",
             "state": "downloading",
+            "segments": [
+                { "index": 0, "start": 0, "end": 499, "done": 500 },
+                { "index": 1, "start": 500, "end": 999, "done": 0 }
+            ],
             "cookie": "session=secret",
             "username": "alice",
             "password": "hunter2"
@@ -2467,6 +2472,25 @@ mod ipc_redaction_tests {
                 assert_eq!(t.password.as_deref(), Some("***"));
             }
             other => panic!("事件类型不该变：{other:?}"),
+        }
+    }
+
+    #[test]
+    fn active_task_keeps_segments_for_progress_ticks() {
+        let out = redact_tasks(vec![task_with_secrets()]);
+        assert_eq!(out[0].segments.len(), 2, "下载中要保留分片画并行刻度线");
+    }
+
+    #[test]
+    fn terminal_task_drops_segments_to_shrink_payload() {
+        for state in ["completed", "paused", "error", "queued", "scheduled"] {
+            let mut t = task_with_secrets();
+            t.state = serde_json::from_value(serde_json::json!(state)).unwrap();
+            let out = redact_tasks(vec![t]);
+            assert!(
+                out[0].segments.is_empty(),
+                "{state} 状态不该再传分片明细"
+            );
         }
     }
 

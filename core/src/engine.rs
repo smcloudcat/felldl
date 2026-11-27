@@ -1115,7 +1115,7 @@ impl Engine {
     /// - 有活：500ms（进度、速度、落盘节流都靠它）
     /// - 只剩定时任务：睡到最近一个到期点（封顶 30s）
     /// - 什么都没有：30s 兜底，同时等 `wake` 事件
-    fn next_tick_delay(&self) -> std::time::Duration {
+    pub fn next_tick_delay(&self) -> std::time::Duration {
         const ACTIVE: std::time::Duration = std::time::Duration::from_millis(500);
         const IDLE_MAX: std::time::Duration = std::time::Duration::from_secs(30);
         if self.has_active_work() {
