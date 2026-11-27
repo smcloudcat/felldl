@@ -260,6 +260,13 @@ pub(crate) struct Runtime {
     /// 正在被删除：从发起删除到记录消失之间，任何 worker 都不许再改状态/广播。
     /// 删除期间用户要的是「它消失」，不是「它先暂停了一下」。
     pub(crate) deleting: std::sync::atomic::AtomicBool,
+    /// 本轮 worker 的句柄。
+    ///
+    /// 暂停/删除只有 `cancel` 信号 + 运行代号两道保险，它们保证**正确性**
+    /// （迟到的写入会被丢弃），但管不住「文件句柄还开着」。Windows 上句柄没关
+    /// 就删文件会失败，留下一个孤儿 `.part`；Unix 上也可能删完又被写回。
+    /// 删除时主动 join 一次，才能确认 worker 真的退出了。
+    pub(crate) worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Runtime {
@@ -318,6 +325,7 @@ impl Runtime {
             // 从磁盘载入的任务可能带着上次的版本号，接着往上加，避免回绕
             rev: AtomicU64::new(task_rev),
             deleting: std::sync::atomic::AtomicBool::new(false),
+            worker: Mutex::new(None),
         })
     }
 }
@@ -1404,12 +1412,14 @@ impl Engine {
 
         let engine = self.clone();
         let id2 = id.to_string();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let res = engine.clone().run_task(&id2, generation, new_cancel).await;
             if let Err(e) = res {
                 engine.fail_task(&id2, Some(generation), &e);
             }
         });
+        // 存句柄供 cancel 主动 join；旧句柄可能还挂着（上一代超时未退），直接丢弃即可
+        *rt.worker.lock() = Some(handle);
         Ok(())
     }
 
@@ -1427,13 +1437,29 @@ impl Engine {
             self.bt_remove(&rt, delete_file).await;
         } else {
             rt.cancel.lock().cancel();
-            // 等在途 worker 真正退出再删文件：Windows 上句柄没关时删除会失败，
+            // 主动 join：等在途 worker 真正退出再删文件。Windows 上句柄没关时删除会失败，
             // 结果是「任务删了，目录里还留着一个 .part」；Unix 上也避免删完又被写回。
-            // 有界等待（3 秒），卡在阻塞 IO 里的 worker 不会把 UI 拖死——
+            // 以前靠轮询 `running` 归零间接判断，但 `running=false` 只说明「逻辑上收工」，
+            // 句柄真的关掉才算收工。有界等待（3 秒），卡在阻塞 IO 里的 worker 不会把 UI 拖死；
             // 超时后照常继续，正确性由运行代号 + 存储墓碑保证。
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-            while *rt.running.lock() && std::time::Instant::now() < deadline {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let handle = rt.worker.lock().take();
+            match handle {
+                Some(h) => {
+                    if tokio::time::timeout(std::time::Duration::from_secs(3), h)
+                        .await
+                        .is_err()
+                    {
+                        eprintln!("[cancel] worker 3 秒内未退出，改由运行代号 + 墓碑兜底");
+                    }
+                }
+                None => {
+                    // 没有句柄（进程重启后恢复、还没开过工）：退回轮询，行为与以前一致
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    while *rt.running.lock() && std::time::Instant::now() < deadline {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                }
             }
         }
         // 让在途 worker 立即作废：删除后它的任何状态写入 / 事件广播都被丢弃，
