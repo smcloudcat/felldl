@@ -186,6 +186,21 @@ export interface TaskPage {
   has_more: boolean;
 }
 
+/** 批量操作里单条的失败明细；code 是契约，message 只用于展示 */
+export interface BatchFailure {
+  id: string;
+  code: string;
+  message: string;
+  /** false 表示「保持现状再点一次也没用」（例如任务已被删除） */
+  retryable: boolean;
+}
+
+/** 批量暂停/继续/删除的结果：成功的 id 与失败项分开 */
+export interface BatchReport {
+  ok: string[];
+  failed: BatchFailure[];
+}
+
 export interface TaskCounts {
   all: number;
   downloading: number;

@@ -625,6 +625,122 @@ textarea {
   border-color: rgba(239, 68, 68, 0.3);
 }
 
+/* ── 多选 ── */
+/* 多选模式下整张卡是点击区：给一点指针反馈，否则手机上看不出「能点」 */
+.task-card.selectable {
+  cursor: pointer;
+  user-select: none;
+}
+.task-card.selectable:hover {
+  border-color: var(--border-strong);
+}
+.task-card.selected {
+  border-color: var(--brand-1);
+  box-shadow: 0 0 0 1px var(--brand-1) inset, var(--shadow-sm);
+}
+[data-theme="dark"] .task-card.selected {
+  border-color: #4cc9f0;
+  box-shadow: 0 0 0 1px rgba(76, 201, 240, 0.7) inset, var(--shadow-sm);
+}
+/* 复选框：未选中是空心圆角方框，选中后填品牌色。
+   放在 file-badge 之前，因此卡片左侧多出 28px，行高不变。 */
+.pick {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  margin-top: 9px;
+  border-radius: 6px;
+  border: 1.6px solid var(--border-strong);
+  display: grid;
+  place-items: center;
+  color: #fff;
+  transition: background 0.15s var(--ease), border-color 0.15s;
+}
+.pick.on {
+  background: var(--brand-grad);
+  border-color: transparent;
+}
+
+/* ── 批量操作条 ── */
+.batch-bar {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 9px 13px;
+  margin-bottom: 12px;
+  background: var(--surface-glass);
+  backdrop-filter: blur(var(--glass-blur)) saturate(150%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(150%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-sm);
+}
+.batch-count {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+.batch-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.batch-actions .btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 批量结果明细 */
+.batch-result {
+  max-width: 480px;
+  width: 100%;
+}
+.batch-fails {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 42vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.batch-fail {
+  background: var(--track);
+  border-radius: var(--r-sm);
+  padding: 8px 11px;
+}
+.batch-fail-name {
+  font-size: 12.8px;
+  font-weight: 620;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-fail-reason {
+  margin-top: 2px;
+  font-size: 11.8px;
+  color: var(--text-mute);
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.batch-fail-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  color: var(--text-mute);
+  background: var(--bg-elev);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
 /* 左侧类型图标 */
 .task-row {
   display: flex;
@@ -1480,6 +1596,10 @@ textarea {
   }
   /* 移动端隐藏 header 里的次要按钮，让标题和主操作有空间 */
   .header-actions .btn-ghost {
+    display: none;
+  }
+  /* 多选入口只留图标：395px 宽度下「批量选择 + 新建下载」两个文字按钮会挤掉标题 */
+  .select-entry .desktop-label {
     display: none;
   }
   .header-title {

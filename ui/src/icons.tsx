@@ -129,6 +129,19 @@ export const IconArchive = mk(
 );
 export const IconCode = mk(<path d="m8.5 8.5-4 3.5 4 3.5M15.5 8.5l4 3.5-4 3.5M13.5 5l-3 14" />);
 export const IconMenu = mk(<path d="M4 7h16M4 12h16M4 17h16" />);
+/** 多选入口 / 复选框（未选中时只是一圈圆角方框） */
+export const IconCheckSquare = mk(
+  <>
+    <rect x="3.6" y="3.6" width="16.8" height="16.8" rx="4.4" />
+    <path d="m8.3 12.2 2.6 2.6 4.8-5.2" />
+  </>
+);
+export const IconCheckCircle = mk(
+  <>
+    <circle cx="12" cy="12" r="8.6" />
+    <path d="m8.2 12.2 2.6 2.6 4.8-5.2" />
+  </>
+);
 export const IconSun = mk(
   <>
     <circle cx="12" cy="12" r="4" />

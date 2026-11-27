@@ -707,6 +707,51 @@ pub struct TaskPage {
     pub has_more: bool,
 }
 
+/// 批量操作（暂停 / 继续 / 删除）。
+///
+/// 与单条命令共用同一套引擎方法，语义不另立一套：
+/// `Pause` 会连 `Queued` 一起暂停（否则空出的并发槽立刻把排队任务拉起来），
+/// `Resume` 对已完成任务是无操作，`Remove` 的 `delete_file` 决定是否删盘。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchOp {
+    Pause,
+    Resume,
+    Remove,
+}
+
+/// 批量操作中单条的失败明细。
+///
+/// `code` 是稳定契约（`task.not_found` / `task.remove_failed` …），
+/// `retryable` 告诉前端「值不值得把这条留在选中状态再点一次」。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchFailure {
+    pub id: TaskId,
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+}
+
+/// 批量操作结果：成功 id 与失败明细分开。
+///
+/// 部分失败是常态（用户在别的窗口删了同一条、文件被播放器占用），
+/// 所以批量命令本身不返回 Err —— 只有「整个动作非法」才走命令级错误。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BatchReport {
+    pub ok: Vec<TaskId>,
+    pub failed: Vec<BatchFailure>,
+}
+
+impl BatchReport {
+    /// 失败里还有值得重试的项就返回它们，前端据此决定「重试失败项」按钮是否可用。
+    pub fn retryable_ids(&self) -> Vec<TaskId> {
+        self.failed
+            .iter()
+            .filter(|f| f.retryable)
+            .map(|f| f.id.clone())
+            .collect()
+    }
+}
+
 /// 侧边栏计数与顶部总速度。
 ///
 /// 分页之后 UI 手里只有当前页，不能再靠遍历本地数组算这些数字；由引擎一次遍历
@@ -891,6 +936,41 @@ mod resume_anchor_tests {
 }
 
 #[cfg(test)]
+mod batch_report_tests {
+    use super::{BatchFailure, BatchReport};
+
+    fn fail(id: &str, retryable: bool) -> BatchFailure {
+        BatchFailure {
+            id: id.into(),
+            code: "task.pause_failed".into(),
+            message: "x".into(),
+            retryable,
+        }
+    }
+
+    /// 「重试失败项」只能拿到值得重试的 id：任务已被删除的那条重试也没用，
+    /// 混进按钮里只会让用户再失败一次。
+    #[test]
+    fn retryable_ids_filters_hopeless_failures() {
+        let report = BatchReport {
+            ok: vec!["a".into()],
+            failed: vec![fail("b", true), fail("c", false), fail("d", true)],
+        };
+        assert_eq!(report.retryable_ids(), vec!["b", "d"]);
+    }
+
+    #[test]
+    fn empty_report_has_nothing_to_retry() {
+        assert!(BatchReport::default().retryable_ids().is_empty());
+        let only_final = BatchReport {
+            ok: vec![],
+            failed: vec![fail("x", false)],
+        };
+        assert!(only_final.retryable_ids().is_empty());
+    }
+}
+
+#[cfg(test)]
 mod url_userinfo_tests {
     use super::split_url_userinfo;
 
@@ -945,5 +1025,72 @@ mod url_userinfo_tests {
             assert_eq!(u, raw, "{raw} 不应被改动");
             assert!(user.is_none() && pass.is_none(), "{raw} 不应解析出凭据");
         }
+    }
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::{Task, TaskKind, TaskState};
+
+    fn task_with_secrets() -> Task {
+        Task {
+            id: "id-1".into(),
+            url: "https://example.com/f.bin".into(),
+            kind: TaskKind::Http,
+            mirrors: Vec::new(),
+            file_name: "f.bin".into(),
+            save_dir: "/tmp".into(),
+            save_path: "/tmp/f.bin".into(),
+            size: Some(10),
+            downloaded: 0,
+            state: TaskState::Paused,
+            error: None,
+            error_code: None,
+            retryable: None,
+            rev: 0,
+            connections: 1,
+            segments: Vec::new(),
+            supports_range: true,
+            etag: None,
+            last_modified: None,
+            content_type: None,
+            referer: None,
+            cookie: Some("SESSION=secret".into()),
+            auth_origin: "https://example.com".into(),
+            user_agent: None,
+            speed_limit: 0,
+            scheduled_at: None,
+            created_at: 0,
+            completed_at: None,
+            speed: 0,
+            peers: 0,
+            upload_speed: 0,
+            bt_info_hash: None,
+            category: None,
+            username: None,
+            password: Some("hunter2".into()),
+            interval_secs: 0,
+            resume_anchor: None,
+        }
+    }
+
+    /// API / IPC 用的副本必须把凭据换成掩码，只保留「有没有」这一层信息
+    #[test]
+    fn redacted_masks_credentials_but_keeps_presence() {
+        let t = task_with_secrets();
+        let r = t.redacted();
+        assert_eq!(r.cookie.as_deref(), Some("***"));
+        assert_eq!(r.password.as_deref(), Some("***"));
+        // 原任务不受影响：脱敏必须是复制，不能就地改
+        assert_eq!(t.cookie.as_deref(), Some("SESSION=secret"));
+    }
+
+    #[test]
+    fn redacted_leaves_absent_credentials_absent() {
+        let mut t = task_with_secrets();
+        t.cookie = None;
+        t.password = None;
+        let r = t.redacted();
+        assert!(r.cookie.is_none() && r.password.is_none());
     }
 }

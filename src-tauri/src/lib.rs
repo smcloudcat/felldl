@@ -248,6 +248,35 @@ async fn resume_task(state: State<'_, AppState>, id: String) -> Result<(), Strin
     state.engine.resume(&id).await.map_err(|e| format!("{e:#}"))
 }
 
+/// 批量暂停 / 继续 / 删除。
+///
+/// 返回逐条明细而不是「第一个错误」：批量删除 30 条时，中间有一条文件被占用
+/// 不应该让另外 29 条都不执行，也不该只给用户一句「操作失败」。
+/// `action` 只接受三个固定值，其余一律 `batch.unknown_action`（不猜、不兜底）。
+#[tauri::command]
+async fn batch_tasks(
+    state: State<'_, AppState>,
+    action: String,
+    ids: Vec<String>,
+    delete_file: Option<bool>,
+) -> Result<felldl_core::BatchReport, IpcError> {
+    let op = match action.as_str() {
+        "pause" => felldl_core::BatchOp::Pause,
+        "resume" | "retry" => felldl_core::BatchOp::Resume,
+        "remove" => felldl_core::BatchOp::Remove,
+        other => {
+            return Err(IpcError::new(
+                "batch.unknown_action",
+                format!("未知的批量操作：{other}"),
+            ))
+        }
+    };
+    Ok(state
+        .engine
+        .batch(op, &ids, delete_file.unwrap_or(false))
+        .await)
+}
+
 #[tauri::command]
 async fn remove_task(
     state: State<'_, AppState>,
@@ -2206,6 +2235,7 @@ pub fn run() {
             add_tasks,
             pause_task,
             resume_task,
+            batch_tasks,
             remove_task,
             clear_completed,
             pause_all,

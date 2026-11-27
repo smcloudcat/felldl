@@ -1621,6 +1621,63 @@ impl Engine {
         self.cancel(id, false).await
     }
 
+    /// 批量操作：逐条执行并收集成功/失败明细。
+    ///
+    /// 为什么不在 UI 里 for 循环调单条命令：那样「部分失败」只能靠 N 次 toast，
+    /// 用户看不出哪几条没成功；而批量删除几十条时，中间一条失败也不该中断其余操作。
+    /// 这里一次返回 `ok / failed`，失败项带结构化 code 与 retryable，前端可以
+    /// 只保留失败项选中状态并给「重试失败项」。
+    ///
+    /// 语义与单条命令完全一致（同一套 pause/resume/cancel），不做任何额外状态推断。
+    pub async fn batch(
+        self: &Arc<Self>,
+        op: BatchOp,
+        ids: &[String],
+        delete_file: bool,
+    ) -> BatchReport {
+        let mut report = BatchReport::default();
+        // 去重但保序：同一 id 出现两次时，第二次是对已暂停任务再暂停（无害但会多一次落盘）
+        let mut seen = std::collections::HashSet::new();
+        for id in ids {
+            if !seen.insert(id.as_str()) {
+                continue;
+            }
+            if !self.tasks.lock().contains_key(id) {
+                report.failed.push(BatchFailure {
+                    id: id.clone(),
+                    code: "task.not_found".into(),
+                    message: "任务不存在（可能已被其它窗口删除）".into(),
+                    retryable: false,
+                });
+                continue;
+            }
+            let r = match op {
+                BatchOp::Pause => self.pause(id).await,
+                BatchOp::Resume => self.resume(id).await,
+                BatchOp::Remove => self.cancel(id, delete_file).await,
+            };
+            match r {
+                Ok(()) => report.ok.push(id.clone()),
+                Err(e) => {
+                    let info = crate::error::classify(&e);
+                    report.failed.push(BatchFailure {
+                        id: id.clone(),
+                        code: match op {
+                            BatchOp::Pause => "task.pause_failed",
+                            BatchOp::Resume => "task.resume_failed",
+                            BatchOp::Remove => "task.remove_failed",
+                        }
+                        .into(),
+                        message: format!("{e:#}"),
+                        // 删除失败的常见原因是文件被占用/权限；网络类失败重试有意义
+                        retryable: info.retryable,
+                    });
+                }
+            }
+        }
+        report
+    }
+
     /// 清空已完成
     pub async fn clear_completed(&self) {
         let entries: Vec<(String, bool)> = {

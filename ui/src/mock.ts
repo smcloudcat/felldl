@@ -206,6 +206,15 @@ setInterval(() => {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 浏览器验收脚本用：直接操作假任务数组，**不广播事件**。
+ *
+ * 这样可以让「UI 里仍看得见、引擎侧已不存在」的错位发生，
+ * 用来验证批量操作的失败明细（真实场景是别的窗口删了同一条）。
+ * 只存在于 mock，不参与 Tauri 构建路径。
+ */
+export const __devTasks = tasks;
+
 export const mockEngine = {
   async invoke(cmd: string, args?: any): Promise<any> {
     await sleep(60);
@@ -298,6 +307,45 @@ export const mockEngine = {
           emit({ type: "taskRemoved", payload: args.id });
         }
         return null;
+      }
+      case "batch_tasks": {
+        // 与真实引擎一致：逐条执行，不存在的 id 进 failed，不影响其它条
+        const action: string = args.action;
+        const ids: string[] = Array.isArray(args.ids) ? args.ids : [];
+        const ok: string[] = [];
+        const failed: { id: string; code: string; message: string; retryable: boolean }[] = [];
+        const seen = new Set<string>();
+        for (const id of ids) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+          const t = tasks.find((x) => x.id === id);
+          if (!t) {
+            failed.push({
+              id,
+              code: "task.not_found",
+              message: "任务不存在（可能已被其它窗口删除）",
+              retryable: false,
+            });
+            continue;
+          }
+          if (action === "remove") {
+            tasks.splice(tasks.indexOf(t), 1);
+            emit({ type: "taskRemoved", payload: id });
+          } else if (action === "pause") {
+            if (t.state === "downloading" || t.state === "probing" || t.state === "queued") {
+              t.state = "paused";
+              t.speed = 0;
+              emit({ type: "taskUpdated", payload: { ...t } });
+            }
+          } else {
+            if (t.state !== "completed") {
+              t.state = "downloading";
+              emit({ type: "taskUpdated", payload: { ...t } });
+            }
+          }
+          ok.push(id);
+        }
+        return { ok, failed };
       }
       case "pause_all":
         tasks.forEach((t) => {

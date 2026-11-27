@@ -1303,3 +1303,71 @@ async fn cancel_does_not_resurrect_task() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 批量操作：部分失败要逐条回报，不能一条失败拖垮整批。
+///
+/// 这里同时验证三件事：
+/// 1. 重复 id 只执行一次（否则会对同一任务连写两次状态）；
+/// 2. 不存在的 id 进 `failed` 且带 `task.not_found`（不是整条命令报错）；
+/// 3. 批量暂停/继续走的确实是同一条下载链路 —— 续传后逐字节比对。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn batch_ops_report_per_id_and_keep_download_intact() {
+    use felldl_core::BatchOp;
+
+    let payload = make_payload(4 * 1024 * 1024);
+    let srv = spawn_server(payload.clone(), true).await;
+    let root = temp_root("batch");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+
+    let mut s = engine.settings();
+    s.global_speed_limit = 2 * 1024 * 1024;
+    engine.update_settings(s).unwrap();
+
+    let id = engine
+        .add(AddTaskRequest {
+            url: format!("http://{}/batch.bin", srv.addr),
+            save_dir: Some(out.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // 等真正开始下载，才谈得上「暂停」
+    let mut waited = 0;
+    while engine.get(&id).map(|t| t.downloaded).unwrap_or(0) < 200 * 1024 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        waited += 1;
+        assert!(waited < 100, "下载迟迟没有进度");
+    }
+
+    let ids = vec![id.clone(), id.clone(), "missing-task".to_string()];
+    let report = engine.batch(BatchOp::Pause, &ids, false).await;
+    assert_eq!(report.ok, vec![id.clone()], "重复 id 只应成功一次");
+    assert_eq!(report.failed.len(), 1, "{:?}", report.failed);
+    assert_eq!(report.failed[0].id, "missing-task");
+    assert_eq!(report.failed[0].code, "task.not_found");
+    assert!(!report.failed[0].retryable, "不存在的任务重试也没用");
+    assert!(
+        report.retryable_ids().is_empty(),
+        "没有可重试项时不该给出重试入口"
+    );
+
+    let paused = engine.get(&id).unwrap();
+    assert_eq!(paused.state, TaskState::Paused);
+    assert!(paused.downloaded > 0, "暂停不应回退进度");
+
+    // 继续：同样走批量路径，之后必须完整下完且内容一致
+    let report = engine.batch(BatchOp::Resume, &[id.clone()], false).await;
+    assert_eq!(report.ok, vec![id.clone()]);
+    assert!(report.failed.is_empty());
+
+    let t = wait_done(&engine, &id, Duration::from_secs(90)).await;
+    assert_eq!(t.state, TaskState::Completed, "错误: {:?}", t.error);
+    let got = std::fs::read(&t.save_path).unwrap();
+    assert_eq!(got.len(), payload.len());
+    assert!(got == payload, "批量暂停/继续后内容不一致");
+
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -7,6 +7,7 @@
  */
 import type {
   AddTaskRequest,
+  BatchReport,
   Settings,
   Task,
   TaskPage,
@@ -69,6 +70,18 @@ export const api = {
   clearCompleted: () => invoke("clear_completed") as Promise<void>,
   pauseAll: () => invoke("pause_all") as Promise<void>,
   resumeAll: () => invoke("resume_all") as Promise<void>,
+
+  /**
+   * 批量暂停 / 继续 / 删除。
+   *
+   * 返回逐条明细：部分失败不会让整批回滚，也不会只报「操作失败」。
+   * `retry` 与 `resume` 在引擎侧是同一条路径（重试就是把错误任务重新拉起来）。
+   */
+  batch: (
+    action: "pause" | "resume" | "retry" | "remove",
+    ids: string[],
+    deleteFile = false
+  ) => invoke("batch_tasks", { action, ids, deleteFile }) as Promise<BatchReport>,
 
   updateSettings: (s: Settings) => invoke("update_settings", { settings: s }) as Promise<Settings>,
 
