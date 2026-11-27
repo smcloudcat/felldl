@@ -199,6 +199,46 @@ pub fn reveal(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
     })
 }
 
+/// 调任意 Kotlin 辅助类的静态方法（第一个参数固定 Context，其余为字符串）。
+///
+/// 给「只需要一个 OK:/ERR: 结果」的调用点用；有返回值语义的（安装、权限）各写一个封装。
+pub(crate) fn call_helper(
+    app: &tauri::AppHandle,
+    class: &'static str,
+    method: &'static str,
+    sig: &'static str,
+    args: Vec<String>,
+) -> Result<String, String> {
+    exec_ret(app, move |env, activity| {
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        helper_string(env, activity, class, method, sig, &refs)
+    })
+}
+
+/// 启动/更新下载前台服务（`text` 是通知副标题）
+pub fn start_download_service(app: &tauri::AppHandle, text: &str) -> Result<(), String> {
+    let raw = call_helper(
+        app,
+        SERVICE_HELPER_CLASS,
+        "start",
+        "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+        vec![text.to_string()],
+    )?;
+    expect_ok(&raw)
+}
+
+/// 结束前台服务
+pub fn stop_download_service(app: &tauri::AppHandle) -> Result<(), String> {
+    let raw = call_helper(
+        app,
+        SERVICE_HELPER_CLASS,
+        "stop",
+        "(Landroid/content/Context;)Ljava/lang/String;",
+        Vec::new(),
+    )?;
+    expect_ok(&raw)
+}
+
 /// 「所有文件访问」状态：`Granted` / `Denied` / `NotApplicable`
 ///
 /// **不能在这里直接调 `Environment.isExternalStorageManager()`**：该方法是 API 30 才有的，
@@ -252,6 +292,7 @@ pub fn request_all_files_access(
 
 const APK_HELPER_CLASS: &str = "com/felldl/app/ApkInstaller";
 const STORAGE_HELPER_CLASS: &str = "com/felldl/app/StorageAccess";
+const SERVICE_HELPER_CLASS: &str = "com/felldl/app/DownloadService";
 
 /// 清掉 JNI 调用留下的 pending 异常。
 ///

@@ -18,6 +18,8 @@ pub enum AllFiles {
     NotApplicable,
 }
 
+// 这些方法在安卓侧被 JNI 调用点使用；桌面端只跑测试，避免报 dead_code
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 impl AllFiles {
     /// 解析 Kotlin 侧的 `OK:<state>` / `ERR:<原因>`
     pub fn parse(raw: &str) -> Result<Self, String> {

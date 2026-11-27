@@ -27,6 +27,8 @@ mod android_paths;
 mod apk_update;
 // 「所有文件访问」三态（纯逻辑，桌面端可测）
 mod storage_access;
+// 安卓前台服务的启停（非安卓空操作，状态判断可单测）
+mod foreground;
 // 更新落地 helper（同一 exe 的隐藏子命令，main 里在 Tauri 初始化前分流）
 pub mod update_helper;
 
@@ -2005,6 +2007,8 @@ pub fn run() {
 
             // 事件转发：引擎 → 前端
             let app_handle = handle.clone();
+            #[cfg(target_os = "android")]
+            let fgs_event_engine = engine.clone();
             let mut rx = engine.subscribe();
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -2015,6 +2019,16 @@ pub fn run() {
                             if let EngineEvent::TaskUpdated(ref t) = ev {
                                 if t.state == felldl_core::TaskState::Completed {
                                     notify_done(&app_handle, t);
+                                }
+                                // 安卓：一出现「开始传输」就立刻起前台服务。
+                                // 不能等 2s 轮询——Android 12+ 只允许应用还在前台时启动 FGS，
+                                // 等到熄屏/退到后台再启动会被系统拒绝（allowStartForeground=DENIED）。
+                                #[cfg(target_os = "android")]
+                                if t.state.is_active() {
+                                    foreground::sync(
+                                        &app_handle,
+                                        fgs_event_engine.transferring_count(),
+                                    );
                                 }
                             }
                             // 下载后动作：关机 / 睡眠（仅桌面执行）
@@ -2033,6 +2047,20 @@ pub fn run() {
                     }
                 }
             });
+
+            // 安卓：把「活跃任务数」持续翻译成前台服务的启停。
+            // 2s 一轮足够（传输是否在跑不会更短地变化），也避免频繁跨 JNI。
+            #[cfg(target_os = "android")]
+            {
+                let fgs_app = handle.clone();
+                let fgs_engine = engine.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        foreground::sync(&fgs_app, fgs_engine.transferring_count());
+                    }
+                });
+            }
 
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             setup_tray(&handle)?;

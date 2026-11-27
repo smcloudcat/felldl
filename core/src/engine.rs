@@ -420,6 +420,37 @@ impl Engine {
         v
     }
 
+    /// 真正在传输的任务数（`Probing` / `Downloading`）。
+    ///
+    /// 给平台层判断「要不要挂前台服务 / 保持唤醒」用：这类判断每几秒问一次，
+    /// 走 `snapshot()` 得克隆全部任务再数，历史任务一多就白付 O(历史) 代价；
+    /// 这里只遍历活跃索引，代价与活跃数相关。
+    ///
+    /// **不能用 `live` 的长度代替**：暂停、排队、定时任务都留在活跃索引里
+    /// （tick 靠它们补发快照），拿长度判断会让「任务早停了、通知还挂着」，
+    /// 反而变成用户眼里的假进度。
+    pub fn transferring_count(&self) -> usize {
+        // 先把 id 拷出来再逐个查表：避免持有 live 锁的同时去锁 tasks
+        // （unindex_task 的加锁顺序是 tasks → live，混着用会埋死锁）
+        let ids: Vec<TaskId> = {
+            let live = self.live.lock();
+            live.iter().cloned().collect()
+        };
+        let mut n = 0;
+        for id in ids {
+            let rt = {
+                let map = self.tasks.lock();
+                map.get(&id).cloned()
+            };
+            if let Some(rt) = rt {
+                if rt.task.lock().state.is_active() {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
     pub fn get(&self, id: &str) -> Option<Task> {
         let map = self.tasks.lock();
         map.get(id).map(|r| {
@@ -2701,6 +2732,7 @@ mod tests {
         let rt = Runtime::new(test_task("t1", TaskState::Queued));
         engine.index_task(rt.clone());
         assert!(engine.live.lock().contains("t1"), "新建任务应进入活跃索引");
+        assert_eq!(engine.transferring_count(), 0, "排队中不算在传，别挂前台服务");
 
         let gen = rt.next_generation();
         assert!(engine.commit_state(&rt, gen, TaskState::Probing, |_| {}));
@@ -2709,10 +2741,16 @@ mod tests {
             engine.live.lock().contains("t1"),
             "运行中的任务必须在活跃索引里（否则进度不再上报）"
         );
+        assert_eq!(engine.transferring_count(), 1, "下载中要算在传，前台服务得起来");
 
         assert!(engine.commit_state(&rt, gen, TaskState::Completed, |_| {}));
         assert!(!engine.live.lock().contains("t1"), "完成后必须离开活跃索引");
         assert!(engine.tasks.lock().contains_key("t1"), "任务本身仍在表里");
+        assert_eq!(
+            engine.transferring_count(),
+            0,
+            "结束时必须归零，否则前台服务会一直挂着"
+        );
 
         // 周期同步 / 手动重开：终态重新回到活跃
         assert!(engine.commit_state(&rt, gen, TaskState::Scheduled, |_| {}));
@@ -2723,6 +2761,11 @@ mod tests {
         assert!(
             engine.live.lock().contains("t1"),
             "暂停的任务保留在索引里，靠它补发快照"
+        );
+        assert_eq!(
+            engine.transferring_count(),
+            0,
+            "暂停后不该继续占着前台服务（否则通知永远消不掉）"
         );
 
         engine.unindex_task("t1");
