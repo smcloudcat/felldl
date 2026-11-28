@@ -11,6 +11,7 @@ class MainActivity : TauriActivity() {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
     requestNotificationPermissionIfNeeded()
+    requestLegacyStorageIfNeeded()
   }
 
   /**
@@ -29,7 +30,26 @@ class MainActivity : TauriActivity() {
     requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFY)
   }
 
+  /**
+   * Android 6~9（API 23~28）的写外部存储权限。
+   *
+   * API 29 起这个权限在 scoped storage 下不再生效（Manifest 里也限定 maxSdkVersion=28），
+   * 所以这里不覆盖 29；30+ 走「所有文件访问」（StorageAccess）。
+   * 拒绝后不影响应用启动：下载目录是否可写仍由「写一个探针文件」自检，
+   * 失败时界面给出可解释提示，而不是假装有权限。
+   */
+  private fun requestLegacyStorageIfNeeded() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+        Build.VERSION.SDK_INT > Build.VERSION_CODES.P
+    ) return
+    val granted = checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+      PackageManager.PERMISSION_GRANTED
+    if (granted) return
+    requestPermissions(arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), REQ_STORAGE)
+  }
+
   companion object {
     private const val REQ_NOTIFY = 1002
+    private const val REQ_STORAGE = 1003
   }
 }

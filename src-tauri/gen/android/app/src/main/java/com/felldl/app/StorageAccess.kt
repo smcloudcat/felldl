@@ -1,7 +1,9 @@
 package com.felldl.app
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -34,6 +36,28 @@ object StorageAccess {
             if (granted) "OK:granted" else "OK:denied"
         } catch (e: Exception) {
             "ERR:读取存储权限状态失败：${e.message}"
+        }
+    }
+
+    /**
+     * Android 6~9（API 23~28）的「写外部存储」状态。
+     *
+     * API 29 起系统不再承认 `WRITE_EXTERNAL_STORAGE`（scoped storage），所以这里
+     * 只覆盖到 28；29 及以上一律返回 `na`，交给「所有文件访问」或 SAF。
+     * 与 `status()` 分开是因为两者语义不同：`status()` 是「所有文件访问」这个开关，
+     * 老系统上它根本不存在；这里是老系统上真实存在的那个危险权限。
+     */
+    @JvmStatic
+    fun legacyWriteState(ctx: Context): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M ||
+            Build.VERSION.SDK_INT > Build.VERSION_CODES.P
+        ) return "OK:na"
+        return try {
+            val ok = ctx.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                PackageManager.PERMISSION_GRANTED
+            if (ok) "OK:granted" else "OK:denied"
+        } catch (e: Exception) {
+            "ERR:读取旧版存储权限状态失败：${e.message}"
         }
     }
 
