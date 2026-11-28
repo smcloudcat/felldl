@@ -106,7 +106,9 @@ jobs:
             suffix: arm64
           - target: x86_64-apple-darwin
             suffix: x64
-    runs-on: macos-14
+    # 用移动标签：固定大版本镜像会被平台下线（这次 macos-14 直接报
+    # "configuration ... is not supported"，job 一起步就被取消）
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
