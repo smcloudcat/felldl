@@ -1,0 +1,35 @@
+{
+  "payload": {
+    "artifacts": [
+      {
+        "arch": "x86_64",
+        "platform": "windows",
+        "sha256": "473ac493cfee3d495ead3a449be40674ae4069aebef88409557c14a5bf3602a7",
+        "size": 11598336,
+        "url": "https://github.com/smcloudcat/felldl/releases/download/v0.3.10/Felldl-0.3.10-win-x64.exe",
+        "version": "0.3.10"
+      },
+      {
+        "arch": "aarch64",
+        "platform": "android",
+        "sha256": "29ed0c92a4fe8a0661e0feb219caf3585548105228701aa7408a9ccb7f9b4efd",
+        "size": 17150952,
+        "url": "https://github.com/smcloudcat/felldl/releases/download/v0.3.10/Felldl-0.3.10-android-arm64.apk",
+        "version": "0.3.10",
+        "version_code": 3010
+      },
+      {
+        "arch": "x86_64",
+        "platform": "android",
+        "sha256": "7c277721a8102197f678ef83fa4dcc4688b9423bb6e73d1b05618b92f575e00f",
+        "size": 19024037,
+        "url": "https://github.com/smcloudcat/felldl/releases/download/v0.3.10/Felldl-0.3.10-android-x86_64.apk",
+        "version": "0.3.10",
+        "version_code": 3010
+      }
+    ],
+    "published_at": "2026-11-28T04:21:47Z",
+    "version": "0.3.10"
+  },
+  "signature": "2gYnnHQgrwxVFi0w28H+qvExKAptOh87VEgy3x3RVKqTBxHZ5sB/u3XuOVPEdcVbvZHIekI5iYMoc/C/R0UFAQ=="
+}

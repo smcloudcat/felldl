@@ -1,6 +1,6 @@
 {
-  "version": "0.3.9",
-  "release_url": "https://github.com/smcloudcat/felldl/releases/tag/v0.3.9",
-  "published_at": "2026-11-25T11:10:00Z",
-  "notes": "删除任务可选连同本地文件（含未完成半成品）；GitHub/HuggingFace 下载支持国内镜像加速（默认关闭）；安卓可改下载目录、完成后直接打开文件；修复升级后检查更新仍显示旧版本。"
+  "version": "0.3.10",
+  "release_url": "https://github.com/smcloudcat/felldl/releases/tag/v0.3.10",
+  "published_at": "2026-11-28T04:21:47Z",
+  "notes": "安全：凭据改存加密凭据库、IPC 全面脱敏、更新包必须通过签名清单校验。引擎：.part 原子提交、断点绑定远端实体（ETag/Last-Modified）、周期性刷盘、定时任务最小堆与按需唤醒。性能：列表分页+虚拟滚动+normalized store，首屏 IPC 7.2MB→58KB。界面：多选批量操作、键盘导航、长按进入多选、后台冻结。安卓：前台服务常驻通知可暂停、断网不烧重试、Android 9 及以下运行时申请存储权限。"
 }
