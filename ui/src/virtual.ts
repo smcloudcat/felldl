@@ -64,3 +64,47 @@ export function computeRange(
     padBottom: (n - end) * row,
   };
 }
+
+/**
+ * 键盘导航：算出移动后的焦点下标。
+ *
+ * `cur == null` 表示还没有焦点，按方向落到列表头/尾，而不是「从 0 再走一步」——
+ * 用户第一次按下箭头时期待的是「直接选中第一张卡」。
+ */
+export function moveFocus(
+  cur: number | null,
+  delta: number,
+  count: number
+): number | null {
+  const n = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+  if (n === 0) return null;
+  if (cur == null) return delta >= 0 ? 0 : n - 1;
+  const next = cur + (Number.isFinite(delta) ? Math.trunc(delta) : 0);
+  return Math.min(Math.max(next, 0), n - 1);
+}
+
+/**
+ * 焦点所在行是否已经出可视区；出界时返回需要滚到的位置，否则返回 null。
+ *
+ * 刻意不「每次都居中」：上下键逐条移动时如果每步都滚动，列表会跟着晃，
+ * 反而看不清。只有目标真的跑出视口才滚，并留半行余量。
+ */
+export function scrollTopToReveal(
+  index: number,
+  rowHeight: number,
+  viewport: number,
+  scrollTop: number
+): number | null {
+  const n = Number.isFinite(index) && index >= 0 ? Math.floor(index) : 0;
+  const row =
+    Number.isFinite(rowHeight) && rowHeight > 1 ? rowHeight : ESTIMATED_ROW;
+  const vp = Number.isFinite(viewport) && viewport > 0 ? viewport : 0;
+  const top = Number.isFinite(scrollTop) && scrollTop > 0 ? scrollTop : 0;
+  if (vp === 0) return null;
+
+  const rowTop = n * row;
+  const rowBottom = rowTop + row;
+  if (rowTop < top) return Math.max(0, rowTop - row / 2);
+  if (rowBottom > top + vp) return rowBottom - vp + row / 2;
+  return null;
+}

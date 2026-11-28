@@ -31,6 +31,35 @@ export class TaskStore {
   /** 当前筛选的准入判断：事件带来的新任务不匹配视图时不插入 */
   private accept: (t: Task) => boolean = () => true;
 
+  /**
+   * 页面不可见（切后台、锁屏、切标签页）时只记脏标记，不通知订阅者。
+   *
+   * 冻结的只是「通知 → React 重渲染」这一段，数据本身照常更新：
+   * - 直接丢弃事件会让回前台后的界面停在旧状态，还得靠 resync 补齐；
+   * - 逐个通知则在后台白跑几百次 setState，安卓 WebView 里这很费电。
+   * 回前台调 `setHidden(false)`，把累积的脏标记一次性刷出去。
+   */
+  private hidden = false;
+  private dirtyIds = new Set<string>();
+  private listDirty = false;
+
+  setHidden(h: boolean) {
+    if (this.hidden === h) return;
+    this.hidden = h;
+    if (!h) this.flush();
+  }
+
+  /** 回前台：冻结期间累积的变化一次性通知（顺序无关，订阅者只读最新值） */
+  flush() {
+    const ids = this.dirtyIds;
+    this.dirtyIds = new Set();
+    for (const id of ids) this.notifyTaskAlways(id);
+    if (this.listDirty) {
+      this.listDirty = false;
+      this.refreshListAlways();
+    }
+  }
+
   getSnapshot = (): TaskListSnapshot => this.snapshot;
 
   getIds = (): string[] => this.snapshot.ids;
@@ -132,13 +161,31 @@ export class TaskStore {
     this.refreshList();
   }
 
+  /** 通知单条任务的订阅者；页面不可见时只记脏 */
   private notifyTask(id: string) {
+    if (this.hidden) {
+      this.dirtyIds.add(id);
+      return;
+    }
+    this.notifyTaskAlways(id);
+  }
+
+  private notifyTaskAlways(id: string) {
     const set = this.idListeners.get(id);
     if (!set) return;
     for (const cb of set) cb();
   }
 
+  /** 重算列表快照；页面不可见时只记脏，回前台再算一次 */
   private refreshList() {
+    if (this.hidden) {
+      this.listDirty = true;
+      return;
+    }
+    this.refreshListAlways();
+  }
+
+  private refreshListAlways() {
     const counts: Record<string, number> = {};
     for (const id of this.ids) {
       const t = this.map.get(id);

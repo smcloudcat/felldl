@@ -19,6 +19,7 @@ import { mergeSnapshot } from "./taskMerge";
 import { taskStore } from "./taskStore";
 import { useTaskList } from "./useTaskStore";
 import { useVirtualList } from "./useVirtualList";
+import { moveFocus, scrollTopToReveal } from "./virtual";
 import { TaskCard } from "./TaskCard";
 import { NewTaskDialog } from "./NewTaskDialog";
 import { SettingsPage } from "./SettingsPage";
@@ -204,6 +205,8 @@ export default function App() {
   // 避免旧快照把已经推进到新状态的任务盖回去（见 taskMerge.ts）
   const touchedRef = useRef(new Set<string>());
   const removedRef = useRef(new Set<string>());
+  /** 回前台时复用「断流重同步」那套逻辑；在下面的 resync effect 里赋值 */
+  const resyncRef = useRef<null | (() => Promise<void>)>(null);
 
   interface Toast {
     id: number;
@@ -449,12 +452,31 @@ export default function App() {
         else un = f;
       })
       .catch(() => {});
+    // 回前台时可能错过广播（Android WebView 在后台被冻结，JS 也不一定跑），
+    // 这里顺手记下当前的重同步函数，由 visibilitychange 调用
+    resyncRef.current = resync;
     return () => {
       disposed = true;
+      resyncRef.current = null;
       un?.();
     };
     // filter/category 决定重拉哪一段；已加载窗口长度变化说明要重新对齐
   }, [filter, category, visibleIds.length]);
+
+  // ── 后台冻结 ──
+  // 页面不可见时 store 只记脏不通知（见 taskStore.setHidden）：后台不跑 React 提交，
+  // 回前台一次性刷出来。广播事件在后台可能整段丢失，所以回前台再拉一次权威快照。
+  useEffect(() => {
+    const onVisible = () => {
+      const hidden = document.hidden;
+      taskStore.setHidden(hidden);
+      // 首次挂载时已经是 hidden 的话不必重拉（还没有任何事件漏掉）
+      if (!hidden) void resyncRef.current?.();
+    };
+    taskStore.setHidden(document.hidden);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, []);
 
   // ── 主题 / 皮肤 / 按钮风格 ──
   useEffect(() => {
@@ -522,12 +544,108 @@ export default function App() {
     contentRef.current?.scrollTo({ top: 0 });
   }, [view, filter, category]);
   // 只挂载可视区域内的卡片：挂载量与历史条数无关
-  const { start, end, padTop, padBottom } = useVirtualList({
+  const { start, end, padTop, padBottom, rowHeight } = useVirtualList({
     count: visible.length,
     scrollRef: contentRef,
     listRef,
   });
   const shownTasks = visible.slice(start, end);
+
+  // ── 键盘导航：方向键在列表里移动焦点 ──
+  // 与虚拟滚动配合：目标可能不在已挂载区间内，于是分两步——先滚动（下面第二个
+  // effect），等 start/end 更新、卡片挂上来之后，再把 DOM 焦点交给它（第三个 effect）。
+  const [focusIdx, setFocusIdx] = useState<number | null>(null);
+  // 换视图/筛选/分类时焦点作废：否则会指到新列表里完全不相干的卡片
+  useEffect(() => {
+    setFocusIdx(null);
+  }, [view, filter, category]);
+
+  useEffect(() => {
+    if (view !== "downloads") return;
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      // 对话框打开时方向键归它（overlay 由 useDialogA11y 负责焦点循环）
+      if (document.querySelector(".overlay")) return;
+      const n = visible.length;
+      if (n === 0) return;
+      const vp = contentRef.current?.clientHeight ?? 0;
+      const page = Math.max(1, Math.floor(vp / rowHeight) - 1);
+      let delta: number;
+      switch (e.key) {
+        case "ArrowDown":
+          delta = 1;
+          break;
+        case "ArrowUp":
+          delta = -1;
+          break;
+        case "PageDown":
+          delta = page;
+          break;
+        case "PageUp":
+          delta = -page;
+          break;
+        case "Home":
+          e.preventDefault();
+          setFocusIdx(0);
+          return;
+        case "End":
+          e.preventDefault();
+          setFocusIdx(n - 1);
+          return;
+        default:
+          return;
+      }
+      e.preventDefault();
+      setFocusIdx((cur) => moveFocus(cur, delta, n));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view, visible, rowHeight]);
+
+  // 焦点出视野才滚。
+  //
+  // 优先用**已挂载卡片的真实坐标**：行高是估算值（卡片 64~115px 不等，还带 gap），
+  // 拿估算值判断「要不要滚」会出现「明明在视口外却说不用滚」，焦点就卡在屏幕下方。
+  // 只有目标还没挂载（End 跨页跳转）时才退回行高估算，等 start 更新、卡片挂上来，
+  // 这个 effect 会因 start 变化再跑一次，把误差精确修掉。
+  //
+  // 必须用 `instant`：`.content` 上有 `scroll-behavior: smooth`，传 `auto` 也会被
+  // 平滑化，连按方向键时动画互相打断，焦点会短暂跑到视口外。
+  useEffect(() => {
+    if (focusIdx == null) return;
+    const el = contentRef.current;
+    const list = listRef.current;
+    if (!el || !list) return;
+
+    const card = list.querySelectorAll<HTMLElement>(".task-card")[focusIdx - start];
+    if (card) {
+      const r = card.getBoundingClientRect();
+      const s = el.getBoundingClientRect();
+      const pad = 8;
+      if (r.top < s.top + pad) {
+        el.scrollBy({ top: r.top - s.top - pad, behavior: "instant" as ScrollBehavior });
+      } else if (r.bottom > s.bottom - pad) {
+        el.scrollBy({ top: r.bottom - s.bottom + pad, behavior: "instant" as ScrollBehavior });
+      }
+      return;
+    }
+
+    const top = scrollTopToReveal(
+      focusIdx,
+      rowHeight,
+      el.clientHeight,
+      el.scrollTop,
+    );
+    if (top != null) el.scrollTo({ top, behavior: "instant" as ScrollBehavior });
+  }, [focusIdx, start, rowHeight]);
+
+  // 卡片挂上来之后再把 DOM 焦点交过去；目标还没挂载（在滚动途中）就等下一轮
+  useEffect(() => {
+    if (focusIdx == null) return;
+    const cards = listRef.current?.querySelectorAll<HTMLElement>(".task-card");
+    cards?.[focusIdx - start]?.focus({ preventScroll: true });
+  }, [focusIdx, start]);
 
   // 滚到接近已加载尾部就续拉下一页（虚拟列表只会挂当前视口，但数据仍需分页取）
   useEffect(() => {
@@ -635,6 +753,13 @@ export default function App() {
     (id: string) => setSelected((prev) => toggleSelected(prev, id)),
     [],
   );
+
+  // 长按一张卡 = 进入多选并选中它。和「批量选择」按钮的区别只是入口：
+  // 手机上按钮在 header，单手握持时够不到，长按是更自然的路径。
+  const enterSelectFromLongPress = useCallback((id: string) => {
+    setSelectMode(true);
+    setSelected(new Set([id]));
+  }, []);
 
   const runBatch = useCallback(
     async (action: BatchAction, ids: string[], deleteFile = false) => {
@@ -1152,7 +1277,7 @@ export default function App() {
                     ref={listRef}
                     style={{ paddingTop: padTop, paddingBottom: padBottom }}
                   >
-                    {shownTasks.map((id) => (
+                    {shownTasks.map((id, i) => (
                       <TaskCard
                         key={id}
                         taskId={id}
@@ -1165,6 +1290,8 @@ export default function App() {
                         selectable={selectMode}
                         selected={selected.has(id)}
                         onToggle={toggleOne}
+                        focused={focusIdx === start + i}
+                        onLongPress={enterSelectFromLongPress}
                       />
                     ))}
                   </div>

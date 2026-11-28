@@ -6,7 +6,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { computeRange, ESTIMATED_ROW, OVERSCAN } from "../src/virtual.ts";
+import { computeRange, ESTIMATED_ROW, moveFocus, OVERSCAN, scrollTopToReveal } from "../src/virtual.ts";
 
 test("空的列表不产生占位", () => {
   assert.deepEqual(computeRange(0, 0, 800, 96), {
@@ -71,4 +71,33 @@ test("非法入参按兜底处理，不产生负占位", () => {
 
 test("默认行高常量是正数（防止被误改成 0 之后除零）", () => {
   assert.ok(ESTIMATED_ROW > 1);
+});
+
+test("键盘导航：首次按键落到头/尾，之后按方向逐条移动并夹在两端", () => {
+  assert.equal(moveFocus(null, 1, 5), 0, "第一次按下键选第一张");
+  assert.equal(moveFocus(null, -1, 5), 4, "第一次按上键选最后一张");
+  assert.equal(moveFocus(0, -1, 5), 0, "已在顶部不越界");
+  assert.equal(moveFocus(4, 1, 5), 4, "已在底部不越界");
+  assert.equal(moveFocus(2, 1, 5), 3);
+  assert.equal(moveFocus(2, -3, 5), 0);
+  // PageDown 这类大步长同样要夹住
+  assert.equal(moveFocus(1, 99, 5), 4);
+  assert.equal(moveFocus(null, 1, 0), null, "空列表没有焦点");
+  assert.equal(moveFocus(0, 1, 0), null);
+});
+
+test("键盘导航：只在焦点跑出视口时滚动，且留半行余量", () => {
+  const row = 100;
+  const vp = 400;
+  // 已在视口内：不动
+  assert.equal(scrollTopToReveal(2, row, vp, 0), null);
+  assert.equal(scrollTopToReveal(1, row, vp, 100), null);
+  // 向下出界：把目标底部露出来，再加半行
+  assert.equal(scrollTopToReveal(5, row, vp, 0), 500 + 100 - 400 + 50);
+  // 向上出界：滚到目标上方半行
+  assert.equal(scrollTopToReveal(1, row, vp, 300), 50);
+  // 顶部不产生负滚动
+  assert.equal(scrollTopToReveal(0, row, vp, 300), 0);
+  // 容器还没挂载（viewport 为 0）：不滚，交给下一帧
+  assert.equal(scrollTopToReveal(3, row, 0, 0), null);
 });

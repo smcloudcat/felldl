@@ -746,6 +746,25 @@ textarea:focus-visible {
   border-color: rgba(239, 68, 68, 0.3);
 }
 
+/* ── 长按（移动端进入多选）──
+   没有这两条时，长按会先弹系统的「拷贝/全选」菜单，手势根本轮不到 500ms 定时器；
+   touch-action 不能设 none，否则列表滚不动。 */
+.task-card {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* ── 键盘导航落点 ──
+   卡片是 div，不在上面的 button/input 焦点环规则里；用 tabIndex=-1 让代码能聚焦，
+   但只有键盘操作才画环（鼠标点在卡上不该多一圈）。
+   offset 取负值：卡片 overflow:hidden + 圆角，外扩的环会被裁掉。 */
+.task-card:focus-visible,
+.task-card.kbd-focus {
+  outline: 2px solid var(--brand-1, #0ea5e9);
+  outline-offset: -2px;
+}
+
 /* ── 多选 ── */
 /* 多选模式下整张卡是点击区：给一点指针反馈，否则手机上看不出「能点」 */
 .task-card.selectable {

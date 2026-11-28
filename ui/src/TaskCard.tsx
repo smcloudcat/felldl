@@ -1,4 +1,4 @@
-import { memo, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { Task } from "./types";
 import {
   formatBytes,
@@ -40,6 +40,10 @@ interface Props {
   selectable?: boolean;
   selected?: boolean;
   onToggle?: (id: string) => void;
+  /** 键盘导航当前落在这一张：由父列表算好，卡片只负责把 DOM 焦点接过去 */
+  focused?: boolean;
+  /** 长按（移动端）：进入多选并选中本卡 */
+  onLongPress?: (id: string) => void;
 }
 
 const KIND_ICON = {
@@ -64,11 +68,35 @@ function TaskCardInner({
   selectable = false,
   selected = false,
   onToggle,
+  focused = false,
+  onLongPress,
 }: Props) {
   const { t, lang } = useI18n();
   // 按 id 订阅：一条进度事件只让这张卡重渲染，父列表与其它卡片不动
   const task = useTask(taskId);
   const [confirmDel, setConfirmDel] = useState(false);
+  const cardRef = useRef<HTMLDivElement>(null);
+
+  // 键盘导航把焦点移过来。`preventScroll` 是必须的：滚动由父列表按「行高 + 视口」
+  // 精确计算，让浏览器自己 scrollIntoView 会与虚拟滚动的占位互相打架。
+  useEffect(() => {
+    if (focused) cardRef.current?.focus({ preventScroll: true });
+  }, [focused]);
+
+  // 长按进入多选：500ms 内不能移动（滚动会触发 pointercancel）、不能抬起。
+  // 触发后用 suppressClick 吃掉紧随其后的 click，否则会「选中又取消」。
+  const pressTimer = useRef<number | null>(null);
+  const pressOrigin = useRef<{ x: number; y: number } | null>(null);
+  const suppressClick = useRef(false);
+
+  const cancelPress = () => {
+    if (pressTimer.current != null) {
+      window.clearTimeout(pressTimer.current);
+      pressTimer.current = null;
+    }
+    pressOrigin.current = null;
+  };
+
   if (!task) return null;
   const kind = task.kind === "bt" ? "other" : fileKind(task.file_name);
   const Icon = KIND_ICON[kind];
@@ -93,18 +121,59 @@ function TaskCardInner({
 
   return (
     <div
+      ref={cardRef}
       className={cx(
         "task-card",
         isActive && "active",
         task.state === "error" && "error",
         selectable && "selectable",
         selected && "selected",
+        focused && "kbd-focus",
       )}
-      // 多选模式下整张卡就是点击区：手机上没有 hover，逐条小按钮容易点错
-      onClick={selectable ? () => onToggle?.(task.id) : undefined}
+      // 多选模式下整张卡就是点击区：手机上没有 hover，逐条小按钮容易点错。
+      // 长按进入多选后，卡片会立刻变成 selectable，紧接着的 click 就落到 onToggle
+      // 分支上——不拦截的话会「刚选中又被自己取消」。所以 suppressClick 要在
+      // 两个分支之前统一判断。
+      onClick={(e) => {
+        if (suppressClick.current) {
+          suppressClick.current = false;
+          e.preventDefault();
+          return;
+        }
+        if (selectable) onToggle?.(task.id);
+      }}
+      onPointerDown={
+        selectable || !onLongPress
+          ? undefined
+          : (e) => {
+              if (e.pointerType === "mouse" && e.button !== 0) return;
+              pressOrigin.current = { x: e.clientX, y: e.clientY };
+              pressTimer.current = window.setTimeout(() => {
+                pressTimer.current = null;
+                suppressClick.current = true;
+                onLongPress(task.id);
+              }, 500);
+            }
+      }
+      onPointerMove={
+        selectable || !onLongPress
+          ? undefined
+          : (e) => {
+              const o = pressOrigin.current;
+              if (!o) return;
+              // 手指移动超过 10px 视为滚动/滑动手势，不再算长按
+              if (Math.abs(e.clientX - o.x) > 10 || Math.abs(e.clientY - o.y) > 10) {
+                cancelPress();
+              }
+            }
+      }
+      onPointerUp={cancelPress}
+      onPointerLeave={cancelPress}
+      onPointerCancel={cancelPress}
       role={selectable ? "checkbox" : undefined}
       aria-checked={selectable ? selected : undefined}
-      tabIndex={selectable ? 0 : undefined}
+      /* -1：可用方向键/代码聚焦，但不进入 Tab 序列（否则上千张卡会把 Tab 卡死） */
+      tabIndex={selectable ? 0 : -1}
       onKeyDown={
         selectable
           ? (e) => {

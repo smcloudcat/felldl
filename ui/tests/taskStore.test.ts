@@ -159,3 +159,55 @@ test("退订后不再收到通知", () => {
   s.patch("a", { rev: 2, downloaded: 20 });
   assert.equal(n, 0);
 });
+
+test("后台冻结：不可见时不通知，回前台一次性刷出", () => {
+  const s = new TaskStore();
+  s.setAll([task("a", { rev: 1 }), task("b", { rev: 1 })]);
+  let a = 0;
+  let b = 0;
+  let list = 0;
+  s.subscribeTask("a", () => a++);
+  s.subscribeTask("b", () => b++);
+  s.subscribe(() => list++);
+
+  s.setHidden(true);
+  s.patch("a", { rev: 2, downloaded: 10 });
+  s.patch("a", { rev: 3, downloaded: 20 });
+  s.patch("b", { rev: 2, downloaded: 5 });
+  s.upsert(task("c", { rev: 1 }));
+  assert.equal(a, 0, "不可见时不该触发卡片重渲染");
+  assert.equal(b, 0);
+  assert.equal(list, 0);
+
+  // 数据本身必须已经更新：回前台要能立刻画对，而不是等下一次事件。
+  // 注意 `getIds()` 读的是对外快照，冻结期间刻意不刷新；顺序看 `all()`。
+  assert.equal(s.get("a")!.downloaded, 20);
+  assert.deepEqual(
+    s.all().map((t) => t.id),
+    ["c", "a", "b"],
+  );
+  assert.deepEqual(s.getIds(), ["a", "b"], "冻结期间不刷新对外快照");
+
+  s.setHidden(false);
+  assert.equal(a, 1, "同一任务的多条更新合并成一次通知");
+  assert.equal(b, 1);
+  assert.equal(list, 1, "列表快照也只刷一次");
+  assert.equal(s.getSnapshot().ids.length, 3);
+
+  // 恢复后应回到正常即时通知
+  s.patch("a", { rev: 4, downloaded: 30 });
+  assert.equal(a, 2);
+});
+
+test("后台冻结：隐藏状态重复设置不重复 flush", () => {
+  const s = new TaskStore();
+  s.setAll([task("a", { rev: 1 })]);
+  let a = 0;
+  s.subscribeTask("a", () => a++);
+  s.setHidden(true);
+  s.setHidden(true);
+  s.patch("a", { rev: 2 });
+  s.setHidden(false);
+  s.setHidden(false);
+  assert.equal(a, 1);
+});
