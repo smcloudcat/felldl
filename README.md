@@ -218,6 +218,31 @@ cargo run -p felldl-core --example update-sign -- verify --in update-manifest.js
 然后在 GitHub 创建 Release 并上传产物，再把 `update-manifest.json` 与 `version.json`
 一并更新到仓库根目录（应用通过 jsDelivr / raw 拉取）。
 
+#### 现在的实际流程（macOS / Linux 走 CI）
+
+macOS 与 Linux 的包只能在对应系统上构建，所以顺序变成：
+
+```bash
+# ① 本地：Windows + Android + fdl/mcp，推 tag
+git tag v<ver> && git push origin v<ver>
+
+# ② CI（.github/workflows/release.yml）自动构建并上传
+#    macOS arm64/x64 dmg、Linux deb + AppImage、各平台 fdl
+
+# ③ 发布 Release（先发布，附件地址才会从 untagged-* 变成 /download/v<ver>/）
+# ④ 用脚本从 Release 附件生成 payload：下载每个包、重算 sha256、
+#    与 GitHub 的 digest 逐条核对，顺便把 url 写成发布后的固定地址
+python dist/create-payload.py <ver> <release_id> <published_at>
+
+# ⑤ 签名 + 验签 + 上传清单
+cargo run -p felldl-core --example update-sign -- sign \
+  --key src-tauri/keys/update-signing.pkcs8 --in dist/payload.json --out update-manifest.json
+cargo run -p felldl-core --example update-sign -- verify --in update-manifest.json
+```
+
+`update-manifest.json` 里的 `published_at` 必须和 Release 页面上的发布时间完全一致，
+否则「有新版但客户端不提示」这类问题很难查。
+
 > 私钥 `src-tauri/keys/update-signing.pkcs8` 只在发布机保存（已 gitignore，`*.pkcs8` 一并忽略），
 > 丢了就只能换公钥重新发版；公钥在 `core/src/update.rs` 的 `UPDATE_PUBLIC_KEY`，
 > 轮换过渡期可把新旧公钥同时放进 `TRUSTED_PUBLIC_KEYS`。
