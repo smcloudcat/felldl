@@ -12,6 +12,7 @@ Windows 与 Android 共用**同一套 Rust 引擎 + React 界面**，浏览器�
 | 多线程分段下载 | 每个任务最多 32 连接，按字节范围并行拉取 | ✅ |
 | 断点续传 | 分片级进度持久化，进程重启后自动续传，ETag 校验 | ✅ |
 | 浏览器集成 | MV3 扩展（Chrome/Edge）自动接管下载，带 Token 鉴权 | ✅ |
+| AI 接入（MCP） | 标准 MCP 服务：AI 客户端可添加/查询/暂停/取消下载 | ✅ |
 | 定时下载 | 指定时间自动开始 | ✅ |
 | 代理设置 | HTTP/HTTPS/SOCKS 代理 | ✅ |
 | 限速 | 全局限速 + 单任务限速（令牌桶） | ✅ |
@@ -181,6 +182,44 @@ cargo run --release --example cli -- "https://example.com/file.zip" --conn 16 --
 6. 之后浏览器的下载会自动转交给 Felldl
 
 > 扩展只监听 `http(s)` 下载，且优先探测 Felldl 是否在线；离线时自动放行原生下载，不打断使用。
+
+---
+
+## 🤖 MCP（让 AI 客户端操作下载）
+
+`felldl-mcp` 是一个标准 MCP（stdio）服务，把 Felldl 的本地 API 包成工具，
+Claude Desktop / Cursor / 各类 Agent 直接调用即可添加、查询、暂停、取消下载。
+
+```bash
+cargo build -p felldl-mcp --release   # 产物：target/release/felldl-mcp.exe
+```
+
+客户端配置（以 Claude Desktop 为例）：
+
+```json
+{
+  "mcpServers": {
+    "felldl": {
+      "command": "G:/path/to/felldl-mcp.exe"
+    }
+  }
+}
+```
+
+端口与 Token 默认从 Felldl 的设置文件读（`%APPDATA%\com.felldl.app\settings.json`），
+也可用环境变量 `FELLDL_PORT` / `FELLDL_TOKEN` 或参数 `--port` / `--token` 覆盖。
+
+| 工具 | 作用 |
+|---|---|
+| `felldl_add_download` | 添加任务（目录、文件名、连接数、Referer/Cookie、镜像） |
+| `felldl_list_tasks` | 按状态列出任务（默认最近 20 条） |
+| `felldl_get_task` | 查单个任务的进度、速度、保存路径、错误码 |
+| `felldl_pause_task` / `felldl_resume_task` | 暂停 / 断点续传 |
+| `felldl_cancel_task` | 取消并移除，`delete_file=true` 时连文件一起删 |
+| `felldl_stats` | 版本、任务数、活跃数、总速度 |
+
+> 工具结果只返回摘要字段（不回传 Cookie/密码/分片明细）；失败时 `isError=true` 并带稳定 `code`，
+> 模型可据此决定是否重试。MCP 走的是同一套本地 API，所以主程序必须处于运行状态。
 
 ---
 
