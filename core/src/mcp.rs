@@ -342,7 +342,11 @@ pub fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 /// `api::mcp_post` 也复用它，所以两边的协议行为不可能漂移。
 pub async fn handle<B: ToolBackend + ?Sized>(backend: &B, msg: &Value) -> Option<Value> {
     if !msg.is_object() {
-        return Some(rpc_error(Value::Null, -32600, "无效请求：只接受单个 JSON 对象"));
+        return Some(rpc_error(
+            Value::Null,
+            -32600,
+            "无效请求：只接受单个 JSON 对象",
+        ));
     }
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     if msg.get("id").is_none() {
@@ -456,17 +460,26 @@ mod tests {
 
     #[tokio::test]
     async fn tools_list_matches_registry() {
-        let r = handle(&MockBackend, &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
-            .await
-            .unwrap();
-        assert_eq!(r["result"]["tools"].as_array().unwrap().len(), TOOL_NAMES.len());
+        let r = handle(
+            &MockBackend,
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            r["result"]["tools"].as_array().unwrap().len(),
+            TOOL_NAMES.len()
+        );
     }
 
     #[tokio::test]
     async fn unknown_method_is_method_not_found() {
-        let r = handle(&MockBackend, &json!({"jsonrpc":"2.0","id":3,"method":"resources/list"}))
-            .await
-            .unwrap();
+        let r = handle(
+            &MockBackend,
+            &json!({"jsonrpc":"2.0","id":3,"method":"resources/list"}),
+        )
+        .await
+        .unwrap();
         assert_eq!(r["error"]["code"], -32601);
     }
 
@@ -490,9 +503,12 @@ mod tests {
 
     #[tokio::test]
     async fn non_object_message_is_invalid_request() {
-        let r = handle(&MockBackend, &json!([{"jsonrpc":"2.0","id":1,"method":"ping"}]))
-            .await
-            .unwrap();
+        let r = handle(
+            &MockBackend,
+            &json!([{"jsonrpc":"2.0","id":1,"method":"ping"}]),
+        )
+        .await
+        .unwrap();
         assert_eq!(r["error"]["code"], -32600);
     }
 
@@ -505,10 +521,16 @@ mod tests {
             let name = t["name"].as_str().unwrap();
             assert!(TOOL_NAMES.contains(&name), "多出来的工具：{name}");
             assert!(t["description"].as_str().is_some_and(|d| !d.is_empty()));
-            assert!(t["inputSchema"]["type"] == "object", "{name} 缺少 inputSchema");
+            assert!(
+                t["inputSchema"]["type"] == "object",
+                "{name} 缺少 inputSchema"
+            );
         }
         for want in TOOL_NAMES {
-            assert!(arr.iter().any(|t| t["name"] == *want), "缺少工具定义：{want}");
+            assert!(
+                arr.iter().any(|t| t["name"] == *want),
+                "缺少工具定义：{want}"
+            );
         }
     }
 
@@ -561,4 +583,3 @@ mod tests {
         assert!(body.get("save_dir").is_none(), "null 不该透传");
     }
 }
-

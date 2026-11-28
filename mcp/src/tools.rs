@@ -29,7 +29,9 @@ async fn call_http(api: &Api, name: &str, args: &Value) -> Result<String> {
             let tasks = api.list().await?;
             let filtered: Vec<Value> = tasks
                 .iter()
-                .filter(|t| state.is_none_or(|s| t.get("state").and_then(|v| v.as_str()) == Some(s)))
+                .filter(|t| {
+                    state.is_none_or(|s| t.get("state").and_then(|v| v.as_str()) == Some(s))
+                })
                 .map(summarize)
                 .collect();
             let total = filtered.len();
