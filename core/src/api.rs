@@ -4,14 +4,19 @@
 //!   GET  /ping                       健康检查（无需鉴权）
 //!   POST /add  {url, referer?, cookie?, file_name?, headers?}   添加下载
 //!   GET  /tasks                      任务列表
+//!   GET  /tasks/{id}                 单个任务（脱敏）
+//!   POST /tasks/{id}/pause           暂停
+//!   POST /tasks/{id}/resume          继续
+//!   POST /tasks/{id}/cancel  {delete_file?}   取消（可选连文件删除）
 //!   GET  /stats                      运行状态
+//!   GET  /config                     扩展/客户端配置
 //!
 //! 鉴权：请求头 `X-Felldl-Token` 或 query `?token=`，与设置里的 api_token 比对。
 //! 仅绑定 127.0.0.1，且校验 Origin 防止网页跨站调用。
 
 use crate::engine::Engine;
 use crate::model::AddTaskRequest;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -166,6 +171,108 @@ async fn config(
     .into_response()
 }
 
+#[derive(Deserialize, Default)]
+struct CancelBody {
+    /// 取消的同时删除已下载的部分（含 .part 半成品）
+    #[serde(default)]
+    delete_file: bool,
+}
+
+/// 操作失败统一返回稳定 code，客户端（MCP / 扩展）据此决定要不要重试
+fn op_error(e: &anyhow::Error) -> Response {
+    let info = crate::error::classify(e);
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "ok": false,
+            "error": format!("{e:#}"),
+            "code": info.code,
+            "retryable": info.retryable,
+        })),
+    )
+        .into_response()
+}
+
+fn not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"ok": false, "error": "任务不存在", "code": "not_found"})),
+    )
+        .into_response()
+}
+
+/// 单个任务（脱敏）：MCP 客户端拿它轮询进度
+async fn get_task(
+    State(st): State<ApiState>,
+    Path(id): Path<String>,
+    Query(q): Query<TokenQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = check_token(&st.engine, &headers, &q) {
+        return r;
+    }
+    match st.engine.get(&id) {
+        Some(t) => Json(json!({"ok": true, "task": t.redacted()})).into_response(),
+        None => not_found(),
+    }
+}
+
+async fn pause_task(
+    State(st): State<ApiState>,
+    Path(id): Path<String>,
+    Query(q): Query<TokenQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = check_token(&st.engine, &headers, &q) {
+        return r;
+    }
+    if st.engine.get(&id).is_none() {
+        return not_found();
+    }
+    match st.engine.pause(&id).await {
+        Ok(()) => Json(json!({"ok": true, "id": id, "state": "paused"})).into_response(),
+        Err(e) => op_error(&e),
+    }
+}
+
+async fn resume_task(
+    State(st): State<ApiState>,
+    Path(id): Path<String>,
+    Query(q): Query<TokenQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = check_token(&st.engine, &headers, &q) {
+        return r;
+    }
+    if st.engine.get(&id).is_none() {
+        return not_found();
+    }
+    match st.engine.resume(&id).await {
+        Ok(()) => Json(json!({"ok": true, "id": id})).into_response(),
+        Err(e) => op_error(&e),
+    }
+}
+
+async fn cancel_task(
+    State(st): State<ApiState>,
+    Path(id): Path<String>,
+    Query(q): Query<TokenQuery>,
+    headers: HeaderMap,
+    body: Option<Json<CancelBody>>,
+) -> Response {
+    if let Err(r) = check_token(&st.engine, &headers, &q) {
+        return r;
+    }
+    if st.engine.get(&id).is_none() {
+        return not_found();
+    }
+    let delete_file = body.map(|b| b.0.delete_file).unwrap_or(false);
+    match st.engine.cancel(&id, delete_file).await {
+        Ok(()) => Json(json!({"ok": true, "id": id, "delete_file": delete_file})).into_response(),
+        Err(e) => op_error(&e),
+    }
+}
+
 /// 启动 API 服务（非阻塞）。仅监听 127.0.0.1。
 pub async fn serve(engine: Arc<Engine>, port: u16) -> anyhow::Result<u16> {
     let st = ApiState {
@@ -177,6 +284,10 @@ pub async fn serve(engine: Arc<Engine>, port: u16) -> anyhow::Result<u16> {
         .route("/config", get(config))
         .route("/add", post(add_task))
         .route("/tasks", get(list_tasks))
+        .route("/tasks/{id}", get(get_task))
+        .route("/tasks/{id}/pause", post(pause_task))
+        .route("/tasks/{id}/resume", post(resume_task))
+        .route("/tasks/{id}/cancel", post(cancel_task))
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
