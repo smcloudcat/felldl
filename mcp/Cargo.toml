@@ -15,6 +15,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# 协议分发、工具 schema 与摘要裁剪只有 core 那一份，这里不复制
+felldl-core = { path = "../core" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

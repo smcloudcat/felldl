@@ -190,17 +190,44 @@ cargo run --release --example cli -- "https://example.com/file.zip" --conn 16 --
 
 ## 🤖 MCP（让 AI 客户端操作下载）
 
-`felldl-mcp` 是一个标准 MCP（stdio）服务，把 Felldl 的本地 API 包成工具，
-Claude Desktop / Cursor / 各类 Agent 直接调用即可添加、查询、暂停、取消下载。
+Felldl **自带** MCP 服务，不需要额外进程：设置里打开「启用本地接口」后，
+`POST /mcp` 就是标准的 Streamable HTTP 端点，桌面与安卓行为一致。
 
-```bash
-cargo build -p felldl-mcp --release   # 产物：target/release/felldl-mcp.exe
+设置页「浏览器集成」里会显示带令牌的完整地址，直接复制即可：
+
+```
+http://127.0.0.1:8899/mcp?token=<你的令牌>
 ```
 
-不想装 Rust 的，可以直接从 Release 下载预编译的 `Felldl-<版本>-mcp-win-x64.exe`，
-配置里把 `command` 指向它即可（`--version` 可查版本，`--help` 看参数）。
-
 客户端配置（以 Claude Desktop 为例）：
+
+```json
+{
+  "mcpServers": {
+    "felldl": {
+      "type": "http",
+      "url": "http://127.0.0.1:8899/mcp?token=粘贴设置页里的完整地址"
+    }
+  }
+}
+```
+
+> 端点只监听 127.0.0.1，且必须带令牌——它等价于完整的下载控制面，不能裸奔。
+> 不提供服务端主动推送的 SSE 流（`GET /mcp` 返回 405），纯请求-响应模式即可完成全部工具调用。
+
+### 安卓
+
+手机端同样只监听 127.0.0.1，电脑上的 AI 客户端要连它需要一次端口转发：
+
+```bash
+adb forward tcp:8899 tcp:8899
+# 然后把 http://127.0.0.1:8899/mcp?token=<手机设置页里的令牌> 配进客户端
+```
+
+### 独立 stdio 进程（可选）
+
+只支持 stdio 的客户端用 `felldl-mcp`：Release 里有预编译的
+`Felldl-<版本>-mcp-win-x64.exe`，也可以 `cargo build -p felldl-mcp --release` 自己编。
 
 ```json
 {
@@ -212,8 +239,10 @@ cargo build -p felldl-mcp --release   # 产物：target/release/felldl-mcp.exe
 }
 ```
 
-端口与 Token 默认从 Felldl 的设置文件读（`%APPDATA%\com.felldl.app\settings.json`），
-也可用环境变量 `FELLDL_PORT` / `FELLDL_TOKEN` 或参数 `--port` / `--token` 覆盖。
+它只是 stdio 到本地 API 的桥，协议分发、工具 schema 与摘要裁剪都复用 `felldl-core::mcp`，
+和内嵌端点不会出现两套行为。端口与 Token 默认从设置文件读
+（`%APPDATA%\com.felldl.app\settings.json`），也可用环境变量 `FELLDL_PORT` / `FELLDL_TOKEN`
+或参数 `--port` / `--token` 覆盖。
 
 | 工具 | 作用 |
 |---|---|
@@ -225,7 +254,7 @@ cargo build -p felldl-mcp --release   # 产物：target/release/felldl-mcp.exe
 | `felldl_stats` | 版本、任务数、活跃数、总速度 |
 
 > 工具结果只返回摘要字段（不回传 Cookie/密码/分片明细）；失败时 `isError=true` 并带稳定 `code`，
-> 模型可据此决定是否重试。MCP 走的是同一套本地 API，所以主程序必须处于运行状态。
+> 模型可据此决定是否重试。
 
 ---
 

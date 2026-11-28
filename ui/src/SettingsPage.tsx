@@ -450,14 +450,24 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
     }
   }
 
-  async function copyToken() {
-    if (!apiInfo) return;
+  async function copyText(text: string) {
     try {
-      await navigator.clipboard.writeText(apiInfo.token);
+      await navigator.clipboard.writeText(text);
       toast(t("set.copied"));
     } catch {
       toast(t("set.copyFail"), "error");
     }
+  }
+
+  async function copyToken() {
+    if (!apiInfo) return;
+    await copyText(apiInfo.token);
+  }
+
+  // MCP 客户端要的是带 token 的完整 URL：单独复制令牌再手拼容易漏掉 `?token=`
+  function mcpUrl(): string {
+    if (!apiInfo) return "";
+    return `http://127.0.0.1:${apiInfo.port}/mcp?token=${apiInfo.token}`;
   }
 
   async function checkUpdate() {
@@ -1068,6 +1078,38 @@ export function SettingsPage({ settings, onChange, toast }: Props) {
                   >
                     <IconCopy size={14} />
                   </button>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ color: "var(--text-mute)", minWidth: 52 }}>
+                    {t("set.mcp")}
+                  </span>
+                  <span
+                    style={{
+                      flex: 1,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      color: "var(--text-soft)",
+                    }}
+                  >
+                    {mcpUrl()}
+                  </span>
+                  <button
+                    className="icon-btn"
+                    onClick={() => copyText(mcpUrl())}
+                    title={t("set.copyMcp")}
+                  >
+                    <IconCopy size={14} />
+                  </button>
+                </div>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "var(--text-mute)",
+                    lineHeight: 1.6,
+                  }}
+                >
+                  {t("set.mcpHint")}
                 </div>
               </div>
             )}
