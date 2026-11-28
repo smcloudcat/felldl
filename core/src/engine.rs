@@ -1198,18 +1198,24 @@ impl Engine {
             if next_at > now_ms {
                 break;
             }
-            let Some(std::cmp::Reverse((at, id))) = heap.pop() else {
+            let Some(std::cmp::Reverse((_, id))) = heap.pop() else {
                 break;
             };
             // 堆里的条目只是「候选」：用户可能改过时间、暂停或删了它。
-            // 只有状态与到期时间都对得上才算数，否则直接丢弃。
+            // 只认「状态仍是定时」且「时间已经到或已过」。
+            //
+            // 这里刻意**不**要求堆里的时间与 `scheduled_at` 精确相等：
+            // 兜底重入堆用的延后时间、用户来回改时间，都会留下彼此不一致的条目，
+            // 精确比对会把它们全当失效丢掉，表现就是「设了定时但没反应」。
+            // 宁可多取一次——取出后调用方会推进状态，重复条目下一轮自然不满足条件。
             let valid = self
                 .tasks
                 .lock()
                 .get(&id)
                 .map(|rt| {
                     let t = rt.task.lock();
-                    t.state == TaskState::Scheduled && t.scheduled_at == Some(at)
+                    t.state == TaskState::Scheduled
+                        && t.scheduled_at.map(|at| at <= now_ms).unwrap_or(false)
                 })
                 .unwrap_or(false);
             if valid {
@@ -1218,6 +1224,34 @@ impl Engine {
         }
         out.sort();
         out
+    }
+
+    /// 定时任务被取出堆之后，如果状态仍是 `Scheduled`，把它重新放回堆。
+    ///
+    /// 为什么需要：`take_due_scheduled` 是「pop 即消费」，条目一旦取出就不再保留。
+    /// 正常情况下紧接着的 `resume` 会把任务推成 Probing/Queued，堆条目也没用了；
+    /// 但只要有一条异常路径让任务停在 `Scheduled`（例如已经被别的路径占住 running、
+    /// 或 resume 直接因状态提前返回），这个定时任务就**永久**不会再触发——
+    /// 堆里没有它、`scheduled_at` 又已经过去，UI 上看起来就是「设了定时但没反应」。
+    ///
+    /// 延后 `retry_after_ms` 再判，避免立刻重入造成每 500ms 空转一次。
+    /// 返回是否重新入堆（便于测试断言）。
+    fn requeue_if_still_scheduled(&self, id: &str, retry_after_ms: i64) -> bool {
+        let pending = self.tasks.lock().get(id).cloned().and_then(|rt| {
+            let t = rt.task.lock();
+            if t.state == TaskState::Scheduled {
+                t.scheduled_at
+            } else {
+                None
+            }
+        });
+        match pending {
+            Some(at) => {
+                self.note_schedule(id, at.max(now_ms() + retry_after_ms));
+                true
+            }
+            None => false,
+        }
     }
 
     /// 有没有「需要每 500ms 跟进」的活：在跑的、排队的、等重试的。
@@ -2574,6 +2608,8 @@ impl Engine {
                 for (id, rt, dl) in targets.running {
                     let progress = {
                         let mut t = rt.task.lock();
+                        let prev_dl = t.downloaded;
+                        let prev_speed = t.speed;
                         t.downloaded = dl;
                         if let Some((pdl, pt)) = last.get(&id).copied() {
                             let dt = now.duration_since(pt).as_secs_f64();
@@ -2588,11 +2624,17 @@ impl Engine {
                         if persist_due && t.state == TaskState::Downloading {
                             me.store.enqueue_save_owned(t.clone());
                         }
-                        t.progress_snapshot()
+                        if Self::progress_is_redundant(prev_dl, prev_speed, dl) {
+                            None
+                        } else {
+                            Some(t.progress_snapshot())
+                        }
                     };
                     last.insert(id, (dl, now));
                     // 进度只发增量字段，静态信息（URL/镜像/凭据）不再重复传输
-                    me.emit(EngineEvent::TaskProgress(Box::new(progress)));
+                    if let Some(progress) = progress {
+                        me.emit(EngineEvent::TaskProgress(Box::new(progress)));
+                    }
                 }
 
                 // 清理已离开活跃集合（完成/出错/删除）的进度基准
@@ -2603,7 +2645,13 @@ impl Engine {
 
                 // 定时任务触发
                 for id in targets.due {
-                    let _ = me.resume(&id).await;
+                    if let Err(e) = me.resume(&id).await {
+                        eprintln!("[sched] 定时启动 {id} 失败：{e:#}");
+                    }
+                    // 兜底：`take_due_scheduled` 已经把这条从堆里 pop 掉了。
+                    // 如果 resume 没能把任务推离 Scheduled（异常分支），它既不在堆里、
+                    // `scheduled_at` 又已经过去，就再也不会被触发——定时任务静默失踪。
+                    me.requeue_if_still_scheduled(&id, 5_000);
                 }
 
                 // 平台说没网，但有任务在等重试：别全信它，自己连一次目标端口。
@@ -2668,6 +2716,18 @@ impl Engine {
                 }
             }
         });
+    }
+
+    /// 这条进度事件是否「不携带任何新信息」。
+    ///
+    /// 字节没推进、且上一条事件已经把速度归零：UI 收到的内容与上一条逐字节相同。
+    /// 连接卡住、被限速到 0、等重试时这个状态会持续很久，继续每 500ms 发一次，
+    /// 只是让 IPC 序列化 + webview 反序列化同一份 JSON。
+    ///
+    /// 速度归零的那一次**必须**发（`prev_speed != 0`），否则界面会一直停在
+    /// 停滞前的高速度上。落盘不受影响：`enqueue_save_owned` 在判断之前就执行了。
+    fn progress_is_redundant(prev_downloaded: u64, prev_speed: u64, now_downloaded: u64) -> bool {
+        now_downloaded == prev_downloaded && prev_speed == 0
     }
 
     /// tick 的选取阶段：从活跃索引挑出本轮要处理的任务。
@@ -3933,5 +3993,122 @@ mod tests {
     fn weak_etag_is_not_equal_to_strong() {
         let e = check_validators(Some("\"v1\""), None, Some("W/\"v1\""), None).unwrap_err();
         assert_eq!(crate::error::classify(&e).code, "integrity");
+    }
+
+    /// 性能基线：进度增量本身的生成成本。
+    ///
+    /// tick 每 500ms 对每个活跃任务做一次「更新字段 + 生成 TaskProgress」。
+    /// 单独量 `progress_snapshot()` 是为了回答一个具体问题：值不值得为了
+    /// 「免 clone」去改 `TaskProgress` 的传输契约（要同时改 core 与 UI 的合并逻辑）。
+    /// 只有单次成本接近或超过 tick 周期的千分之一，改契约才划算。
+    #[test]
+    fn progress_snapshot_cost_baseline() {
+        let mut t = test_task("p", TaskState::Downloading);
+        t.size = Some(512 << 20);
+        t.downloaded = 200 << 20;
+        t.segments = (0..16u64)
+            .map(|i| Segment {
+                index: i as usize,
+                start: i * 32_000_000,
+                end: (i + 1) * 32_000_000 - 1,
+                done: 12_500_000,
+            })
+            .collect();
+
+        const N: u32 = 50_000;
+        let t0 = std::time::Instant::now();
+        for _ in 0..N {
+            std::hint::black_box(t.progress_snapshot());
+        }
+        let snap = t0.elapsed() / N;
+
+        // 对照：`for_ui()` 是完整 Task 的浅深拷贝 + 脱敏，作为「改契约能省多少」的上界
+        let t1 = std::time::Instant::now();
+        for _ in 0..N {
+            std::hint::black_box(t.for_ui());
+        }
+        let full = t1.elapsed() / N;
+
+        eprintln!("[perf] 16 分片任务：progress_snapshot {snap:?}/次，完整 for_ui {full:?}/次");
+        assert!(
+            snap < std::time::Duration::from_millis(1),
+            "progress_snapshot 不该成为 tick 热点，实际 {snap:?}"
+        );
+    }
+
+    /// 停滞的进度不该每 500ms 重复推送，但「降速到 0」那一条必须发出去。
+    #[test]
+    fn redundant_progress_is_skipped_only_after_speed_drops_to_zero() {
+        // 还在推进：必须发（哪怕当前速度算出来是 0，因为有新字节）
+        assert!(!Engine::progress_is_redundant(100, 0, 200));
+        // 字节没动但上一轮还有速度：这一条就是「降速到 0」的通知，必须发
+        assert!(!Engine::progress_is_redundant(100, 5_000, 100));
+        // 字节没动且上一条已经是 0 速度：与上一条逐字节相同，跳过
+        assert!(Engine::progress_is_redundant(100, 0, 100));
+    }
+
+    /// 端到端：定时任务到点必须被真正拉起，而不只是「算出了该等多久」。
+    ///
+    /// 这条盯的是「堆 pop 之后必须推进状态」：只 pop 不 resume 的话，
+    /// 堆里没了条目、`scheduled_at` 又已经过去，这个任务就再也不会触发。
+    #[tokio::test]
+    async fn scheduled_task_leaves_scheduled_when_due() {
+        let (engine, dir) = engine_in_temp("sched-e2e");
+        let mut t = test_task("due1", TaskState::Scheduled);
+        // 刻意指向必然连不上的地址：本测试只关心「状态离开 Scheduled」，
+        // 不关心下载是否成功（连接失败会正常落到 Error，那也是离开 Scheduled）。
+        t.url = "http://127.0.0.1:1/never".into();
+        t.scheduled_at = Some(now_ms() - 1);
+        engine.index_task(Runtime::new(t));
+
+        let targets = engine.pick_tick_targets(&HashMap::new());
+        assert_eq!(
+            targets.due,
+            vec!["due1".to_string()],
+            "到点任务应被到期堆取出"
+        );
+        for id in targets.due {
+            let _ = engine.resume(&id).await;
+        }
+
+        let state = engine.get("due1").expect("任务还在").state;
+        assert_ne!(
+            state,
+            TaskState::Scheduled,
+            "到点后仍停在 Scheduled：堆已 pop，这个定时任务再也不会被触发"
+        );
+        let _ = engine.cancel("due1", false).await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 兜底路径：堆条目已 pop、任务却仍是 Scheduled，必须重新入堆且**延后**，
+    /// 否则这个定时任务永久失踪或变成每轮空转。
+    #[tokio::test]
+    async fn stale_due_task_gets_requeued_with_delay() {
+        let (engine, dir) = engine_in_temp("sched-requeue");
+        let mut t = test_task("r1", TaskState::Scheduled);
+        t.scheduled_at = Some(now_ms() - 1);
+        engine.index_task(Runtime::new(t));
+        // 模拟「take_due_scheduled 已经 pop 掉」：清空堆，只剩任务本身仍定时
+        engine.sched_due.lock().clear();
+
+        assert!(
+            engine.requeue_if_still_scheduled("r1", 5_000),
+            "仍是 Scheduled 的任务必须重新入堆"
+        );
+        assert!(
+            engine.take_due_scheduled(now_ms()).is_empty(),
+            "重入堆必须延后，不能在下一轮立刻又到期"
+        );
+        assert_eq!(
+            engine.take_due_scheduled(now_ms() + 5_100),
+            vec!["r1".to_string()],
+            "延后到点后应能再次被取出，而不是被永久丢弃"
+        );
+
+        // 已被推进的任务不该被重入堆，否则会「下载中又被定时拉起」一次
+        engine.tasks.lock().get("r1").unwrap().task.lock().state = TaskState::Queued;
+        assert!(!engine.requeue_if_still_scheduled("r1", 5_000));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
