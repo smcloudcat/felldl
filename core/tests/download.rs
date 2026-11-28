@@ -265,7 +265,8 @@ async fn checkpoint_is_recorded_while_downloading() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pause_then_resume_continues_correctly() {    // 4MB，限速让它有足够时间被暂停
+async fn pause_then_resume_continues_correctly() {
+    // 4MB，限速让它有足够时间被暂停
     let payload = make_payload(4 * 1024 * 1024);
     let srv = spawn_server(payload.clone(), true).await;
     let root = temp_root("resume");

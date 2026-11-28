@@ -1174,8 +1174,7 @@ impl Engine {
             )
         };
         // 登记这个任务允许删除的产物；路径不自洽时不登记，删除阶段会被拒绝而不是照删
-        self.paths
-            .register(&id, &save_dir, &file_name, &save_path);
+        self.paths.register(&id, &save_dir, &file_name, &save_path);
         if kind == TaskKind::Bt {
             self.bt_ids.lock().insert(id.clone());
         }

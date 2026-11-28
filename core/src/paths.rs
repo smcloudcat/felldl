@@ -57,7 +57,13 @@ impl PathRegistry {
     /// 删除前取「这个任务允许删的文件」。`None` 表示路径不可信，调用方应拒绝删盘。
     ///
     /// 有登记条目就只用登记值：任务 JSON 后续被改成什么都影响不到它。
-    pub fn allowed(&self, id: &str, save_dir: &str, file_name: &str, save_path: &str) -> Option<Vec<PathBuf>> {
+    pub fn allowed(
+        &self,
+        id: &str,
+        save_dir: &str,
+        file_name: &str,
+        save_path: &str,
+    ) -> Option<Vec<PathBuf>> {
         if let Some(e) = self
             .inner
             .lock()
@@ -153,7 +159,10 @@ mod tests {
     fn rejects_path_traversal_and_mismatched_paths() {
         let r = PathRegistry::new();
         let d = root("bad");
-        let outside = std::env::temp_dir().join("passwd").to_string_lossy().to_string();
+        let outside = std::env::temp_dir()
+            .join("passwd")
+            .to_string_lossy()
+            .to_string();
         // 文件名越界
         assert!(!r.register("t", &d, "../passwd", &outside));
         // 目标不在 save_dir 里
@@ -173,7 +182,10 @@ mod tests {
         let p = joined(&d, "a.bin");
         assert!(r.register("t", &d, "a.bin", &p));
         // 任务 JSON 事后被改成指向别处：删除时仍只认登记值
-        let evil = std::env::temp_dir().join("evil.bin").to_string_lossy().to_string();
+        let evil = std::env::temp_dir()
+            .join("evil.bin")
+            .to_string_lossy()
+            .to_string();
         let files = r
             .allowed("t", &d, "a.bin", &evil)
             .expect("已登记任务不受后续字段改动影响");
@@ -188,8 +200,6 @@ mod tests {
         // 三字段自洽 → 放行（启动加载等极端情况下 registry 可能还没登记）
         assert!(r.allowed("t", &d, "a.bin", &p).is_some());
         // 不自洽 → 拒绝
-        assert!(r
-            .allowed("t", &d, "a.bin", &joined(&d, "b.bin"))
-            .is_none());
+        assert!(r.allowed("t", &d, "a.bin", &joined(&d, "b.bin")).is_none());
     }
 }
