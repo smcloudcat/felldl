@@ -1845,7 +1845,12 @@ async fn apply_update(
                 }
             }
         }
-        match app.opener().open_path(update.path(), None::<&str>) {
+        // open_path 要 String：Path 在非 UTF-8 路径上只能 lossy（此时系统安装器
+        // 多半也打不开，下面的 Err 分支会如实返回 "manual"）
+        match app
+            .opener()
+            .open_path(update.path().to_string_lossy().to_string(), None::<&str>)
+        {
             Ok(_) => Ok("opened".into()),
             Err(_) => Ok("manual".into()),
         }
