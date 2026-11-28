@@ -218,9 +218,54 @@ async fn segmented_download_is_byte_exact() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// checkpoint：下载过程中要周期性落盘并记下时间戳。
+///
+/// 这条只在「跑得够久」时可见（tick 每 2s 才 persist 一次），所以用限速把 4MB
+/// 拉到几秒；顺带验证 checkpoint 只写在 Downloading 上，不是每轮都写。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pause_then_resume_continues_correctly() {
-    // 4MB，限速让它有足够时间被暂停
+async fn checkpoint_is_recorded_while_downloading() {
+    let payload = make_payload(4 * 1024 * 1024);
+    let srv = spawn_server(payload.clone(), true).await;
+    let root = temp_root("ckpt");
+    let out = root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let engine = new_engine(&root);
+    // 进度落盘在 tick 里，必须真的把后台循环拉起来
+    engine.spawn_background();
+
+    let mut s = engine.settings();
+    s.global_speed_limit = 1024 * 1024; // 4MB / 1MBps ≈ 4s
+    engine.update_settings(s).unwrap();
+
+    let id = engine
+        .add(AddTaskRequest {
+            url: format!("http://{}/ckpt.bin", srv.addr),
+            save_dir: Some(out.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // 跨过至少一次 2s 落盘
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let t = engine.get(&id).unwrap();
+    assert_eq!(t.state, TaskState::Downloading, "限速下 3 秒应还在下载");
+    assert!(t.downloaded > 0, "应有进度");
+    let ck = t
+        .checkpoint_at
+        .expect("下载 3 秒后应写下 checkpoint 时间戳");
+    let age = felldl_core::model::now_ms() - ck;
+    assert!(
+        (0..=3000).contains(&age),
+        "checkpoint 应很新，实际差 {age}ms"
+    );
+
+    engine.cancel(&id, true).await.ok();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_then_resume_continues_correctly() {    // 4MB，限速让它有足够时间被暂停
     let payload = make_payload(4 * 1024 * 1024);
     let srv = spawn_server(payload.clone(), true).await;
     let root = temp_root("resume");

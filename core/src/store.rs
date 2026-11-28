@@ -517,6 +517,7 @@ mod tests {
             password: Some("p".into()),
             interval_secs: 60,
             resume_anchor: None,
+            checkpoint_at: None,
         }
     }
 

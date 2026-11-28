@@ -67,6 +67,7 @@ fn seed_task_with_secrets(root: &std::path::Path, save_dir: &str) -> String {
         password: Some("super-secret-pass".into()),
         interval_secs: 0,
         resume_anchor: None,
+        checkpoint_at: None,
     };
     store.save_task(&task).unwrap();
     task.id

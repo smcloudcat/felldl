@@ -1269,6 +1269,7 @@ impl Engine {
             password: None,
             interval_secs: 0,
             resume_anchor: None,
+            checkpoint_at: None,
             rev: 0,
         };
         let id = t.id.clone();

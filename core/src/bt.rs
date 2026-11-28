@@ -143,6 +143,7 @@ impl Engine {
             password: None,
             interval_secs: 0,
             resume_anchor: None,
+            checkpoint_at: None,
             rev: 0,
         };
         let id = t.id.clone();
@@ -492,6 +493,7 @@ mod restore_tests {
             password: None,
             interval_secs: 0,
             resume_anchor: None,
+            checkpoint_at: None,
             rev: 0,
         };
         store.save_task(&task).unwrap();

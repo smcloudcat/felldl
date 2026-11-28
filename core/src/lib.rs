@@ -17,6 +17,7 @@ pub mod grab;
 pub mod metalink;
 pub mod mirror;
 pub mod model;
+pub mod paths;
 pub mod remote;
 pub mod retry;
 pub mod store;

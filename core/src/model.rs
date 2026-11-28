@@ -591,6 +591,12 @@ pub struct Task {
     /// 断点可信锚：文件被删/截短/替换后，旧分片进度不得再被采信
     #[serde(default)]
     pub resume_anchor: Option<ResumeAnchor>,
+    /// 上次把进度落盘（checkpoint）的时间，毫秒。
+    ///
+    /// 只用于诊断「断点有多旧」：它区分不了「这次没写进度」和「写了但没落盘」，
+    /// 那要靠 worker 侧周期 `sync_data` 把字节真正刷到磁盘（见 run_task 的 checkpoint 分支）。
+    #[serde(default)]
+    pub checkpoint_at: Option<i64>,
 }
 
 impl Task {
@@ -1090,6 +1096,7 @@ mod redaction_tests {
             password: Some("hunter2".into()),
             interval_secs: 0,
             resume_anchor: None,
+            checkpoint_at: None,
         }
     }
 
@@ -1111,5 +1118,43 @@ mod redaction_tests {
         t.password = None;
         let r = t.redacted();
         assert!(r.cookie.is_none() && r.password.is_none());
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+
+    /// 旧版本写下的任务 JSON 没有 `checkpoint_at`：升级后必须还能读，
+    /// 否则所有历史任务会在启动时集体解析失败（被当成空库）。
+    #[test]
+    fn task_json_without_checkpoint_still_parses() {
+        let v = serde_json::json!({
+            "id": "t1",
+            "url": "https://e.com/f",
+            "file_name": "f.bin",
+            "save_dir": "/d",
+            "save_path": "/d/f.bin",
+            "state": "paused"
+        });
+        let t: Task = serde_json::from_value(v).expect("旧 JSON 应能反序列化");
+        assert!(t.checkpoint_at.is_none());
+    }
+
+    #[test]
+    fn checkpoint_roundtrips() {
+        let v = serde_json::json!({
+            "id": "t1",
+            "url": "https://e.com/f",
+            "file_name": "f.bin",
+            "save_dir": "/d",
+            "save_path": "/d/f.bin",
+            "state": "downloading",
+            "checkpoint_at": 1_700_000_000_000_i64
+        });
+        let t: Task = serde_json::from_value(v).unwrap();
+        assert_eq!(t.checkpoint_at, Some(1_700_000_000_000));
+        let back: Task = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back.checkpoint_at, t.checkpoint_at);
     }
 }

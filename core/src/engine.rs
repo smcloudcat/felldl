@@ -223,6 +223,8 @@ pub struct Engine {
     /// 而真正到点的通常只有 0~1 个。堆让「没有任务到点」的代价降到一次 `peek`。
     /// 堆里允许有失效条目（用户改过时间、暂停、删除），取出时按真实状态校验后丢弃。
     sched_due: Mutex<std::collections::BinaryHeap<std::cmp::Reverse<(i64, TaskId)>>>,
+    /// 任务产物归属：删除时只认登记过的路径，防止任务 JSON 被改动后误删别处
+    paths: crate::paths::PathRegistry,
     /// 唤醒信号：没有活干时 tick 挂起等待，新增任务 / 恢复 / 网络变化时主动叫醒，
     /// 避免「闲着也每 500ms 醒一次」。
     wake: tokio::sync::Notify,
@@ -411,6 +413,7 @@ impl Engine {
             net_probe: Mutex::new(None),
             creds,
             sched_due: Mutex::new(std::collections::BinaryHeap::new()),
+            paths: crate::paths::PathRegistry::new(),
             wake: tokio::sync::Notify::new(),
             bt_ids: Mutex::new(std::collections::HashSet::new()),
             events: tx,
@@ -1129,6 +1132,7 @@ impl Engine {
             password,
             interval_secs: req.interval_secs,
             resume_anchor: None,
+            checkpoint_at: None,
             rev: 0,
         })
     }
@@ -1153,7 +1157,7 @@ impl Engine {
     /// 索引是**派生数据**：`tasks` 表是唯一事实来源，这里只是给 tick 提供
     /// 「该关注谁」的捷径。因此索引短暂不一致不影响正确性（tick 会跳过查不到的 id）。
     pub(crate) fn index_task(&self, rt: Arc<Runtime>) {
-        let (id, kind, state, sched) = {
+        let (id, kind, state, sched, save_dir, file_name, save_path) = {
             let t = rt.task.lock();
             (
                 t.id.clone(),
@@ -1164,8 +1168,14 @@ impl Engine {
                 } else {
                     None
                 },
+                t.save_dir.clone(),
+                t.file_name.clone(),
+                t.save_path.clone(),
             )
         };
+        // 登记这个任务允许删除的产物；路径不自洽时不登记，删除阶段会被拒绝而不是照删
+        self.paths
+            .register(&id, &save_dir, &file_name, &save_path);
         if kind == TaskKind::Bt {
             self.bt_ids.lock().insert(id.clone());
         }
@@ -1304,6 +1314,7 @@ impl Engine {
         self.tasks.lock().remove(id);
         self.live.lock().remove(id);
         self.bt_ids.lock().remove(id);
+        self.paths.release(id);
     }
 
     /// 状态变化后同步活跃索引：终态移出，其余（含暂停）留在里面。
@@ -1629,10 +1640,13 @@ impl Engine {
         // 让在途 worker 立即作废：删除后它的任何状态写入 / 事件广播都被丢弃，
         // 否则用户删掉的任务会以「暂停中」的身份重新出现在列表和磁盘上。
         rt.next_generation();
-        let path = {
+        let (path, save_dir, file_name) = {
             let t = rt.task.lock();
-            t.save_path.clone()
+            (t.save_path.clone(), t.save_dir.clone(), t.file_name.clone())
         };
+        // 归属清单必须在 unindex（会清掉登记）之前取：登记值是创建时的路径，
+        // 任务 JSON 后来被改成什么都不影响它。
+        let owned = self.paths.allowed(id, &save_dir, &file_name, &path);
         self.unindex_task(id);
         // 任务已经不存在了，排期必须一起清：否则 tick 会对着一个死 id 反复「重试」
         self.retries.lock().clear(id);
@@ -1645,8 +1659,14 @@ impl Engine {
             eprintln!("[creds] 删除任务 {id} 的凭据失败：{e:#}");
         }
         if delete_file && !is_bt {
-            remove_downloaded(&path).await;
+            match owned {
+                Some(files) => remove_files(&files).await,
+                None => self.emit(EngineEvent::Notice(format!(
+                    "任务的保存路径与记录不一致，已跳过删除文件：{path}"
+                ))),
+            }
         }
+        self.paths.release(id);
         self.emit(EngineEvent::TaskRemoved(id.to_string()));
         Ok(())
     }
@@ -2231,11 +2251,31 @@ impl Engine {
         drop(tx);
 
         let mut cancelled = false;
+        // 周期性 checkpoint 的计时起点（见下面 select 里的 sync 分支）
+        let mut last_sync = std::time::Instant::now();
         if seg_count == 0 {
             // 没有待下载分片，直接完成
         } else {
             loop {
                 tokio::select! {
+                    // 周期性 checkpoint：把已写入的字节真正刷到磁盘。
+                    //
+                    // 任务 JSON 每 2s 落盘一次（tick 的 persist_due），但字节可能还躺在
+                    // 页缓存里。进程崩溃不会丢页缓存（归 OS 管），断电/蓝屏会——真丢的时候，
+                    // 重启会按 JSON 跳过「声称写完、其实没落盘」的区间，得到一个长度对、
+                    // 内容错的文件。这里每 2s sync_data，把那个窗口收敛到 2s。
+                    // 预分配让文件长度失去参考意义（恒等于 total），所以不能靠「文件多长」
+                    // 反推进度，只能靠「刷过盘才敢认」。
+                    _ = tokio::time::sleep_until(
+                        tokio::time::Instant::from(
+                            last_sync + std::time::Duration::from_secs(2)
+                        )
+                    ) => {
+                        last_sync = std::time::Instant::now();
+                        if let Err(e) = file.sync_data() {
+                            eprintln!("[checkpoint] .part 刷盘失败：{e}");
+                        }
+                    }
                     _ = cancel.cancelled() => {
                         cancelled = true;
                         set.abort_all();
@@ -2622,6 +2662,8 @@ impl Engine {
                         // 否则 pause() 恰好在两者之间把状态改成 Paused 并落盘，
                         // 这条带着 Downloading 的旧快照随后写入，会把暂停覆盖回下载中。
                         if persist_due && t.state == TaskState::Downloading {
+                            // checkpoint 标记与 JSON 同一次写入：两者要么一起落盘、要么都没写
+                            t.checkpoint_at = Some(now_ms());
                             me.store.enqueue_save_owned(t.clone());
                         }
                         if Self::progress_is_redundant(prev_dl, prev_speed, dl) {
@@ -2911,16 +2953,23 @@ fn migrate_legacy_part(final_path: &Path, part: &Path) {
     }
 }
 
-async fn remove_downloaded(path: &str) {
+/// 删除任务产物：调用方传进来的路径已经过 `PathRegistry` 校验。
+///
+/// 不递归删目录：目录可能和用户原有的同名目录重合，删它是越界行为；
+/// 目录类产物由协议自己的受控清单（BT）处理。
+async fn remove_files(files: &[std::path::PathBuf]) {
+    for f in files {
+        remove_one(f).await;
+    }
+}
+
+async fn remove_one(path: &std::path::Path) {
+    let path = path.to_string_lossy().to_string();
     if path.trim().is_empty() {
         return;
     }
-    // 未完成的下载落在 `<最终名>.part`：删任务必须连临时文件一起清，
-    // 否则目录里会留下一堆没人认领的半成品
-    let part = util::part_path(std::path::Path::new(path));
-    let _ = std::fs::remove_file(&part);
     for i in 0..8u64 {
-        match std::fs::symlink_metadata(path) {
+        match std::fs::symlink_metadata(&path) {
             Ok(meta) if meta.is_dir() => {
                 // 目录不是本函数的删除对象：交给协议自己的受控清单处理
                 eprintln!("[delete] 跳过目录（不做递归删除）: {path}");
@@ -2933,7 +2982,7 @@ async fn remove_downloaded(path: &str) {
                 continue;
             }
         }
-        match std::fs::remove_file(path) {
+        match std::fs::remove_file(&path) {
             Ok(()) => return,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(60 * (i + 1))).await,
@@ -3274,7 +3323,7 @@ mod tests {
 
     /// 删除只允许作用于单个文件：目录（可能含用户原有内容）必须原样保留。
     #[tokio::test]
-    async fn remove_downloaded_skips_directories() {
+    async fn remove_files_skips_directories() {
         let root = std::env::temp_dir().join(format!("felldl-del-{}", uuid::Uuid::new_v4()));
         let keep_dir = root.join("pre-existing");
         std::fs::create_dir_all(&keep_dir).unwrap();
@@ -3283,10 +3332,10 @@ mod tests {
         let file = root.join("payload.bin");
         std::fs::write(&file, b"data").unwrap();
 
-        remove_downloaded(file.to_string_lossy().as_ref()).await;
+        remove_files(&[file.clone()]).await;
         assert!(!file.exists(), "普通文件应被删除");
 
-        remove_downloaded(keep_dir.to_string_lossy().as_ref()).await;
+        remove_files(&[keep_dir.clone()]).await;
         assert!(sentinel.exists(), "目录及其内容不得被递归删除");
 
         std::fs::remove_dir_all(&root).ok();
