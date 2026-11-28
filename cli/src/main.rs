@@ -284,13 +284,19 @@ async fn run(cli: Cli) -> Result<()> {
             let client = connect(&data_dir, cli.port, cli.token).await?;
             let id = render::pick(&client.tasks().await?, &id)?;
             client.action(&id, "pause").await?;
-            out.done(&format!("已暂停 {id}"));
+            out.done(&format!(
+                "已暂停 {id}（当前状态: {}）",
+                confirm(&client, &id).await?
+            ));
         }
         Cmd::Resume { id } => {
             let client = connect(&data_dir, cli.port, cli.token).await?;
             let id = render::pick(&client.tasks().await?, &id)?;
             client.action(&id, "resume").await?;
-            out.done(&format!("已继续 {id}"));
+            out.done(&format!(
+                "已继续 {id}（当前状态: {}）",
+                confirm(&client, &id).await?
+            ));
         }
         Cmd::Cancel { id, delete_file } => {
             let client = connect(&data_dir, cli.port, cli.token).await?;
@@ -317,6 +323,18 @@ async fn run(cli: Cli) -> Result<()> {
 ///
 /// ping 一次再返回，是为了给出人话错误——「Connection refused」对普通用户太抽象，
 /// 而这条命令 90% 的失败原因就是「应用没开」。
+/// 操作后回读真实状态。
+///
+/// 服务端对「已暂停的任务再暂停」返回 ok，直接打印「已暂停」会骗人：
+/// 任务其实早下完了。多一次 GET 换一句实话。
+async fn confirm(client: &remote::Remote, id: &str) -> Result<String> {
+    match client.task(id).await {
+        Ok(t) => Ok(render::state_of(&t)),
+        // 取消后再查必然 404；这种「查不到」不是错误
+        Err(_) => Ok("已移除".into()),
+    }
+}
+
 async fn connect(
     data_dir: &std::path::Path,
     port: Option<u16>,

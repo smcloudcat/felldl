@@ -65,6 +65,17 @@ impl Remote {
             .ok_or_else(|| anyhow::anyhow!("服务端没有返回统计数据"))
     }
 
+    /// 单个任务（用于操作后确认实际状态，而不是「我说暂停了就暂停了」）
+    ///
+    /// 注意返回的是 `{"ok":true,"task":{...}}`，不是裸任务对象。
+    pub async fn task(&self, id: &str) -> Result<Value> {
+        let v = self
+            .get_json(&format!("/tasks/{id}"))
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("服务端没有返回任务 {id}"))?;
+        Ok(v.get("task").cloned().unwrap_or(v))
+    }
+
     pub async fn action(&self, id: &str, verb: &str) -> Result<()> {
         self.post_json(&format!("/tasks/{id}/{verb}"), None).await?;
         Ok(())

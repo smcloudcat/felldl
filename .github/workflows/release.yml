@@ -18,6 +18,11 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+# softprops/action-gh-release 要往 Release 传附件；
+# 默认 token 在部分仓库设置下是只读的，必须显式要写权限
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
