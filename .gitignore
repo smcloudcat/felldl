@@ -37,3 +37,6 @@ dist/
 # 临时
 *.tmp
 .DS_Store
+
+# 开发审计文档：只保留在本地归档（../felldl-docs-archive），不入库
+/docs/
