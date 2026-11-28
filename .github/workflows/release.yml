@@ -1,0 +1,156 @@
+name: release-macos-linux
+
+# macOS / Linux 的产物只能在对应系统上构建（Tauri 依赖 WebView 与系统库），
+# 所以这部分交给 CI；Windows 与 Android 仍在本地构建，一起传到同一个 Release。
+#
+# 产物命名与应用内更新清单对齐：Felldl-<版本>-<平台>-<架构>.<ext>
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要构建的 tag（如 v0.4.0），需要已经存在"
+        required: true
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  linux:
+    name: linux x64 (deb + AppImage + fdl)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # webkit2gtk-4.1 是 Tauri 2 的硬依赖；libayatana 给托盘用；
+      # patchelf 给 AppImage 用。用 22.04 是为了让产物的 glibc 下限更低。
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libssl-dev file
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: 安装前端依赖
+        working-directory: ui
+        run: npm ci
+
+      - name: 构建前端
+        working-directory: ui
+        run: npm run build
+
+      - name: 构建 fdl（命令行）
+        run: cargo build --release --locked -p felldl-cli
+
+      - name: 构建桌面端（deb + AppImage）
+        # 容器里没有 FUSE，AppImage 打包工具需要解包运行
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: ./ui/node_modules/.bin/tauri build --bundles deb,appimage
+
+      - name: 归并产物名
+        run: |
+          set -euo pipefail
+          V="${TAG#v}"
+          mkdir -p dist
+          # 用 glob 而不是猜文件名：Tauri 的 bundle 命名随 productName / package
+          # name 变化，写死路径会在升级 Tauri 后突然失效
+          cp "$(ls target/release/bundle/appimage/*.AppImage | head -1)" \
+             "dist/Felldl-${V}-linux-x64.AppImage"
+          cp "$(ls target/release/bundle/deb/*.deb | head -1)" \
+             "dist/Felldl-${V}-linux-x64.deb"
+          cp target/release/fdl "dist/fdl-${V}-linux-x64"
+          chmod +x dist/fdl-*
+          ls -l dist
+
+      - name: 上传到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          draft: true
+          files: |
+            dist/Felldl-*-linux-x64.AppImage
+            dist/Felldl-*-linux-x64.deb
+            dist/fdl-*-linux-x64
+
+  macos:
+    name: macos ${{ matrix.suffix }} (dmg + fdl)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            suffix: arm64
+          - target: x86_64-apple-darwin
+            suffix: x64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: ${{ matrix.target }}
+
+      - name: 安装前端依赖
+        working-directory: ui
+        run: npm ci
+
+      - name: 构建前端
+        working-directory: ui
+        run: npm run build
+
+      - name: 构建 fdl（命令行）
+        run: cargo build --release --locked -p felldl-cli --target ${{ matrix.target }}
+
+      - name: 构建桌面端（dmg）
+        run: ./ui/node_modules/.bin/tauri build --target ${{ matrix.target }} --bundles dmg
+
+      - name: 归并产物名
+        run: |
+          set -euo pipefail
+          V="${TAG#v}"
+          mkdir -p dist
+          cp "$(ls "target/${{ matrix.target }}/release/bundle/dmg/"*.dmg | head -1)" \
+             "dist/Felldl-${V}-macos-${{ matrix.suffix }}.dmg"
+          cp "target/${{ matrix.target }}/release/fdl" \
+             "dist/fdl-${V}-macos-${{ matrix.suffix }}"
+          chmod +x dist/fdl-*
+          ls -l dist
+
+      - name: 上传到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          draft: true
+          files: |
+            dist/Felldl-*-macos-${{ matrix.suffix }}.dmg
+            dist/fdl-*-macos-${{ matrix.suffix }}

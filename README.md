@@ -1,7 +1,8 @@
 # Felldl 🚀
 
 一款从零构建的现代多线程下载加速器，对标 Free Download Manager。
-Windows 与 Android 共用**同一套 Rust 引擎 + React 界面**，浏览器扩展可把下载任务自动转交过来。
+Windows / macOS / Linux / Android 共用**同一套 Rust 引擎 + React 界面**，浏览器扩展可把下载任务自动转交过来；
+服务器上没有图形界面时，用 `fdl` 命令行跑同一个引擎。
 
 ---
 
@@ -10,6 +11,8 @@ Windows 与 Android 共用**同一套 Rust 引擎 + React 界面**，浏览器�
 | 功能 | 说明 | 状态 |
 |---|---|---|
 | 多线程分段下载 | 每个任务最多 32 连接，按字节范围并行拉取 | ✅ |
+| 跨平台 | Windows / macOS（arm64、x64）/ Linux（AppImage、deb）/ Android | ✅ |
+| 命令行 `fdl` | 无界面下载、断点续传、任务管理，支持 `--json` 便于脚本 | ✅ |
 | 断点续传 | 分片级进度持久化，进程重启后自动续传，ETag 校验 | ✅ |
 | 浏览器集成 | MV3 扩展（Chrome/Edge）自动接管下载，带 Token 鉴权 | ✅ |
 | AI 接入（MCP） | 标准 MCP 服务：AI 客户端可添加/查询/暂停/取消下载 | ✅ |
@@ -78,6 +81,72 @@ cargo tauri build
 - 免安装 exe：`target/release/felldl.exe`
 - NSIS 安装包：`target/release/bundle/nsis/`
 - MSI 安装包：`target/release/bundle/msi/`
+
+### macOS / Linux 桌面端
+
+平台差异放在 `src-tauri/tauri.<平台>.conf.json` 里（Tauri 会自动叠加）：
+macOS 出 `dmg`，Linux 出 `deb` + `AppImage`，Windows 仍是 `nsis` + `msi`。
+
+```bash
+cd ui && npm install && cd ..
+
+# macOS（Intel 机器可直接跑；Apple Silicon 交叉编译 x64 时加 --target x86_64-apple-darwin）
+npx tauri build --bundles dmg
+
+# Linux（Ubuntu 22.04 及以上；需要 webkit2gtk-4.1 等系统库）
+sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+                        libayatana-appindicator3-dev librsvg2-dev patchelf
+npx tauri build --bundles deb,appimage
+```
+
+产物：`target/release/bundle/dmg/`、`target/release/bundle/deb/`、
+`target/release/bundle/appimage/`。
+
+> 本机只装了 Windows，**macOS / Linux 的包由 GitHub Actions 构建**
+> （`.github/workflows/release.yml`，推送 `v*` 标签或手动触发），
+> 因为 Tauri 必须链接目标系统的 WebView。
+
+安装后的行为差异：
+
+| 能力 | Windows | macOS | Linux |
+|---|---|---|---|
+| 应用内更新 | helper 进程覆盖 exe 后重启 | 下载 dmg 并打开（拖入「应用程序」） | AppImage 原地替换并重启；deb 打开系统安装器 |
+| 关机 / 睡眠（下载后动作） | `shutdown` / `rundll32` | AppleScript → System Events | `systemctl poweroff` / `suspend` |
+| 托盘 | ✅ | ✅ | 需要 `libayatana-appindicator3`；缺失时降级为「关闭即退出」 |
+
+### 命令行 `fdl`
+
+同一个引擎编出的无界面客户端，Windows / macOS / Linux 通用。
+
+```bash
+cargo build --release -p felldl-cli     # 产物：target/release/fdl
+```
+
+```bash
+# 直接下（不需要界面，可断点续传；中断后重跑同一条命令即可接着下）
+fdl download https://example.com/big.iso -o ~/Downloads -c 16
+fdl download https://example.com/private.zip --cookie "session=..." -H "Authorization: Bearer ..."
+
+# 把任务交给正在运行的 Felldl（任务会出现在界面里）
+fdl add https://example.com/file.bin
+fdl list                       # 表格列出任务；--state downloading 过滤；--json 给脚本用
+fdl get 3f1a2b3c               # 支持 ID 前缀
+fdl pause 3f1a2b3c / fdl resume 3f1a2b3c / fdl cancel --delete-file 3f1a2b3c
+fdl stats
+```
+
+约定（都经过实测）：
+
+- 端口与令牌默认从应用的 `settings.json` 读；找不到时给出「应用没在运行」的中文提示。
+- `download` 用**独立任务库** `<数据目录>/cli`，不会去写界面正在用的任务库；
+  同一任务库同时只允许一个进程（`flock`，进程被 kill 也不会留下假锁）。
+- 已下完且文件大小一致时直接报路径并跳过（要重下加 `--fresh`）——
+  避免同一条命令重跑得到 `file (1).bin`。
+- 结果走 stdout、进度与提示走 stderr，所以 `p=$(fdl download ...)` 可以直接用；
+  Ctrl-C 退出码 130（同 curl/wget）。
+- 数据目录与应用一致：Windows `%APPDATA%\com.felldl.app`、
+  macOS `~/Library/Application Support/com.felldl.app`、
+  Linux `$XDG_DATA_HOME` 或 `~/.local/share/com.felldl.app`。
 
 ### Android 端
 
@@ -164,7 +233,9 @@ cargo run -p felldl-core --example update-sign -- verify --in update-manifest.js
 关于安装包构建：`cargo tauri build` 默认会尝试联网下载 NSIS/WiX 制作 `.exe`/`.msi` 安装包，
 网络不佳时可能超时。此时可跳过打包，直接使用 `target/release/felldl.exe`（免安装，功能完整）。
 
-### 独立 CLI（用于测试引擎）
+### 引擎示例（最小 CLI）
+
+`fdl` 之外还有一个只做验证的最小示例，用来在改动引擎时快速跑真实下载：
 
 ```bash
 cargo run --release --example cli -- "https://example.com/file.zip" --conn 16 --out ./downloads
