@@ -1,6 +1,6 @@
 {
-  "version": "0.3.10",
-  "release_url": "https://github.com/smcloudcat/felldl/releases/tag/v0.3.10",
-  "published_at": "2026-11-28T04:21:47Z",
-  "notes": "安全：凭据改存加密凭据库、IPC 全面脱敏、更新包必须通过签名清单校验。引擎：.part 原子提交、断点绑定远端实体（ETag/Last-Modified）、周期性刷盘、定时任务最小堆与按需唤醒。性能：列表分页+虚拟滚动+normalized store，首屏 IPC 7.2MB→58KB。界面：多选批量操作、键盘导航、长按进入多选、后台冻结。安卓：前台服务常驻通知可暂停、断网不烧重试、Android 9 及以下运行时申请存储权限。"
+  "version": "0.3.11",
+  "release_url": "https://github.com/smcloudcat/felldl/releases/tag/v0.3.11",
+  "published_at": "2026-11-28T06:27:22Z",
+  "notes": "新增 felldl-mcp：标准 stdio MCP 服务，7 个工具（添加/列表/查询/暂停/继续/取消/统计），Claude Desktop、Cursor 等 AI 客户端可直接操作下载；结果只回摘要，不回传 Cookie 与密码。本地 API 增加单任务查询与暂停/继续/取消端点，错误统一为稳定 code + 可重试标记。CI 触发分支改为 master，补齐格式门禁并把 MCP 单测纳入流水线。"
 }
