@@ -1,6 +1,6 @@
 {
-  "version": "0.3.11",
-  "release_url": "https://github.com/smcloudcat/felldl/releases/tag/v0.3.11",
-  "published_at": "2026-11-28T06:33:19Z",
-  "notes": "新增 felldl-mcp：标准 stdio MCP 服务，7 个工具（添加/列表/查询/暂停/继续/取消/统计），Claude Desktop、Cursor 等 AI 客户端可直接操作下载；结果只回摘要，不回传 Cookie 与密码。本地 API 增加单任务查询与暂停/继续/取消端点，错误统一为稳定 code + 可重试标记。CI 触发分支改为 master，补齐格式门禁并把 MCP 单测纳入流水线。"
+  "version": "0.4.0",
+  "release_url": "https://github.com/smcloudcat/felldl/releases/tag/v0.4.0",
+  "published_at": "2026-11-28T10:24:41Z",
+  "notes": "新增 macOS（dmg，arm64/x64）与 Linux（AppImage、deb）桌面版，三端共用同一套引擎；新增命令行 fdl：无界面下载、断点续传、任务管理，支持 --json。Linux AppImage 支持原地替换并重启，macOS 走 dmg 安装流程，Windows 更新方式不变。"
 }
