@@ -34,6 +34,11 @@ pub struct HelperArgs {
     pub from: PathBuf,
     pub to: PathBuf,
     pub restart: bool,
+    /// Unix 专用：等这个进程退出后再替换/重启。
+    ///
+    /// Windows 靠「改名失败」天然等到旧进程退出；Unix 上 rename 覆盖正在运行的程序
+    /// 是允许的，不等就会让新进程撞上单实例锁（新实例直接退出，用户以为更新没生效）。
+    pub wait_pid: Option<u32>,
 }
 
 /// 从 argv 解析 helper 参数；返回 None 表示这不是一次 helper 调用
@@ -43,12 +48,14 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Option<HelperArgs>
     let mut from = None;
     let mut to = None;
     let mut restart = false;
+    let mut wait_pid = None;
     while let Some(a) = it.next() {
         match a.as_str() {
             HELPER_FLAG => is_helper = true,
             "--from" => from = it.next().map(PathBuf::from),
             "--to" => to = it.next().map(PathBuf::from),
             "--restart" => restart = true,
+            "--wait-pid" => wait_pid = it.next().and_then(|v| v.parse().ok()),
             _ => {}
         }
     }
@@ -56,12 +63,18 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Option<HelperArgs>
         return None;
     }
     match (from, to) {
-        (Some(from), Some(to)) => Some(HelperArgs { from, to, restart }),
+        (Some(from), Some(to)) => Some(HelperArgs {
+            from,
+            to,
+            restart,
+            wait_pid,
+        }),
         // 参数不全：仍然是 helper 调用（否则会在用户机器上弹出主界面）
         _ => Some(HelperArgs {
             from: PathBuf::new(),
             to: PathBuf::new(),
             restart: false,
+            wait_pid,
         }),
     }
 }
@@ -162,6 +175,28 @@ pub fn replace_file(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
+/// 进程是否还活着。
+///
+/// Unix 用 `kill(pid, 0)`：不发信号，只做存在性检查。EPERM 也说明进程存在
+/// （只是不属于当前用户），不能当成「已退出」。
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if r == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Windows 不会传 `--wait-pid`（改名失败即等价于等待进程退出），保留占位
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> bool {
+    false
+}
+
 /// helper 主流程：返回进程退出码
 pub fn run(args: HelperArgs) -> i32 {
     if args.from.as_os_str().is_empty() || args.to.as_os_str().is_empty() {
@@ -175,6 +210,16 @@ pub fn run(args: HelperArgs) -> i32 {
     if !args.from.is_file() {
         log(&args.to, "新包不存在，放弃（保持旧版本）");
         return 3;
+    }
+
+    // Unix：等旧进程真正退出。否则新进程会和还没退干净的旧进程抢单实例锁，
+    // 直接「启动即隐身」——用户看到的是更新失败。
+    if let Some(pid) = args.wait_pid {
+        let deadline = std::time::Instant::now() + TOTAL_TIMEOUT;
+        while pid_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(RETRY_INTERVAL);
+        }
+        log(&args.to, &format!("旧进程 {pid} 已退出，开始替换"));
     }
 
     let deadline = std::time::Instant::now() + TOTAL_TIMEOUT;

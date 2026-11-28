@@ -33,6 +33,11 @@ mod foreground;
 mod native_cmd;
 // 更新落地 helper（同一 exe 的隐藏子命令，main 里在 Tauri 初始化前分流）
 pub mod update_helper;
+// Linux/macOS：判断更新包能否原地替换（AppImage / 裸二进制）。
+// 逻辑只用 std，所以 Windows 上也编译并跑单测——真正调用它的只有 Unix 分支。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg_attr(windows, allow(dead_code))]
+mod unix_update;
 
 struct AppState {
     engine: Arc<Engine>,
@@ -40,6 +45,10 @@ struct AppState {
     /// 更新包下载单飞：两个窗口/连点同时触发时，后一个立刻返回 `update.busy`，
     /// 而不是两个请求写同一个 `.part` 互相截断。
     update_busy: std::sync::atomic::AtomicBool,
+    /// 托盘是否创建成功。Linux 上缺少 appindicator 扩展时托盘建不出来，
+    /// 这时「关闭窗口 → 隐藏到托盘」会把应用变成关不掉也找不到，
+    /// 所以没有托盘时关闭窗口要按正常退出处理。
+    tray_ok: std::sync::atomic::AtomicBool,
 }
 
 /// 已通过「清单验签 + 摘要校验」、等待安装的更新包。
@@ -1812,10 +1821,30 @@ async fn apply_update(
         let path = update.path().to_string_lossy().to_string();
         install_android_update(&app, &path, update.version_code)
     }
-    // 其它桌面平台：交回系统默认程序
+    // 其它桌面平台：能原地换（AppImage / 裸二进制）就换掉再重启，
+    // 换不掉（dmg / deb）交回系统安装器。两种都要如实告诉前端结果。
     #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
     {
         use tauri_plugin_opener::OpenerExt;
+        if let Some(target) = unix_update::replace_target(update.path()) {
+            if let Ok(exe) = std::env::current_exe() {
+                let mut cmd = std::process::Command::new(&exe);
+                cmd.arg(crate::update_helper::HELPER_FLAG)
+                    .arg("--from")
+                    .arg(update.path())
+                    .arg("--to")
+                    .arg(&target)
+                    // 等本进程退出：Unix 上 rename 不等也行，但新实例会撞单实例锁
+                    .arg("--wait-pid")
+                    .arg(std::process::id().to_string())
+                    .arg("--restart");
+                if cmd.spawn().is_ok() {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    app.exit(0);
+                    return Ok("restarting".into());
+                }
+            }
+        }
         match app.opener().open_path(update.path(), None::<&str>) {
             Ok(_) => Ok("opened".into()),
             Err(_) => Ok("manual".into()),
@@ -2142,6 +2171,7 @@ pub fn run() {
                 engine: engine.clone(),
                 api_port: parking_lot_stub::PortCell::new(bound_port),
                 update_busy: std::sync::atomic::AtomicBool::new(false),
+                tray_ok: std::sync::atomic::AtomicBool::new(false),
             });
             // 待安装的已校验更新包（token → VerifiedUpdate）
             app.manage(VerifiedUpdates::default());
@@ -2222,16 +2252,34 @@ pub fn run() {
                 });
             }
 
+            // 托盘不是必需能力：Linux 缺 libayatana-appindicator 时创建会失败。
+            // 失败就让应用还能用（关闭窗口=退出），而不是在 setup 里 `?` 掉整个启动。
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            setup_tray(&handle)?;
+            match setup_tray(&handle) {
+                Ok(()) => {
+                    if let Some(st) = app.try_state::<AppState>() {
+                        st.tray_ok.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                Err(e) => eprintln!("[tray] 托盘不可用（{e}）：关闭窗口将直接退出"),
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
             // 关闭窗口时收进托盘而不是退出（桌面端）
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             if let WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
+                // 没有托盘就没有「再打开」的入口，隐藏等于把应用藏起来，
+                // 这时必须按默认行为退出。
+                let has_tray = window
+                    .app_handle()
+                    .try_state::<AppState>()
+                    .map(|s| s.tray_ok.load(std::sync::atomic::Ordering::Relaxed))
+                    .unwrap_or(false);
+                if has_tray {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
             }
             let _ = window;
             let _ = event;
@@ -2282,7 +2330,10 @@ pub fn run() {
         .expect("Felldl 启动失败");
 }
 
-/// 执行下载后动作。Windows：shutdown / 睡眠；其他平台暂不支持（静默忽略）。
+/// 执行下载后动作：关机 / 睡眠。
+///
+/// 三个桌面平台各有各的写法，且都不需要管理员权限（macOS 用 AppleScript
+/// 让 System Events 代劳，Linux 用 systemctl 的 logind 接口，都是用户会话内可用的）。
 fn execute_system_action(action: &str) {
     #[cfg(target_os = "windows")]
     {
@@ -2298,7 +2349,33 @@ fn execute_system_action(action: &str) {
         })
         .spawn();
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        let script = match action {
+            // 60 秒延迟，给用户 Ctrl-C 的机会（osascript 已退出，只能用系统自身延迟）
+            "shutdown" => "tell app \"System Events\" to shut down",
+            "sleep" => "tell app \"System Events\" to sleep",
+            _ => return,
+        };
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(script)
+            .spawn();
+    }
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "android", target_os = "ios"))
+    ))]
+    {
+        let _ = std::process::Command::new("systemctl")
+            .arg(match action {
+                "shutdown" => "poweroff",
+                "sleep" => "suspend",
+                _ => return,
+            })
+            .spawn();
+    }
+    #[cfg(target_os = "android")]
     {
         let _ = action;
     }
