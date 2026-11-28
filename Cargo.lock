@@ -1708,7 +1708,7 @@ dependencies = [
 
 [[package]]
 name = "felldl"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "felldl-core",
@@ -1729,7 +1729,7 @@ dependencies = [
 
 [[package]]
 name = "felldl-core"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "aes 0.8.4",
  "anyhow",
@@ -1760,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "felldl-mcp"
-version = "0.3.10"
+version = "0.3.11"
 dependencies = [
  "anyhow",
  "reqwest 0.12.28",
