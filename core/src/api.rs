@@ -10,12 +10,16 @@
 //!   POST /tasks/{id}/cancel  {delete_file?}   取消（可选连文件删除）
 //!   GET  /stats                      运行状态
 //!   GET  /config                     扩展/客户端配置
+//!   POST /mcp                        MCP（Streamable HTTP）：单条 JSON-RPC 消息
+//!   GET  /mcp                        405（不提供服务端主动推送的 SSE 流）
+//!   DELETE /mcp                      204（无状态实现，仅作协议兼容）
 //!
 //! 鉴权：请求头 `X-Felldl-Token` 或 query `?token=`，与设置里的 api_token 比对。
 //! 仅绑定 127.0.0.1，且校验 Origin 防止网页跨站调用。
 
 use crate::engine::Engine;
 use crate::model::AddTaskRequest;
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -273,6 +277,58 @@ async fn cancel_task(
     }
 }
 
+/// MCP Streamable HTTP（2025-03-26）：POST 一条 JSON-RPC 消息，返回一条响应。
+///
+/// 通知（无 id）按规范回 202 且不带 body；解析失败用 -32700 明确告知，
+/// 而不是回一个笼统的 400——客户端需要区分「协议错了」和「服务端挂了」。
+async fn mcp_post(
+    State(st): State<ApiState>,
+    Query(q): Query<TokenQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(r) = check_token(&st.engine, &headers, &q) {
+        return r;
+    }
+    let msg: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Json(crate::mcp::rpc_error(
+                serde_json::Value::Null,
+                -32700,
+                &format!("JSON 解析失败：{e}"),
+            ))
+            .into_response()
+        }
+    };
+    match crate::mcp::handle(&st.engine, &msg).await {
+        Some(resp) => Json(resp).into_response(),
+        None => StatusCode::ACCEPTED.into_response(),
+    }
+}
+
+/// 不提供服务端主动推送的 SSE 流：明确 405，让客户端走纯 JSON 请求-响应模式
+async fn mcp_get() -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        [(axum::http::header::ALLOW, "POST, DELETE")],
+        "该服务不提供 SSE 流，请用 POST 发送 JSON-RPC",
+    )
+        .into_response()
+}
+
+/// 无状态实现：没有会话可终止，但按规范给 204 而不是 404
+async fn mcp_delete(
+    State(st): State<ApiState>,
+    Query(q): Query<TokenQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = check_token(&st.engine, &headers, &q) {
+        return r;
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
 /// 启动 API 服务（非阻塞）。仅监听 127.0.0.1。
 pub async fn serve(engine: Arc<Engine>, port: u16) -> anyhow::Result<u16> {
     let st = ApiState {
@@ -288,6 +344,7 @@ pub async fn serve(engine: Arc<Engine>, port: u16) -> anyhow::Result<u16> {
         .route("/tasks/{id}/pause", post(pause_task))
         .route("/tasks/{id}/resume", post(resume_task))
         .route("/tasks/{id}/cancel", post(cancel_task))
+        .route("/mcp", get(mcp_get).post(mcp_post).delete(mcp_delete))
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)

@@ -1763,6 +1763,7 @@ name = "felldl-mcp"
 version = "0.3.11"
 dependencies = [
  "anyhow",
+ "felldl-core",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
