@@ -182,6 +182,9 @@ cargo run --release --example cli -- "https://example.com/file.zip" --conn 16 --
 6. 之后浏览器的下载会自动转交给 Felldl
 
 > 扩展只监听 `http(s)` 下载，且优先探测 Felldl 是否在线；离线时自动放行原生下载，不打断使用。
+>
+> 不想用仓库目录的，可在 Release 页下载 `Felldl-<版本>-extension.zip`，解压后在第 3 步选中解压出的
+> `extension` 目录即可，内容与仓库里的 `extension/` 一致。
 
 ---
 
@@ -193,6 +196,9 @@ Claude Desktop / Cursor / 各类 Agent 直接调用即可添加、查询、暂�
 ```bash
 cargo build -p felldl-mcp --release   # 产物：target/release/felldl-mcp.exe
 ```
+
+不想装 Rust 的，可以直接从 Release 下载预编译的 `Felldl-<版本>-mcp-win-x64.exe`，
+配置里把 `command` 指向它即可（`--version` 可查版本，`--help` 看参数）。
 
 客户端配置（以 Claude Desktop 为例）：
 
