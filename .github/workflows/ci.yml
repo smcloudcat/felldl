@@ -46,6 +46,9 @@ jobs:
           cargo test --locked -p felldl-core --test timeout_watchdog
       - name: Clippy (informational)
         run: cargo clippy --locked -p felldl-core --all-targets
+      # MCP 服务：纯协议与分发逻辑，不需要网络也不需要 GUI
+      - name: MCP tests
+        run: cargo test --locked -p felldl-mcp
 
   # 桌面端：tauri 在 Linux 需要 webkit2gtk 等系统库，直接跟开发环境一致用 Windows
   desktop:
