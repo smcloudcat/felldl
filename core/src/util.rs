@@ -379,9 +379,66 @@ impl RateLimiter {
     }
 }
 
+/// 应用的 bundle identifier，同时是数据目录名
+pub const APP_ID: &str = "com.felldl.app";
+
+/// 应用数据目录（任务库、设置、凭据）。
+///
+/// 规则必须与 Tauri 的 `app_data_dir()` 完全一致：CLI 用同一份逻辑定位数据，
+/// 否则「命令行加的任务在界面里看不到」这种问题只会在用户机器上出现。
+///
+/// | 平台 | 路径 |
+/// |---|---|
+/// | Windows | `%APPDATA%\com.felldl.app` |
+/// | macOS | `~/Library/Application Support/com.felldl.app` |
+/// | Linux | `$XDG_DATA_HOME/com.felldl.app` 或 `~/.local/share/com.felldl.app` |
+pub fn default_data_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Ok(p) = std::env::var("APPDATA") {
+            return PathBuf::from(p).join(APP_ID);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join(APP_ID);
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
+    {
+        if let Ok(x) = std::env::var("XDG_DATA_HOME") {
+            if !x.trim().is_empty() {
+                return PathBuf::from(x).join(APP_ID);
+            }
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join(APP_ID);
+        }
+    }
+    #[allow(unreachable_code)]
+    {
+        std::env::temp_dir().join(APP_ID)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_dir_is_absolute_and_versioned_by_app_id() {
+        let d = default_data_dir();
+        assert!(d.is_absolute(), "数据目录必须是绝对路径: {}", d.display());
+        // 目录名固定，改它等于让老用户丢掉全部任务
+        assert!(d.to_string_lossy().ends_with(APP_ID), "{}", d.display());
+    }
 
     #[test]
     fn parse_disposition_plain() {
