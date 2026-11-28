@@ -4,7 +4,7 @@
       {
         "arch": "x86_64",
         "platform": "windows",
-        "sha256": "108f0212c1db9549e81e6617cfa50466ac2e375d14615c185815ede14e75dbdd",
+        "sha256": "332fb570def70ee7e12b6cdad6a50acbfed6132ba3ee269547d940e4944b7c55",
         "size": 11708416,
         "url": "https://github.com/smcloudcat/felldl/releases/download/v0.4.0/Felldl-0.4.0-win-x64.exe",
         "version": "0.4.0"
@@ -55,5 +55,5 @@
     "published_at": "2026-11-28T10:24:41Z",
     "version": "0.4.0"
   },
-  "signature": "N9l6UxVoQEaSNzrHj1ZH89i62R6lW/idE/y7B6Gj2uiXz5dqiGqazOYX6/1TjFRjXhsKbb6F8LPXlsOqIMjZBg=="
+  "signature": "LRdKfSvEYKYw4AYJGt0HqnFFss9mQfN8geKl921emEvR0rUNZUN4dSKfbIYLd3t+L4ROL09GvljnA5L3QwczBA=="
 }
